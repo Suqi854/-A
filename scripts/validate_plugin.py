@@ -72,9 +72,9 @@ def main():
     component_paths = {row["path"] for row in provenance["files"] if row["status"] != "omitted"}
     omitted = {row["path"] for row in provenance["files"] if row["status"] == "omitted"}
     hashes = provenance["component_sha256"]
-    check(len(provenance["files"]) == provenance["source"]["file_count"] == 51, "source inventory count")
+    check(len(provenance["files"]) == provenance["source"]["file_count"] == 52, "source inventory count")
     check(len(component_paths) == provenance["public"]["component_file_count"] == 31, "component inventory count")
-    check(len(omitted) == provenance["summary"]["omitted"] == 20, "excluded inventory count")
+    check(len(omitted) == provenance["summary"]["omitted"] == 21, "excluded inventory count")
     check(set(hashes) == component_paths, "hash inventory differs from component inventory")
     check(sum(row["status"] == "modified" for row in provenance["files"]) == provenance["summary"]["modified"], "modified count")
     check(sum(row["status"] == "unchanged_text" for row in provenance["files"]) == provenance["summary"]["unchanged_text"], "retained count")

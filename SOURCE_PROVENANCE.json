@@ -3,17 +3,19 @@
   "source": {
     "name": "ashare-analysis-companion",
     "display_name": "A股分析技能",
-    "version": "1.13.2",
-    "release_id": "pluginrel_6ad5d4b8aabc819181542ec77bc051a5",
+    "version": "1.13.3",
+    "release_id": "pluginrel_6ad71ea9b6d08191a0382095ed5f45d2",
     "verified_date": "2026-10-20",
-    "retrieval": "Plugin Creator get_plugin_files, full inventory and 3 batches, same current release",
-    "file_count": 51,
+    "retrieval": "Incremental official source verification: complete 51-file baseline from 1.13.2, full 52-file inventory at 1.13.3, then read all four declared changed/new UTF-8 paths; same 1.13.3 release throughout",
+    "file_count": 52,
     "missing_paths": 0,
-    "size_limited_paths": 0
+    "size_limited_paths": 0,
+    "baseline_version": "1.13.2",
+    "baseline_release_id": "pluginrel_6ad5d4b8aabc819181542ec77bc051a5"
   },
   "public": {
     "name": "ashare-analysis-companion",
-    "version": "1.13.2-public.1",
+    "version": "1.13.3-public.1",
     "repository": "https://github.com/Suqi854/-A",
     "byte_identical_to_source_release": false,
     "component_file_count": 31
@@ -33,7 +35,7 @@
   "summary": {
     "unchanged_text": 2,
     "modified": 29,
-    "omitted": 20
+    "omitted": 21
   },
   "files": [
     {
@@ -212,6 +214,11 @@
       "reason": "excluded private history or individual case"
     },
     {
+      "path": "skills/ashare-strategy-validation/references/daily-review-case-2026-10-20.md",
+      "status": "omitted",
+      "reason": "excluded private history or individual case"
+    },
+    {
       "path": "skills/ashare-strategy-validation/references/daily-review-case-history-1.11.3.md",
       "status": "omitted",
       "reason": "excluded private history or individual case"
@@ -293,8 +300,8 @@
     }
   ],
   "component_sha256": {
-    ".codex-plugin/plugin.json": "11c6945e57d3f726ea372ccec10f1c3d28dd158763e3818eaec9dfe2e882aafc",
-    "plugin.json": "28e5bb77bfea726d8cd1a951b00b7ba6a7370ae2c6befe89cc47743df840c396",
+    ".codex-plugin/plugin.json": "8982e59ed02ce55336ae3af6900798667d52dbd26e59288ab7422a205a9d7cb8",
+    "plugin.json": "7eb0b16b799a7a169990a6b5fe0d81f73aa13a1f240d2c237cef2b2e8ff97682",
     "skills/ashare-analysis/SKILL.md": "696063db5712e1502784a5be4e128b342f6b69f340862d45b91b5a11e175eac0",
     "skills/ashare-analysis/references/data-coverage.md": "cdb7e3dde4e9893edb7397f8afc781d4fba0f9ad73baf27b8a19831433fc5b0d",
     "skills/ashare-analysis/references/history-index.md": "420be6262e995961cf703898b81f5d5dff8d6bf30d9a3ea60ab11508ac4ca3c3",
@@ -316,7 +323,7 @@
     "skills/ashare-session-briefing/references/report-contract.md": "f8e2d894636bc05f7f42dc6ba79673a56ccf66daf51a11f7c17cc58aad8bb2ba",
     "skills/ashare-session-briefing/references/sources-and-actors.md": "7d6d5af9fe5cf80f40c1b709aa8e1608f35845cecc9a186c069273e019f7e4de",
     "skills/ashare-strategy-validation/SKILL.md": "ff4822aab4ec058b24a4cc62e11a9e0c9a22bf96e5789317f9dd62f06426aedc",
-    "skills/ashare-strategy-validation/references/daily-review-method.md": "e86f1e0ea06fbbcbf5981033c26982ecfb0c6630ec8bc6e83505f6f6cc1ca7a7",
+    "skills/ashare-strategy-validation/references/daily-review-method.md": "11e9130413159c05a9348297e01bb5e022b200cbf6297ae15814f1d695043d0f",
     "skills/ashare-strategy-validation/references/evidence-and-ashare-gates.md": "3cc2735c2dd1bdec21afb4ac5c8809f343002753ad0e4c7b2bf5841381ab7836",
     "skills/ashare-strategy-validation/references/risk-models.md": "d3efb2e11d0a5f5498d33d07f3820ef5b4005a6549c8b0f367b062a76d274968",
     "skills/ashare-strategy-validation/references/validation-protocol.md": "8071c365ae0569f7a84481b77c60aab89994a7c0b266d407b4e75f0d575f0a51",
@@ -324,5 +331,19 @@
     "skills/ashare-swing-screen/references/screen-contract.md": "962b6769acc3f300938bded7edd1b96a62a43cb675344ab1a676e16edd114c7f",
     "skills/ashare-trade-review/SKILL.md": "d4cb84a76e446c20259fc52da234c168f5c7f7f63eceda77866c46036bde4a47",
     "skills/ashare-trade-review/references/review-contract.md": "ae5a5718614a65f4fc1a745bcd4d6489c1f508702f0e19cb640c034682a260e4"
-  }
+  },
+  "incremental_updates": [
+    {
+      "source_version": "1.13.3",
+      "source_release_id": "pluginrel_6ad71ea9b6d08191a0382095ed5f45d2",
+      "verified_changed_paths": [
+        "plugin.json",
+        ".codex-plugin/plugin.json",
+        "skills/ashare-strategy-validation/references/daily-review-method.md",
+        "skills/ashare-strategy-validation/references/daily-review-case-2026-10-20.md"
+      ],
+      "public_action": "Extract generic eligibility/outcome, alert timing/causality, source revision and forward-validation rules into daily-review-method; keep individual case excluded",
+      "parameter_changes": false
+    }
+  ]
 }
