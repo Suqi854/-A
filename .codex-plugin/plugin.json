@@ -1,0 +1,21 @@
+{
+  "interface": {
+    "displayName": "A股分析技能",
+    "shortDescription": "持仓做T、行业波段、量化验证与成交复盘",
+    "longDescription": "配合已连接工具给出有事实依据的首选、触发、失效与备选；研究持仓做T、数周波段与行业经营龙头，衔接基本面、成本后对照、滚动样本外及真实/模拟成交复盘。本包提供技能流程；L2、快照、提醒与云同步依赖另行接线和实际验证，不自动交易、不承诺收益。",
+    "developerName": "Plugin owner",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": "用已连接的行情工具分析指定A股的分时量价、日周月K线和MACD，说明竞价覆盖与缺失数据，并区分事实和主力意图假设。"
+  },
+  "name": "ashare-analysis-companion",
+  "version": "1.13.2-public.1",
+  "description": "Evidence-based Chinese A-share analysis: position T decisions, industry-leader and swing research, fundamentals, quantitative validation and trade review. Skills only; no server or trading functions.",
+  "author": {
+    "name": "Plugin owner"
+  },
+  "keywords": [],
+  "skills": "./skills"
+}
