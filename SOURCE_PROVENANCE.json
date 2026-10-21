@@ -15,7 +15,7 @@
   },
   "public": {
     "name": "ashare-analysis-companion",
-    "version": "1.13.3-public.2",
+    "version": "1.13.3-public.3",
     "repository": "https://github.com/Suqi854/-A",
     "byte_identical_to_source_release": false,
     "component_file_count": 31
@@ -300,10 +300,10 @@
     }
   ],
   "component_sha256": {
-    ".codex-plugin/plugin.json": "a980780012fbc659364c06b5bd103851cd3d9da14047454febf45bf41b0e0141",
-    "plugin.json": "0f7be1d2d48ac785f1696a83256cab9f90a4322293848cc6ff6f19e1ae354644",
+    ".codex-plugin/plugin.json": "2f1b0e11af630299ada95d249b1f9bb91c0a16c43a110d4e0a2293a7e5d5d229",
+    "plugin.json": "295ef468f0ba192f2e04c3ef480a823e58361e16fc6c066f86ae7f57e7da915a",
     "skills/ashare-analysis/SKILL.md": "91b1315e67c3b287a7c0009242542c945a453c1a907e65cc9f9598cff215d79c",
-    "skills/ashare-analysis/references/data-coverage.md": "f822036c581a8dea70372ed66a169e540d435e0d336cca1f116202ce72fee6c4",
+    "skills/ashare-analysis/references/data-coverage.md": "9ef0dc8c9a635760df8e3614bc7a574b31b050a3602b26919e51a7d183226507",
     "skills/ashare-analysis/references/history-index.md": "420be6262e995961cf703898b81f5d5dff8d6bf30d9a3ea60ab11508ac4ca3c3",
     "skills/ashare-analysis/references/intraday-t.md": "df1a43c4a88f4cc42d228563f9a206cc1e9663ff5ae66a2a2abbd77af7c31f67",
     "skills/ashare-analysis/references/ledger-and-sync.md": "ec6d8f55862008372462fd168bb3e2e2f17d89e83b81985e1f2b5abcb8654aef",
@@ -391,6 +391,32 @@
       "numeric_implementation_added": false,
       "private_plugin_modified_or_published": false,
       "runtime_validation_claimed": false
+    },
+    {
+      "date": "2026-10-21",
+      "base_commit": "a2f1a188c51a6ed343e5da30ed0ef44edb03aade",
+      "base_public_version": "1.13.3-public.2",
+      "public_version": "1.13.3-public.3",
+      "source_verification": "Reuse pinned public provenance; targeted authorized source-contract read, no private-plugin retrieval or full audit",
+      "contract": "public-core-reference-v1",
+      "schema_binding_status": "bound_to_frozen_source; live_business_response_and_production_skill_loading_not_verified",
+      "execution_source_version": "1.34.0-cloud.3",
+      "result_reference_schema": "strategy-result-reference-v1",
+      "shared_core_version": "strategy-core-v1.0.0",
+      "changed_components": [
+        ".codex-plugin/plugin.json",
+        "plugin.json",
+        "skills/ashare-analysis/references/data-coverage.md"
+      ],
+      "base_component_sha256": {
+        ".codex-plugin/plugin.json": "a980780012fbc659364c06b5bd103851cd3d9da14047454febf45bf41b0e0141",
+        "plugin.json": "0f7be1d2d48ac785f1696a83256cab9f90a4322293848cc6ff6f19e1ae354644",
+        "skills/ashare-analysis/references/data-coverage.md": "f822036c581a8dea70372ed66a169e540d435e0d336cca1f116202ce72fee6c4"
+      },
+      "numeric_implementation_added": false,
+      "private_plugin_modified_or_published": false,
+      "runtime_validation_claimed": false,
+      "publication": "not_performed"
     }
   ]
 }
