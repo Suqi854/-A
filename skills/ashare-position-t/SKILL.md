@@ -5,6 +5,8 @@ description: 围绕已有A股持仓，以股性、盘面与量价协调做T和�
 
 # 持仓与做T
 
+本技能的数值输出先遵守[统一核心结果引用合同](../ashare-analysis/references/data-coverage.md#统一核心结果引用合同)：只引用核心原结果，不自行重算；逐项保留 result_id、source_trading_date、fetched_at、core_version、data_coverage、validation_status 的原值或“待绑定／未知”。本页及后续材料中的公式和计算口径只供解释核心结果；拒绝、参考价、历史/前瞻/真实成交的区分均按该合同，缺原结果就给结构条件与缺口。
+
 先给当前首选“持有等待、先卖后买、先买后卖、减仓或加仓”，说明两三条事实、参考价区、目标、失效与备选。默认允许比较动态调仓与做T，两者可并行研究；等量恢复的T与改变最终持仓的调仓分别记决策，不把失败的T改名。已有明确偏好直接复用，不每轮询问模式，也不默认每天交易或因回本加码。
 
 日内策略只按[日内决策框架](references/intraday-decision-framework.md)执行：这是股性、盘面、事前定义的滚动量价窗口、四类候选、方向协调、计划版本与阶段提醒的唯一规则源。需要留痕用[计划记录](references/intraday-plan-record.md)；数据能力核共享[数据规范](../ashare-analysis/references/data-coverage.md)。

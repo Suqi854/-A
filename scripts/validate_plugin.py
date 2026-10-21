@@ -78,7 +78,7 @@ def main():
     check(set(hashes) == component_paths, "hash inventory differs from component inventory")
     check(sum(row["status"] == "modified" for row in provenance["files"]) == provenance["summary"]["modified"], "modified count")
     check(sum(row["status"] == "unchanged_text" for row in provenance["files"]) == provenance["summary"]["unchanged_text"], "retained count")
-    support = {"README.md", "VERSION", "SOURCE_PROVENANCE.json", "scripts/validate_plugin.py"}
+    support = {"README.md", "COMPATIBILITY.md", "VERSION", "SOURCE_PROVENANCE.json", "scripts/validate_plugin.py"}
     expected = component_paths | support
     actual = {p.relative_to(ROOT).as_posix() for p in ROOT.rglob("*") if p.is_file() and ".git" not in p.relative_to(ROOT).parts}
     check(actual == expected, "unexpected or missing files: " + repr(sorted(actual ^ expected)))
@@ -111,7 +111,7 @@ def main():
                 destination = (path.parent / unquote(target.split("#", 1)[0])).resolve()
                 check(destination.is_relative_to(ROOT), "link outside package: " + relative)
                 check(destination.is_file(), "broken link in " + relative + ": " + target)
-        if relative in component_paths or relative == "README.md":
+        if relative in component_paths or relative in {"README.md", "COMPATIBILITY.md"}:
             rules = {
                 "absolute local path": r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]",
                 "private service URL": r"https?://[^\s)]+\.chatgpt\.site",

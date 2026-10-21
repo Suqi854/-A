@@ -5,6 +5,8 @@ description: 审查A股策略、参数与风险，分别验证全部机会的报
 
 # 策略与量化验证
 
+本技能的数值输出先遵守[统一核心结果引用合同](../ashare-analysis/references/data-coverage.md#统一核心结果引用合同)：只引用核心原结果，不自行重算；逐项保留 result_id、source_trading_date、fetched_at、core_version、data_coverage、validation_status 的原值或“待绑定／未知”。本页及后续材料中的公式和计算口径只供解释核心结果；拒绝、参考价、历史/前瞻/真实成交的区分均按该合同，缺原结果就给结构条件与缺口。
+
 先给当前首选方案、证据层级和决定性缺口，再说明触发、失效与备选。允许等待与持有不操作；优先简单基准与可解释规则。
 
 日内规则唯一入口是[日内决策框架](../ashare-position-t/references/intraday-decision-framework.md)；全部机会、快慢对照、报价与成交分账、跨日基线、事前冻结的观察期与复盘节奏统一按[验证流程](references/validation-protocol.md)。成交录入与归因用[交易复盘](../ashare-trade-review/SKILL.md)，不因验证问题强制全市场研究。
