@@ -11,7 +11,7 @@
     "defaultPrompt": "用已连接的行情工具分析指定A股的分时量价、日周月K线和MACD，说明竞价覆盖与缺失数据，并区分事实和主力意图假设。"
   },
   "name": "ashare-analysis-companion",
-  "version": "1.13.3-public.1",
+  "version": "1.13.3-public.2",
   "description": "Evidence-based Chinese A-share analysis: position T decisions, industry-leader and swing research, fundamentals, quantitative validation and trade review. Skills only; no server or trading functions.",
   "author": {
     "name": "Plugin owner"

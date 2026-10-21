@@ -15,7 +15,7 @@
   },
   "public": {
     "name": "ashare-analysis-companion",
-    "version": "1.13.3-public.1",
+    "version": "1.13.3-public.2",
     "repository": "https://github.com/Suqi854/-A",
     "byte_identical_to_source_release": false,
     "component_file_count": 31
@@ -300,36 +300,36 @@
     }
   ],
   "component_sha256": {
-    ".codex-plugin/plugin.json": "8982e59ed02ce55336ae3af6900798667d52dbd26e59288ab7422a205a9d7cb8",
-    "plugin.json": "7eb0b16b799a7a169990a6b5fe0d81f73aa13a1f240d2c237cef2b2e8ff97682",
-    "skills/ashare-analysis/SKILL.md": "696063db5712e1502784a5be4e128b342f6b69f340862d45b91b5a11e175eac0",
-    "skills/ashare-analysis/references/data-coverage.md": "cdb7e3dde4e9893edb7397f8afc781d4fba0f9ad73baf27b8a19831433fc5b0d",
+    ".codex-plugin/plugin.json": "a980780012fbc659364c06b5bd103851cd3d9da14047454febf45bf41b0e0141",
+    "plugin.json": "0f7be1d2d48ac785f1696a83256cab9f90a4322293848cc6ff6f19e1ae354644",
+    "skills/ashare-analysis/SKILL.md": "91b1315e67c3b287a7c0009242542c945a453c1a907e65cc9f9598cff215d79c",
+    "skills/ashare-analysis/references/data-coverage.md": "f822036c581a8dea70372ed66a169e540d435e0d336cca1f116202ce72fee6c4",
     "skills/ashare-analysis/references/history-index.md": "420be6262e995961cf703898b81f5d5dff8d6bf30d9a3ea60ab11508ac4ca3c3",
     "skills/ashare-analysis/references/intraday-t.md": "df1a43c4a88f4cc42d228563f9a206cc1e9663ff5ae66a2a2abbd77af7c31f67",
     "skills/ashare-analysis/references/ledger-and-sync.md": "ec6d8f55862008372462fd168bb3e2e2f17d89e83b81985e1f2b5abcb8654aef",
     "skills/ashare-analysis/references/market-and-news.md": "0ca59fd6b5eeb368d21ed37ef67cb4ec583e05ba697851c2666e87cf27c4ce08",
     "skills/ashare-analysis/references/price-action.md": "4c0e6bfa72e770d7bd432184fcf8ae55fe2b3aeb4eb8230ba224091d95ef8acf",
     "skills/ashare-analysis/references/private-account-contract.md": "eace870f6bb3cd3c4b4b1e20cfa3be1dea89fe4d49293f6e96c1dff1438c2762",
-    "skills/ashare-fundamental-research/SKILL.md": "e36ee3edb8bdd39e7204851312b210df05834b6c2564d9599f2d1513ec724274",
+    "skills/ashare-fundamental-research/SKILL.md": "651e4cfde7f72386dd88030a9a1d822e93bf9d7fdb979ba1744e9b890bc36b85",
     "skills/ashare-fundamental-research/references/business-evidence.md": "dd3dbeb2a21ae4cef2081a74750ee7ba28d642554d3feb38daa44e8d242a618a",
     "skills/ashare-fundamental-research/references/sources-and-scope.md": "4e3d1e76e4d5d68997a8243e6dcc005e612061b40849f9321c2252e5aab7c476",
     "skills/ashare-fundamental-research/references/valuation-contract.md": "344cffd636109638463bcb4af34b3fc5bc48057fe0d6d1f20f81da282a9a4166",
-    "skills/ashare-position-t/SKILL.md": "ee5ffcb4d1c1b2dd08b9ef6f6f12139a46fc718e77ac22dfe1451408f90d14e4",
+    "skills/ashare-position-t/SKILL.md": "af69b6dd2dfbca25b58d2dc6a07e46ab1d60dbae72144dc2166a4c4e08b4e5f1",
     "skills/ashare-position-t/references/intraday-decision-framework.md": "fa2ca603c1a802818e21784aabe17dec5e474e70c336c59e885b35592dc691dc",
     "skills/ashare-position-t/references/intraday-plan-record.md": "4f5b59be5b3e7acaa76937bf8933816c8e84765f213877e103ec0d3ecd74c2ae",
     "skills/ashare-position-t/references/inventory-and-legs.md": "b6245632f21cc2e83cd48a591004ae6ecf93b787d8b81858cf6f0193646b3ac6",
-    "skills/ashare-session-briefing/SKILL.md": "db2abb8ec898a5a4cae028c8f32dd1734a1835c5bd1dd7cdfdb8a2d45e8405b0",
+    "skills/ashare-session-briefing/SKILL.md": "ddc2f546a8994896d400efbf43412ff522bde8045ced6278791e8f2b8e8eaa8c",
     "skills/ashare-session-briefing/references/local-runtime.md": "e12d9dc6c1f029a5f66633982cfdd3ef812d381cf1e5dcb84360d1cb2e21eadd",
     "skills/ashare-session-briefing/references/report-contract.md": "f8e2d894636bc05f7f42dc6ba79673a56ccf66daf51a11f7c17cc58aad8bb2ba",
     "skills/ashare-session-briefing/references/sources-and-actors.md": "7d6d5af9fe5cf80f40c1b709aa8e1608f35845cecc9a186c069273e019f7e4de",
-    "skills/ashare-strategy-validation/SKILL.md": "ff4822aab4ec058b24a4cc62e11a9e0c9a22bf96e5789317f9dd62f06426aedc",
+    "skills/ashare-strategy-validation/SKILL.md": "242c4a00a8a747dbb0c8b8561cbbebea0662364e0defd7ec484696acc9a9a3d2",
     "skills/ashare-strategy-validation/references/daily-review-method.md": "11e9130413159c05a9348297e01bb5e022b200cbf6297ae15814f1d695043d0f",
     "skills/ashare-strategy-validation/references/evidence-and-ashare-gates.md": "3cc2735c2dd1bdec21afb4ac5c8809f343002753ad0e4c7b2bf5841381ab7836",
     "skills/ashare-strategy-validation/references/risk-models.md": "d3efb2e11d0a5f5498d33d07f3820ef5b4005a6549c8b0f367b062a76d274968",
     "skills/ashare-strategy-validation/references/validation-protocol.md": "8071c365ae0569f7a84481b77c60aab89994a7c0b266d407b4e75f0d575f0a51",
-    "skills/ashare-swing-screen/SKILL.md": "c754b9065983bfb5364f802d04eb791bbdb0448974e6b3b07505ba3ccaf245f2",
+    "skills/ashare-swing-screen/SKILL.md": "7bbb44ca5a75ad56f399e413577146118b4a598cfab6d39ab5c254b16e29d423",
     "skills/ashare-swing-screen/references/screen-contract.md": "962b6769acc3f300938bded7edd1b96a62a43cb675344ab1a676e16edd114c7f",
-    "skills/ashare-trade-review/SKILL.md": "d4cb84a76e446c20259fc52da234c168f5c7f7f63eceda77866c46036bde4a47",
+    "skills/ashare-trade-review/SKILL.md": "1fca1188bc309917b522ce1127bc2669cef82f2437c20f0cf4ad7ab295a6c96c",
     "skills/ashare-trade-review/references/review-contract.md": "ae5a5718614a65f4fc1a745bcd4d6489c1f508702f0e19cb640c034682a260e4"
   },
   "incremental_updates": [
@@ -344,6 +344,53 @@
       ],
       "public_action": "Extract generic eligibility/outcome, alert timing/causality, source revision and forward-validation rules into daily-review-method; keep individual case excluded",
       "parameter_changes": false
+    }
+  ],
+  "public_adaptations": [
+    {
+      "date": "2026-10-21",
+      "base_commit": "48d48cedd5484786f89aae7f65c183bb876f8d06",
+      "base_public_version": "1.13.3-public.1",
+      "public_version": "1.13.3-public.2",
+      "branch": "adapt/unified-core-contract-20261021",
+      "source_verification": "Reuse existing public provenance; no fresh private-plugin source retrieval or full audit",
+      "contract": "public-core-reference-v1",
+      "schema_binding_status": "pending_public_schema_and_same_version_response",
+      "execution_public_snapshot": {
+        "repository": "https://github.com/Suqi854/A-",
+        "commit": "2593b34308f3533d937212d51b9d8cc2be39ccdd",
+        "scope": "read-only public tree and connection documentation; no unified core schema in this snapshot"
+      },
+      "changed_components": [
+        ".codex-plugin/plugin.json",
+        "plugin.json",
+        "skills/ashare-analysis/SKILL.md",
+        "skills/ashare-analysis/references/data-coverage.md",
+        "skills/ashare-fundamental-research/SKILL.md",
+        "skills/ashare-position-t/SKILL.md",
+        "skills/ashare-session-briefing/SKILL.md",
+        "skills/ashare-strategy-validation/SKILL.md",
+        "skills/ashare-swing-screen/SKILL.md",
+        "skills/ashare-trade-review/SKILL.md"
+      ],
+      "base_component_sha256": {
+        ".codex-plugin/plugin.json": "8982e59ed02ce55336ae3af6900798667d52dbd26e59288ab7422a205a9d7cb8",
+        "plugin.json": "7eb0b16b799a7a169990a6b5fe0d81f73aa13a1f240d2c237cef2b2e8ff97682",
+        "skills/ashare-analysis/SKILL.md": "696063db5712e1502784a5be4e128b342f6b69f340862d45b91b5a11e175eac0",
+        "skills/ashare-analysis/references/data-coverage.md": "cdb7e3dde4e9893edb7397f8afc781d4fba0f9ad73baf27b8a19831433fc5b0d",
+        "skills/ashare-fundamental-research/SKILL.md": "e36ee3edb8bdd39e7204851312b210df05834b6c2564d9599f2d1513ec724274",
+        "skills/ashare-position-t/SKILL.md": "ee5ffcb4d1c1b2dd08b9ef6f6f12139a46fc718e77ac22dfe1451408f90d14e4",
+        "skills/ashare-session-briefing/SKILL.md": "db2abb8ec898a5a4cae028c8f32dd1734a1835c5bd1dd7cdfdb8a2d45e8405b0",
+        "skills/ashare-strategy-validation/SKILL.md": "ff4822aab4ec058b24a4cc62e11a9e0c9a22bf96e5789317f9dd62f06426aedc",
+        "skills/ashare-swing-screen/SKILL.md": "c754b9065983bfb5364f802d04eb791bbdb0448974e6b3b07505ba3ccaf245f2",
+        "skills/ashare-trade-review/SKILL.md": "d4cb84a76e446c20259fc52da234c168f5c7f7f63eceda77866c46036bde4a47"
+      },
+      "added_support_files": [
+        "COMPATIBILITY.md"
+      ],
+      "numeric_implementation_added": false,
+      "private_plugin_modified_or_published": false,
+      "runtime_validation_claimed": false
     }
   ]
 }

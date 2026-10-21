@@ -5,6 +5,8 @@ description: 为当前本人会话制作A股盘前简报或晚间市场复盘，
 
 # 早晚会话简报
 
+本技能的数值输出先遵守[统一核心结果引用合同](../ashare-analysis/references/data-coverage.md#统一核心结果引用合同)：只引用核心原结果，不自行重算；逐项保留 result_id、source_trading_date、fetched_at、core_version、data_coverage、validation_status 的原值或“待绑定／未知”。本页及后续材料中的公式和计算口径只供解释核心结果；拒绝、参考价、历史/前瞻/真实成交的区分均按该合同，缺原结果就给结构条件与缺口。
+
 先回答市场与每只持仓当前最值得采取的方向及理由。给一个有证据的主判断、转强/转弱触发与反证；等待、继续持有或减少操作可以是首选。不要用新闻堆砌、固定乐观/中性/悲观三情景或无依据的概率替代判断。
 
 本技能是分析流程，不是调度器。首次运行及运行状态变化时读[本机接入](references/local-runtime.md)；准备报告时读[报告与预测合同](references/report-contract.md)；采集与各方动作核查读[来源与各方证据](references/sources-and-actors.md)。其余数据口径复用[共享数据规范](../ashare-analysis/references/data-coverage.md)。

@@ -5,6 +5,8 @@ description: 对指定A股、私人自选或公开行业池做数周波段与固
 
 # 波段与行业候选
 
+本技能的数值输出先遵守[统一核心结果引用合同](../ashare-analysis/references/data-coverage.md#统一核心结果引用合同)：只引用核心原结果，不自行重算；逐项保留 result_id、source_trading_date、fetched_at、core_version、data_coverage、validation_status 的原值或“待绑定／未知”。本页及后续材料中的公式和计算口径只供解释核心结果；拒绝、参考价、历史/前瞻/真实成交的区分均按该合同，缺原结果就给结构条件与缺口。
+
 先给当前首选候选或“暂无可选”，说明关键依据、触发/失效和备选。优先可解释规则，再讨论模型；经营龙头、量价匹配、热点成员和适合买入分别评价，不混成一个分数。
 
 先读共用[数据规范](../ashare-analysis/references/data-coverage.md)相关部分，按[筛选契约](references/screen-contract.md)确认实际接口和覆盖。已有固定筛选入口按实际schema使用；新的行业研究流程不改工具公式、参数或数据服务。
