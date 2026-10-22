@@ -1,0 +1,1 @@
+{"pick":{"times":["09:26","14:45"],"max_picks":5,"min_score":70},"risk":{"stop_atr":2,"max_stop_pct":0.1,"rr_1":1.5,"rr_2":3,"max_hold_days":10},"emotions":["逻辑驱动","计划内","跟随系统","追涨","抄底","恐慌","贪心","跟风"],"static":true,"ai":{"provider":"DeepSeek","model":"deepseek-flash"},"look":{}}
