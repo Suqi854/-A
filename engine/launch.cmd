@@ -12,11 +12,12 @@ if not defined PY (
   pause
   exit /b 1
 )
-powershell -NoProfile -Command "if (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*aq5.server*' }) { exit 1 } else { exit 0 }"
+powershell -NoProfile -Command "if (Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like '*aq5.server*' }) { exit 1 } else { exit 0 }"
 if errorlevel 1 (
   echo [A-Quant] already running
 ) else (
-  start "A-Quant 5.0 - close this window to stop" /min %PY% -m aq5.server
+  if not exist data mkdir data
+  start "A-Quant 5.0 - close this window to stop" /min cmd /c "%PY% -m aq5.server >> data\server.log 2>&1"
   timeout /t 3 /nobreak >nul
 )
 start "" http://127.0.0.1:18950
