@@ -62,8 +62,11 @@ def main():
         check(meta.get("name") == p.parent.name, "技能名与目录不一致: " + p.parent.name)
         check(len(meta.get("description", "")) >= 20, "技能描述过短: " + p.parent.name)
 
-    files = [p for p in ROOT.rglob("*") if p.is_file() and ".git" not in p.relative_to(ROOT).parts]
-    check(not any(p.relative_to(ROOT).parts[:2] == ("engine", "data") for p in files), "engine/data 不应进入仓库")
+    ignored = ("engine/data/", "engine/data_demo/")
+    files = [p for p in ROOT.rglob("*") if p.is_file() and ".git" not in p.relative_to(ROOT).parts
+             and "__pycache__" not in p.parts and not p.relative_to(ROOT).as_posix().startswith(ignored)]
+    gi = (ROOT / ".gitignore").read_text(encoding="utf-8") if (ROOT / ".gitignore").exists() else ""
+    check("engine/data/" in gi, ".gitignore 必须排除 engine/data/（本机数据不进仓库）")
     rules = {
         "token": r"\bgh[pousr]_[A-Za-z0-9]{20,}\b|\bsk-[A-Za-z0-9]{20,}\b|\bSCT[A-Za-z0-9]{20,}\b",
         "private key": r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
