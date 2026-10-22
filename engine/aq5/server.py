@@ -12,21 +12,40 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import analysis, backtest, db, learn, market, notify, picker, publisher, scheduler, sim
-from .config import MOCK, WEB, load_settings, now, public_settings, save_settings
+from .config import DATA, MOCK, WEB, load_settings, now, public_settings, save_settings
 from .strategies import DESC, NAMES
 
 VERSION = "5.0.0"
 
 
 def lan_ip() -> str:
+    """手机能访问的局域网地址：优先 192.168 / 10 / 172.16-31，排除代理软件的虚拟网卡（198.18.x 等）。"""
+    cands = []
+    try:
+        cands += [i[4][0] for i in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)]
+    except OSError:
+        pass
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("10.255.255.255", 1))
-        ip = s.getsockname()[0]
+        cands.append(s.getsockname()[0])
         s.close()
-        return ip
     except OSError:
-        return "127.0.0.1"
+        pass
+
+    def rank(ip):
+        if ip.startswith("192.168.137."):  # Windows 移动热点网卡，通常不是手机所在的网
+            return 5
+        if ip.startswith("192.168."):
+            return 0
+        if ip.startswith("10."):
+            return 1
+        p = ip.split(".")
+        if p[0] == "172" and 16 <= int(p[1]) <= 31:
+            return 2
+        return 9
+    good = sorted({c for c in cands if not c.startswith(("127.", "198.18.", "198.19.", "169.254."))}, key=rank)
+    return good[0] if good else "127.0.0.1"
 
 
 def clean(o):
@@ -69,7 +88,7 @@ def api_overview(_q):
             "indices": [idx.get(market.norm_code(c)) for c in s["indices"] if idx.get(market.norm_code(c))],
             "overseas": [ovs.get(c) for c in s["overseas"] if ovs.get(c)],
             "watchlist": [wl.get(market.norm_code(c)) or {"code": market.norm_code(c)} for c in s["watchlist"]],
-            "breadth": br, "regime": reg, "top": top, "bottom": bottom, "inflow": inflow,
+            "breadth": br, "snap": market.SNAP_INFO, "regime": reg, "top": top, "bottom": bottom, "inflow": inflow,
             "last_run": picker.runs(1)[0] if last else None, "accounts": accts,
             "events": db.q("SELECT * FROM events ORDER BY id DESC LIMIT 30"),
             "scheduler": scheduler.STATUS, "picker": picker.STATE, "publish": publisher.STATE,
@@ -255,8 +274,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "max-age=300" if cache else "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.end_headers()
+            self.wfile.write(body)
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            pass  # 浏览器提前关闭了连接，忽略
 
     def _json(self, obj, code=200):
         self._send(code, json.dumps(clean(obj), ensure_ascii=False).encode("utf-8"))
@@ -293,6 +315,12 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, f.read_bytes(), ctype, cache=f.suffix in (".png", ".svg", ".woff2"))
 
     def do_POST(self):
+        if urlparse(self.path).path == "/api/admin/restart":
+            if self.client_address[0] not in ("127.0.0.1", "::1"):
+                return self._json({"error": "只允许本机重启"}, 403)
+            self._json({"ok": True, "message": "服务将在 1 秒后重启"})
+            threading.Thread(target=_restart, daemon=True).start()
+            return
         n = int(self.headers.get("Content-Length") or 0)
         try:
             body = json.loads(self.rfile.read(n) or b"{}")
@@ -302,13 +330,30 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
 
 
+def _restart():
+    """更新代码后重启自身（新进程接管端口）。"""
+    import os
+    import subprocess
+    import time as _t
+    _t.sleep(1)
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    log = open(os.path.join(str(DATA), "server-restart.log"), "a", encoding="utf-8")
+    subprocess.Popen([sys.executable, "-c", "import time;time.sleep(2);from aq5.server import main;main()"],
+                     cwd=str(WEB.parent), stdout=log, stderr=log, creationflags=flags)
+    os._exit(0)
+
+
 def main():
     db.init()
     sim.ensure_accounts()
     market.ensure_universe_mock()
     s = load_settings()
     port = int(sys.argv[1]) if len(sys.argv) > 1 else s["port"]
-    httpd = ThreadingHTTPServer((s["host"], port), Handler)
+    try:
+        httpd = ThreadingHTTPServer((s["host"], port), Handler)
+    except OSError as e:
+        print(f"端口 {port} 已被占用（A量化可能已经在运行）：{e}", flush=True)
+        return
     httpd.daemon_threads = True
     scheduler.start()
     if not db.q1("SELECT 1 FROM samples LIMIT 1"):

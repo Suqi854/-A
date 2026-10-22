@@ -11,6 +11,8 @@ import random
 import re
 import threading
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -35,20 +37,73 @@ def _cached(key: str, ttl: float, fn):
     return val
 
 
+class Blocked(RuntimeError):
+    """数据源的防火墙拦截了本机（请求太频繁），一段时间内暂停访问该站点。"""
+
+
+_host_lock = threading.Lock()
+_host_state: dict[str, dict] = {}   # host -> {"next": 时间戳, "blocked_until": 时间戳}
+_host_sem: dict[str, threading.Semaphore] = {}
+MIN_INTERVAL = {"web.ifzq.gtimg.cn": 0.35, "push2his.eastmoney.com": 0.4, "push2.eastmoney.com": 0.3,
+                "qt.gtimg.cn": 0.05, "quotes.sina.cn": 0.4}
+
+
+def host_status() -> dict:
+    t = time.time()
+    return {h: round(v["blocked_until"] - t) for h, v in _host_state.items() if v.get("blocked_until", 0) > t}
+
+
+def _throttle(host: str):
+    with _host_lock:
+        st = _host_state.setdefault(host, {"next": 0.0, "blocked_until": 0.0})
+        if st["blocked_until"] > time.time():
+            raise Blocked(f"{host} 暂时被限流，{int(st['blocked_until'] - time.time())} 秒后再试")
+        wait = max(0.0, st["next"] - time.time())
+        st["next"] = max(st["next"], time.time()) + MIN_INTERVAL.get(host, 0.1)
+        sem = _host_sem.setdefault(host, threading.Semaphore(2 if host in MIN_INTERVAL else 4))
+    if wait:
+        time.sleep(wait)
+    return sem
+
+
+def _block(host: str, secs: int):
+    with _host_lock:
+        _host_state.setdefault(host, {"next": 0.0, "blocked_until": 0.0})["blocked_until"] = time.time() + secs
+    try:
+        db.event("system", f"数据源 {host} 拦截了请求，暂停 {secs // 60} 分钟", "请求太频繁触发了对方的防火墙，已自动降速并切换备用数据源", "warn")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def http_get(url: str, referer: str = "https://finance.qq.com", timeout: float = 8, retries: int = 2) -> bytes:
+    host = urllib.parse.urlsplit(url).hostname or ""
     last = None
     for i in range(retries + 1):
+        sem = _throttle(host)
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": referer,
-                                                       "Accept-Encoding": "gzip"})
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                raw = r.read()
-                if r.headers.get("Content-Encoding") == "gzip":
-                    raw = gzip.decompress(raw)
-                return raw
+            with sem:
+                req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": referer,
+                                                           "Accept-Encoding": "gzip"})
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    final = r.geturl()
+                    raw = r.read()
+                    if r.headers.get("Content-Encoding") == "gzip":
+                        raw = gzip.decompress(raw)
+            if "waf.tencent.com" in final or raw[:200].lstrip().startswith(b"<") and b"501" in raw[:3000]:
+                _block(host, 900)
+                raise Blocked(f"{host} 防火墙拦截")
+            return raw
+        except Blocked:
+            raise
+        except urllib.error.HTTPError as e:
+            last = e
+            if e.code in (403, 429, 501):
+                _block(host, 900)
+                raise Blocked(f"{host} 返回 {e.code}")
+            time.sleep(0.6 * (i + 1))
         except Exception as e:  # noqa: BLE001 - 网络错误种类很多，统一重试
             last = e
-            time.sleep(0.4 * (i + 1))
+            time.sleep(0.6 * (i + 1))
     raise RuntimeError(f"请求失败: {url[:80]} ({last})")
 
 
@@ -147,7 +202,7 @@ EM_FIELDS = "f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13,f14,f15,f16,f17,f18,f20,f21
 def _em_page(pn: int) -> tuple[int, list]:
     url = ("https://push2.eastmoney.com/api/qt/clist/get?pn=%d&pz=100&po=1&np=1&fltt=2&invt=2&fid=f12"
            "&fs=m:0+t:6,m:1+t:2&fields=%s" % (pn, EM_FIELDS))
-    d = json.loads(http_get(url, "https://quote.eastmoney.com/", retries=3))
+    d = json.loads(http_get(url, "https://quote.eastmoney.com/", timeout=6, retries=1))
     data = d.get("data") or {}
     return int(data.get("total") or 0), data.get("diff") or []
 
@@ -167,46 +222,96 @@ def _em_row(r: dict) -> dict | None:
             "main_net": _f(r.get("f62")), "main_pct": _f(r.get("f184"))}
 
 
-def snapshot(force: bool = False) -> list[dict]:
-    """沪深主板全市场实时快照（约3000+只）。东财为主，失败页由腾讯批量报价补齐。"""
-    if MOCK:
-        return mock.snapshot()
+_em_state = {"bad_until": 0.0}
 
-    def load():
-        total, first = _em_page(1)
-        rows = list(first)
-        pages = max(1, (total + 99) // 100)
-        failed = []
 
-        def one(pn):
-            try:
-                return pn, _em_page(pn)[1]
-            except RuntimeError:
-                return pn, None
-        for pn, part in ThreadPoolExecutor(max_workers=4).map(one, range(2, pages + 1)):
+def _main_board_codes() -> list[str]:
+    """沪深主板全部可能代码（腾讯不存在的代码会被自动忽略）。"""
+    sh = [f"sh{p}{i:03d}" for p in ("600", "601", "603", "605") for i in range(1000)]
+    sz = [f"sz{p}{i:03d}" for p in ("000", "001", "002", "003") for i in range(1000)]
+    return sh + sz
+
+
+def _tencent_snapshot() -> dict:
+    """东财不可用时的备用：腾讯批量报价扫全主板（无主力资金字段）。"""
+    uni = [u["code"] for u in db.q("SELECT code FROM universe")]
+    codes = uni if len(uni) > 2500 else _main_board_codes()
+    out = {}
+    batches = [codes[i:i + 80] for i in range(0, len(codes), 80)]
+
+    def one(b):
+        try:
+            return _parse_tencent(http_get("https://qt.gtimg.cn/q=" + ",".join(b), retries=1).decode("gbk", "ignore"))
+        except RuntimeError:
+            return {}
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        for part in ex.map(one, batches):
+            for c, qd in part.items():
+                if is_main_board(c) and qd.get("name"):
+                    out[c] = {**qd, "main_net": None, "main_pct": None, "listed": None}
+    return out
+
+
+def _em_snapshot() -> dict:
+    total, first = _em_page(1)
+    rows = list(first)
+    pages = max(1, (total + 99) // 100)
+    failed = []
+
+    def one(pn):
+        time.sleep(0.15 * (pn % 3))
+        try:
+            return pn, _em_page(pn)[1]
+        except RuntimeError:
+            return pn, None
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        for pn, part in ex.map(one, range(2, pages + 1)):
             if part is None:
                 failed.append(pn)
             else:
                 rows.extend(part)
-        for pn in failed:  # 慢速重试一次
-            time.sleep(0.8)
+    for pn in failed:  # 慢速重试一次
+        time.sleep(1.0)
+        try:
+            rows.extend(_em_page(pn)[1])
+        except RuntimeError:
+            pass
+    out = {r["code"]: r for r in (_em_row(x) for x in rows) if r}
+    uni = [u["code"] for u in db.q("SELECT code FROM universe")]
+    missing = [c for c in uni if c not in out]
+    if missing:  # 东财缺页 -> 腾讯补
+        for c, qd in quotes(missing).items():
+            if is_main_board(c):
+                out[c] = {**qd, "main_net": None, "main_pct": None, "listed": None}
+    return out
+
+
+SNAP_INFO = {"source": None, "time": None}
+
+
+def snapshot(force: bool = False) -> list[dict]:
+    """沪深主板全市场实时快照（约3000+只）。东财为主（含主力资金）；东财连不上时自动改用腾讯。"""
+    if MOCK:
+        return mock.snapshot()
+
+    def load():
+        out, src = {}, "eastmoney"
+        if time.time() > _em_state["bad_until"]:
             try:
-                rows.extend(_em_page(pn)[1])
+                out = _em_snapshot()
             except RuntimeError:
-                pass
-        out = {r["code"]: r for r in (_em_row(x) for x in rows) if r}
-        uni = {u["code"]: u for u in db.q("SELECT code, name FROM universe")}
-        missing = [c for c in uni if c not in out]
-        if missing:  # 东财缺页 -> 腾讯补
-            for c, qd in quotes(missing).items():
-                if is_main_board(c):
-                    out[c] = {**qd, "main_net": None, "main_pct": None, "listed": None}
-        if out:
-            with db.tx() as c:
-                c.executemany("INSERT INTO universe(code,name,mcap,fmcap,updated) VALUES(?,?,?,?,?) "
-                              "ON CONFLICT(code) DO UPDATE SET name=excluded.name, mcap=excluded.mcap, "
-                              "fmcap=excluded.fmcap, updated=excluded.updated",
-                              [(r["code"], r["name"], r.get("mcap"), r.get("fmcap"), today()) for r in out.values()])
+                _em_state["bad_until"] = time.time() + 600  # 10 分钟内不再尝试东财
+        if len(out) < 1000:
+            src = "tencent"
+            out = {**_tencent_snapshot(), **out}
+        if not out:
+            raise RuntimeError("东财和腾讯的全市场行情都取不到，请检查网络")
+        SNAP_INFO.update(source=src, time=now().strftime("%H:%M:%S"))
+        with db.tx() as c:
+            c.executemany("INSERT INTO universe(code,name,mcap,fmcap,updated) VALUES(?,?,?,?,?) "
+                          "ON CONFLICT(code) DO UPDATE SET name=excluded.name, mcap=excluded.mcap, "
+                          "fmcap=excluded.fmcap, updated=excluded.updated",
+                          [(r["code"], r["name"], r.get("mcap"), r.get("fmcap"), today()) for r in out.values()])
         return list(out.values())
     ttl = 30.0 if market_phase() in ("trading", "auction", "pre", "close_auction") else 300.0
     return _cached("snapshot", 0 if force else ttl, load)
@@ -236,31 +341,66 @@ def breadth(rows: list[dict]) -> dict:
 
 
 # ----------------------------------------------------------------------------- 日K（前复权）
-def _fetch_kline(code: str, n: int) -> list[dict]:
-    url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={code},day,,,{n},qfq"
-    d = json.loads(http_get(url))
+def _kline_tencent(code: str, n: int) -> list[dict]:
+    d = json.loads(http_get(f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={code},day,,,{n},qfq"))
     node = (d.get("data") or {}).get(code) or {}
     arr = node.get("qfqday") or node.get("day") or []
+    return [{"date": a[0], "open": float(a[1]), "close": float(a[2]), "high": float(a[3]), "low": float(a[4]),
+             "vol": float(a[5]) * 100} for a in arr if len(a) >= 6]
+
+
+def _kline_eastmoney(code: str, n: int) -> list[dict]:
+    secid = ("1." if code.startswith("sh") else "0.") + code[2:]
+    url = ("https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=%s&fields1=f1,f2,f3"
+           "&fields2=f51,f52,f53,f54,f55,f56&klt=101&fqt=1&lmt=%d&end=20500101" % (secid, n))
+    d = json.loads(http_get(url, "https://quote.eastmoney.com/", timeout=8, retries=1))
     out = []
-    for a in arr:
-        if len(a) >= 6:
-            out.append({"date": a[0], "open": float(a[1]), "close": float(a[2]), "high": float(a[3]),
-                        "low": float(a[4]), "vol": float(a[5]) * 100})
+    for s_ in ((d.get("data") or {}).get("klines") or []):
+        p = s_.split(",")
+        out.append({"date": p[0], "open": float(p[1]), "close": float(p[2]), "high": float(p[3]), "low": float(p[4]),
+                    "vol": float(p[5]) * 100})
     return out
 
 
-def kline(code: str, n: int = 250, refresh: bool = False) -> list[dict]:
+def _fetch_kline(code: str, n: int) -> list[dict]:
+    """前复权日K：腾讯为主，东财备用（被限流时自动切换）。"""
+    last = None
+    for fn in (_kline_tencent, _kline_eastmoney):
+        try:
+            rows = fn(code, n)
+            if rows:
+                return rows
+        except (RuntimeError, ValueError, KeyError) as e:
+            last = e
+    raise RuntimeError(f"日K获取失败 {code}: {last}")
+
+
+def _last_close_stamp() -> str:
+    """最近一个已收盘交易日的 'YYYY-MM-DD 15:05'（按工作日估算）。"""
+    t = now()
+    d = t.date()
+    if t.hour * 100 + t.minute < 1505 or t.weekday() >= 5:
+        d -= timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d.isoformat() + " 15:05"
+
+
+def kline(code: str, n: int = 250, refresh: bool = False, history: bool = False) -> list[dict]:
     code = norm_code(code)
     if MOCK:
         return mock.kline(code, n)
     meta = db.q1("SELECT updated, n FROM kline_meta WHERE code=?", (code,))
     t = now()
     fresh = False
-    if meta and meta["n"] >= min(n, 120) and meta["updated"][:10] == today():
-        if t.hour * 100 + t.minute >= 1505:
-            fresh = meta["updated"][11:] >= "15:05"          # 收盘后需要拿到终版日线
-        else:
-            fresh = meta["updated"][11:13] == t.strftime("%H")  # 盘中每小时更新一次
+    if meta and meta["n"] >= min(n, 120):
+        if history:  # 只需要截至上一个收盘日的历史（选股、学习用），一天只拉一次
+            fresh = meta["updated"] >= _last_close_stamp()
+        elif meta["updated"][:10] == today():
+            if t.hour * 100 + t.minute >= 1505:
+                fresh = meta["updated"][11:] >= "15:05"          # 收盘后需要拿到终版日线
+            else:
+                fresh = meta["updated"][11:13] == t.strftime("%H")  # 盘中每小时更新一次
     if refresh or not fresh:
         try:
             rows = _fetch_kline(code, max(n, 250))

@@ -94,11 +94,11 @@ def _run(session: str, top_n: int) -> dict:
 
     def load(r):
         try:
-            return r, market.kline(r["code"], 130)
-        except RuntimeError:
+            return r, market.kline(r["code"], 130, history=True)
+        except RuntimeError:  # 含 Blocked
             return r, []
     evaluated = []
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    with ThreadPoolExecutor(max_workers=3) as ex:
         for r, rows in ex.map(load, cand):
             STATE["progress"] += 1
             if len(rows) < 60:
@@ -122,7 +122,7 @@ def _run(session: str, top_n: int) -> dict:
     def refine(ev):
         try:
             flows = market.fundflow(ev["code"], 10)
-            rows = market.kline(ev["code"], 130)
+            rows = market.kline(ev["code"], 130, history=True)
             if rows and rows[-1]["date"] == today():
                 rows = rows[:-1]
             r = ev["row"]

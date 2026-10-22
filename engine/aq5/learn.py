@@ -62,7 +62,7 @@ def fill_outcomes() -> dict:
     for p in pend:
         if p["code"] not in cache:
             try:
-                cache[p["code"]] = market.kline(p["code"], 120)
+                cache[p["code"]] = market.kline(p["code"], 120, history=True)
             except RuntimeError:
                 cache[p["code"]] = []
         rows = [r for r in cache[p["code"]] if r["date"] > p["date"]]
@@ -246,7 +246,7 @@ def predict(raw: dict, sigs, total: float) -> tuple[float, str]:
 BOOT = {"running": False, "progress": 0, "total": 0, "msg": ""}
 
 
-def bootstrap(n_stocks: int = 300, days: int = 80, step: int = 2) -> dict:
+def bootstrap(n_stocks: int = 200, days: int = 80, step: int = 2) -> dict:
     """历史冷启动：在历史K线上“回到过去”逐日计算因子，并用之后3日的真实涨跌做标签。
     这样不用等几周实盘，第一天就能做因子IC评估和模型训练。"""
     from concurrent.futures import ThreadPoolExecutor
@@ -273,7 +273,7 @@ def bootstrap(n_stocks: int = 300, days: int = 80, step: int = 2) -> dict:
 
         def work(code):
             try:
-                rows = market.kline(code, days + 140)
+                rows = market.kline(code, days + 140, history=True)
             except RuntimeError:
                 return []
             res = []
@@ -291,7 +291,7 @@ def bootstrap(n_stocks: int = 300, days: int = 80, step: int = 2) -> dict:
                 r5 = round((rows[t + 5]["close"] / c0 - 1) * 100, 3) if t + 5 < len(rows) else None
                 res.append((rows[t]["date"], code, c0, raw, sig, r[0], r[1], r5))
             return res
-        with ThreadPoolExecutor(max_workers=4) as ex:
+        with ThreadPoolExecutor(max_workers=2) as ex:
             for part in ex.map(work, codes):
                 BOOT["progress"] += 1
                 out.extend(part)

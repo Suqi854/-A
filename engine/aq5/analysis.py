@@ -76,10 +76,12 @@ def main_force(rows, ind, flows) -> dict:
     ev.append(f"近5天中有 {pos5} 天主力净流入")
     if m5 > 0 and ch5 > 8 and vexpand:
         lab, tone, d = "拉升", "up", "主力资金流入同时股价快速上涨、放量：处在拉升阶段，注意不要追得太高"
-    elif m10 > 0 and abs(ch10) < 5 and not vexpand:
+    elif m10 > 0 and abs(ch10) < 5 and abs(ch5) < 5 and not vexpand:
         lab, tone, d = "吸筹", "up", "资金在流入但股价横盘：可能是主力在低调收集筹码"
     elif m10 > 0 and -10 < ch5 < -2 and vshrink and c[-1] >= m20 * 0.98:
         lab, tone, d = "洗盘", "neutral", "股价缩量回调、守住20日线，而中期资金仍是流入：像是洗盘，关注止跌信号"
+    elif m5 > 0 and ch5 > 5:
+        lab, tone, d = "资金推升", "up", "近5日主力净流入、股价明显上涨：资金在推动，但要留意是否放量持续"
     elif m5 < 0 and (hi > 0.92 or ch10 > 10):
         lab, tone, d = "派发", "down", "股价在高位而主力持续流出：有出货嫌疑，持有者注意兑现利润"
     elif m5 < 0 and c[-1] < m20:
