@@ -1,0 +1,18 @@
+{
+  "name": "suqi-ashare",
+  "owner": {
+    "name": "Suqi854"
+  },
+  "metadata": {
+    "description": "A股量化分析插件（Claude Code / Codex 通用）"
+  },
+  "plugins": [
+    {
+      "name": "ashare-analysis-companion",
+      "source": "./",
+      "description": "多因子选股、交易计划、主力行为、模拟盘与自我迭代；读取公开数据可在手机使用",
+      "version": "2.0.0",
+      "category": "finance"
+    }
+  ]
+}

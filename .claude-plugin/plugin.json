@@ -1,0 +1,17 @@
+{
+  "name": "ashare-analysis-companion",
+  "version": "2.0.0",
+  "description": "A股量化分析：多因子评分、8种策略、明确交易计划（止损/止盈）、主力行为、全主板自动选股、模拟盘与自我迭代；内置本机量化引擎与交易终端网页，并可读取已发布到 GitHub 的公开数据（手机可用）。另含持仓做T、波段筛选、基本面、策略验证、成交复盘等分析技能。仅供学习，不自动交易。",
+  "author": {
+    "name": "Suqi854"
+  },
+  "homepage": "https://github.com/Suqi854/-A",
+  "repository": "https://github.com/Suqi854/-A",
+  "keywords": [
+    "A股",
+    "量化",
+    "选股",
+    "多因子",
+    "模拟盘"
+  ]
+}

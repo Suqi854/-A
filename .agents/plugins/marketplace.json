@@ -1,0 +1,20 @@
+{
+  "name": "suqi-ashare",
+  "interface": {
+    "displayName": "A股量化分析"
+  },
+  "plugins": [
+    {
+      "name": "ashare-analysis-companion",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "NONE"
+      },
+      "category": "Finance"
+    }
+  ]
+}
