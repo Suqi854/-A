@@ -16,7 +16,7 @@ powershell -NoProfile -Command "if (Get-CimInstance Win32_Process | Where-Object
 if errorlevel 1 (
   echo [A-Quant] already running
 ) else (
-  start "A-Quant 5.0 (close this window = stop)" /min %PY% -m aq5.server
+  start "A-Quant 5.0 - close this window to stop" /min %PY% -m aq5.server
   timeout /t 3 /nobreak >nul
 )
 start "" http://127.0.0.1:18950
