@@ -181,3 +181,14 @@ html[data-density="cozy"] table.t { font-size: 13px; }
 .modal .ph h3.fold-h::before { display: none; }
 .modal .ph h3.fold-h { cursor: default; }
 #monPick { overflow-x: auto; }
+
+/* ============ 规则 / 说明：默认收起 ============ */
+details.note { margin: 6px 0; font-size: 12px; }
+details.note > summary { cursor: pointer; list-style: none; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; user-select: none; }
+details.note > summary::-webkit-details-marker { display: none; }
+details.note > summary::before { content: "ⓘ"; color: var(--amber); }
+details.note > summary::after { content: "展开 ▸"; font-size: 11px; color: var(--dim); }
+details.note[open] > summary::after { content: "收起 ▾"; }
+.hint.clip { display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; cursor: pointer; }
+.hint.clip::before { content: "ⓘ "; color: var(--amber); }
+.hint.clip.open { display: block; overflow: visible; }

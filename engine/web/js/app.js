@@ -149,6 +149,16 @@
     $('#lkReset').onclick = () => { Object.keys(LOOK).forEach(k => delete LOOK[k]); applyLook(); renderSet(); };
   }
   applyLook();
+  // ---- 长说明默认收成一行：点一下展开 / 收起
+  const clipHints = () => document.querySelectorAll('.hint:not([data-nc])').forEach(h => {
+    h.dataset.nc = '1';
+    if (h.tagName === 'SMALL' || h.classList.contains('mono') || h.closest('.modal, details.note, #aiDrawer, label')) return;
+    if (h.querySelector('button, input, select, textarea, a, .chip, .tier, b, .up, .down')) return;
+    if ((h.textContent || '').trim().length < 40) return;
+    h.classList.add('clip'); h.title = '点击展开 / 收起说明';
+  });
+  new MutationObserver(() => { clearTimeout(clipHints.t); clipHints.t = setTimeout(clipHints, 30); }).observe(document.body, { childList: true, subtree: true });
+  document.addEventListener('click', e => { const h = e.target.closest && e.target.closest('.hint.clip'); if (h) h.classList.toggle('open'); });
   (() => { const c = $('#cmd'); const f = () => { if (c) c.placeholder = innerWidth <= 600 ? '代码 / 名称 / 拼音' : '输入代码或名称，回车分析 · F1-F8 切换页面'; }; f(); addEventListener('resize', f); })();
   function md(t) {
     const lines = esc(t || '').split(/\n/); let html = '', inList = false;
@@ -890,10 +900,10 @@
     const hi = h.mode === 'high';
     box.innerHTML = `<div class="row"><span class="hint">交易模式</span><div class="seg rw" id="hfSeg"><button data-m="high" class="${hi ? 'on' : ''}">高频（日内量化）</button><button data-m="low" class="${hi ? '' : 'on'}">低频（波段）</button></div>
         <span class="sp"></span>${hi ? `<span class="hint mono">tick ${h.ticks} 次 · 最近 ${esc(h.last_tick || '--')} · 决策→成交 ${h.latency_ms == null ? '--' : h.latency_ms + 'ms'} · 今日委托 ${h.orders_today}/${h.cfg.max_orders} · 候选刷新 ${esc(h.last_scan || '--')}</span><button class="btn sm rw" id="hfNow">手动跑一个 tick</button>` : ''}</div>
-      <div class="row hint" style="margin-top:4px">模拟规则：<span class="chip ${h.rules.t0 ? 'u' : ''}">T+0 ${h.rules.t0 ? '开' : '关'}</span><span class="chip ${h.rules.margin ? 'u' : ''}">融资 ${h.rules.margin ? '开' : '关'}（年息 ${num(h.rules.margin_rate * 100, 0)}%）</span>
+      <details class="note"><summary>模拟规则与策略说明</summary><div class="row hint" style="margin-top:4px">模拟规则：<span class="chip ${h.rules.t0 ? 'u' : ''}">T+0 ${h.rules.t0 ? '开' : '关'}</span><span class="chip ${h.rules.margin ? 'u' : ''}">融资 ${h.rules.margin ? '开' : '关'}（年息 ${num(h.rules.margin_rate * 100, 0)}%）</span>
         <span class="chip ${h.rules.short ? 'u' : ''}">融券 ${h.rules.short ? '开' : '关'}（年费 ${num(h.rules.short_rate * 100, 0)}%）</span><span class="chip">杠杆上限 ${h.rules.leverage} 倍</span><span class="chip">维持担保 ≥${num(h.rules.maint * 100, 0)}%</span><span class="muted">「我的模拟盘」仍按真实 A 股规则</span></div>
       <p class="hint" style="margin:6px 0">${hi ? `高频（日内量化）：每 ${h.cfg.tick_sec} 秒一个 tick，用实时报价、五档委比、VWAP 偏离、30秒/2分钟动量、主动买卖差决策，决策到成交毫秒级（行情源本身约 2~3 秒刷新一次）。做多：评分≥${h.cfg.long_score}、站上VWAP、委比>+0.15、2分钟动量>+0.12%；融券做空：评分≤${h.cfg.short_score}、跌破VWAP、委比<−0.15、2分钟动量<−0.12%。出场：止盈 +${h.cfg.take}%、止损 −${h.cfg.stop}%、浮盈≥${h.cfg.trail_on}% 后回撤 ${h.cfg.trail}% 移动止盈、信号反转；单票 ${num(h.cfg.pos_pct * 100, 0)}% 净资产；${h.cfg.flat_eod ? '14:56 日内仓位全部平掉；' : ''}大盘「防守」不开多、「顺势做多」不开空。`
-        : '低频：只在 9:26 竞价选股、14:45 尾盘选股时按 A/B/C 分级买入（仓位 = 基础 × 级别系数 × 半凯利），尾盘调仓弱势持仓，盘中只做止损止盈和做T。'} 两种模式都受 A 股规则约束：T+1、100股一手、涨跌停、手续费。和「我的模拟盘」互不影响。</p>
+        : '低频：只在 9:26 竞价选股、14:45 尾盘选股时按 A/B/C 分级买入（仓位 = 基础 × 级别系数 × 半凯利），尾盘调仓弱势持仓，盘中只做止损止盈和做T。'} AI自动盘按上面的模拟规则（可T+0、融资融券），仍受 100股一手、涨跌停、手续费约束；和「我的模拟盘」互不影响。</p></details>
       ${hi && h.candidates.length ? `<div class="hint">做多候选</div><div class="row" style="flex-wrap:wrap">${h.candidates.map(c => `<span class="chip click u" data-c="${c.code}">${esc(c.name)} ${num(c.score, 0)}分 <b class="${cls(c.pct)}">${pct(c.pct)}</b></span>`).join('')}</div>` : ''}
       ${hi && h.shorts && h.shorts.length ? `<div class="hint" style="margin-top:4px">融券做空候选</div><div class="row" style="flex-wrap:wrap">${h.shorts.map(c => `<span class="chip click d" data-c="${c.code}">${esc(c.name)} ${num(c.score, 0)}分 <b class="${cls(c.pct)}">${pct(c.pct)}</b></span>`).join('')}</div>` : ''}
       ${h.log.length ? `<details class="fx"><summary>高频运行日志（${h.log.length}）</summary>${h.log.map(x => `<div class="mono" style="font-size:12px">${esc(x)}</div>`).join('')}</details>` : ''}`;
