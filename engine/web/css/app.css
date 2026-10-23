@@ -359,3 +359,13 @@ table.ob tr.obmid td { border-top: 1px solid var(--line2); border-bottom: 1px so
   .panel .ph { flex-wrap: wrap; row-gap: 4px; }
   #wl2Add { min-width: 160px; }
 }
+/* 大盘状态 */
+.mkt { display: grid; grid-template-columns: 220px 1fr 220px; gap: 14px; }
+.mktl .temp { font: 700 34px var(--mono); line-height: 1.1; }
+.tbar { height: 6px; background: linear-gradient(90deg, var(--down), var(--amber), var(--up)); position: relative; margin: 4px 0 8px; }
+.tbar i { position: absolute; top: -3px; bottom: -3px; width: 2px; background: #fff; left: 0; }
+.mkti { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px 14px; }
+.mkti > div { border-left: 2px solid var(--line2); padding-left: 8px; }
+.mkts { border-left: 1px dashed var(--line2); padding-left: 10px; max-height: 150px; overflow: auto; }
+.livep { gap: 6px; font-size: 12px; }
+@media (max-width: 900px) { .mkt { grid-template-columns: 1fr; } .mkti { grid-template-columns: 1fr 1fr; } .mkts { border-left: 0; padding-left: 0; } }

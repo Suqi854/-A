@@ -173,6 +173,16 @@ def analyze(code: str) -> dict:
         sec = sectors.of_stock(code)
     except Exception:  # noqa: BLE001
         sec = None
+    try:
+        from . import marketstate
+        mkt = marketstate.state()
+    except Exception:  # noqa: BLE001
+        mkt = None
+    if mkt and mkt.get("label"):
+        if mkt["risk_off"] or mkt["stance"] in ("防守", "谨慎"):
+            risks.append(f"大盘「{mkt['label']}」（温度 {mkt['temperature']:.0f}）：{mkt['advice']}")
+        elif mkt["stance"] == "顺势做多":
+            reasons.append(f"大盘「{mkt['label']}」（温度 {mkt['temperature']:.0f}）：顺势环境")
     if sec:
         if sec["score"] >= 65:
             reasons.append(f"所属行业「{sec['name']}」{sec['tag']}（强度 {sec['score']:.0f}，排名 {sec['rank']}/{sec['total']}），顺势")
@@ -197,7 +207,7 @@ def analyze(code: str) -> dict:
             "prob_src": ev["prob_src"], "rating": lab, "tone": tone, "advice": advice, "factors": factors,
             "signals": ev["signals"], "strategy_desc": DESC, "strategy_formula": SFORM, "plan": ev["plan"], "main_force": mf,
             "reasons": reasons, "risks": risks, "lessons": lessons, "regime": regime(), "weights_ver": ver,
-            "sector": sec, "chips": cyq, "cross_check": xc, "composite": COMPOSITE,
+            "sector": sec, "chips": cyq, "market": {k: (mkt or {}).get(k) for k in ("label", "temperature", "stance", "advice", "risk_off")} if mkt else None, "cross_check": xc, "composite": COMPOSITE,
             "models": {**{k: v for k, v in mdl.items() if k != "reg"}, "reg": {k: v for k, v in (mdl.get("reg") or {}).items() if k != "line"} or None,
                        "reg_line": (mdl.get("reg") or {}).get("line"), "kelly": kel, "summary": models.summary_lines(mdl),
                        "formulas": models.FORMULAS},

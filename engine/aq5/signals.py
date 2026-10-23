@@ -167,7 +167,11 @@ def plan(code: str, phase: str | None = None, acct: str = "me", save: bool = Tru
             actions.append("持有")
     else:
         bz = pl["buy_zone"]
-        if a["tone"] in ("buy", "watch_buy") and not bad_mf:
+        mk = a.get("market") or {}
+        if mk.get("risk_off"):
+            add("entry", "大盘风险·暂停买入", None, f"大盘「{mk.get('label')}」：{mk.get('advice')}", "down", 70)
+            actions.append("观望")
+        elif a["tone"] in ("buy", "watch_buy") and not bad_mf:
             if bz[0] <= price <= bz[1] * 1.005:
                 actions.append("买入")
                 add("entry", "买入区内", price, f"评级「{rating}」，价格在买入区 {bz[0]:.2f}~{bz[1]:.2f}，可按计划分批买（{'半仓' if a['tone'] == 'watch_buy' else '计划仓位'}）", "up", 80)

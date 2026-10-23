@@ -5,7 +5,7 @@ import threading
 import time
 import traceback
 
-from . import ai, backup, db, learn, market, picker, publisher, sectors, signals, sim
+from . import ai, backup, db, hf, learn, market, marketstate, picker, publisher, sectors, signals, sim
 from .config import load_settings, now, today
 
 STATUS = {"started": None, "last_tick": None, "jobs": {}, "errors": []}
@@ -71,6 +71,8 @@ def loop() -> None:
     last_alert = 0.0
     last_pub = 0.0
     last_t = 0.0
+    last_ms = 0.0
+    last_hf = 0.0
     while True:
         try:
             STATUS["last_tick"] = now().strftime("%H:%M:%S")
@@ -93,6 +95,14 @@ def loop() -> None:
                 if 905 <= hm < 925:
                     bg("watch_pre", lambda: signals.run_watch("pre"))
                 if market.market_phase() == "trading":
+                    if time.time() - last_ms > 60:  # 大盘状态每分钟更新，状态切换会触发重新分析
+                        last_ms = time.time()
+                        threading.Thread(target=lambda: marketstate.state(force=True), daemon=True).start()
+                    if hf.mode() == "high" and time.time() - last_hf > 180:
+                        last_hf = time.time()
+                        threading.Thread(target=hf.step, daemon=True).start()
+                    if hm >= 1000:
+                        _once("market_morning", marketstate.record_morning)
                     if time.time() - last_t > 120:
                         last_t = time.time()
                         threading.Thread(target=signals.scan_t, daemon=True).start()
@@ -100,6 +110,8 @@ def loop() -> None:
                     bg(f"watch_intra_{slot}", lambda: signals.run_watch("intra"))
                 if hm >= 1510:
                     bg("t_eval", signals.evaluate_t)
+                if hm >= 1512:
+                    bg("close_review", marketstate.close_review)
                     bg("watch_post", lambda: signals.run_watch("post"))
                 if 900 <= hm < 1130 and ai.ready() and ai.cfg().get("auto_brief", True):
                     _once("ai_brief", lambda: threading.Thread(target=ai.morning_brief, daemon=True).start())

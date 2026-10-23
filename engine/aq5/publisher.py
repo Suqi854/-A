@@ -87,6 +87,11 @@ def export(full: bool = True) -> dict:
     ov = public_overview()
     _w(d / "latest.json", ov)
     files.append("latest.json")
+    try:
+        from . import marketstate
+        _w(d / "market.json", marketstate.state())
+    except Exception:  # noqa: BLE001
+        pass
     for q in ov["indices"]:
         try:
             _w(d / "intraday" / f"{q['code']}.json", market.intraday(q["code"]))

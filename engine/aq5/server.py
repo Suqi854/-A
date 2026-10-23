@@ -11,7 +11,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import ai, analysis, auth, backtest, backup, db, learn, market, notify, picker, publisher, scheduler, sim, vault, sectors, tunnel, signals, tracking
+from . import ai, analysis, auth, backtest, backup, db, learn, market, notify, picker, publisher, scheduler, sim, vault, sectors, tunnel, signals, tracking, hf, marketstate
 from .config import DATA, MOCK, WEB, load_settings, now, public_settings, save_settings
 from .strategies import DESC, NAMES
 
@@ -296,6 +296,9 @@ GET = {"/api/ai/status": api_ai_status, "/api/ai/comment": api_ai_comment, "/api
        "/api/sectors": lambda q: sectors.view(), "/api/sector": api_sector, "/api/ai/models": api_ai_models,
        "/api/ai/notes": api_ai_notes, "/api/ai/run": api_ai_run, "/api/ai/trade": api_ai_trade,
        "/api/remote/status": lambda q: tunnel.status(),
+       "/api/market/state": lambda q: marketstate.state(),
+       "/api/market/accuracy": lambda q: marketstate.accuracy(),
+       "/api/hf/status": lambda q: hf.status(),
        "/api/watch/signals": lambda q: signals.latest(),
        "/api/watch/signal": lambda q: {"latest": signals.latest(q["code"][0]), "phases": signals.phases(q["code"][0])},
        "/api/track": lambda q: tracking.track(int((q.get("days") or [20])[0])),
@@ -422,6 +425,9 @@ POST = {"/api/picks/run": p_pick_run, "/api/sim/order": p_order, "/api/sim/cance
         "/api/ai/trade": lambda b: ai.trade_review(int(b["id"]), force=bool(b.get("force"))),
         "/api/me/dbsnap": lambda b: backup.db_snapshot(),
         "/api/watch/run": lambda b: signals.run_watch(b.get("phase")),
+        "/api/ai/mode": lambda b: save_settings({"pick": {"ai_mode": "high" if b.get("mode") == "high" else "low"}})["pick"]["ai_mode"],
+        "/api/hf/scan": lambda b: hf.quick_scan(force=True),
+        "/api/hf/step": lambda b: hf.step(),
         "/api/watch/plan": lambda b: signals.plan(b["code"]),
         "/api/ai/pick": lambda b: ai.pick_review(int(b["id"])),
         "/api/remote/enable": lambda b: tunnel.set_enabled(bool(b.get("on"))),
@@ -638,11 +644,14 @@ def main():
     ai.init()
     sectors.init()
     signals.init()
+    marketstate.init()
     sectors.refresh_map_async()
     tunnel.cleanup_stale()
     tunnel.watchdog()
     _migrate_secrets()
     s0 = load_settings()
+    if 0 < s0.get("settings_rev", 0) < 3 or s0.get("settings_rev", 0) == 2:
+        save_settings({"settings_rev": 3, "pick": {"ai_mode": "high"}})
     if s0.get("settings_rev", 0) < 2:  # 一次性：模拟资金提到 100 万、AI 自动盘更积极
         save_settings({"settings_rev": 2, "init_cash": max(float(s0.get("init_cash", 0)), 1000000.0),
                        "pick": {"ai_max_positions": max(int(s0["pick"].get("ai_max_positions", 0)), 12),

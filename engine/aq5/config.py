@@ -46,7 +46,8 @@ DEFAULTS = {
         "top_n": 10,                # 每次选股都输出综合分前 N 只（分 A/B/C 三级）
         "ai_max_positions": 12,     # AI 自动盘最多同时持有几只
         "ai_position_pct": 0.12,    # AI 自动盘 A 级单票基础仓位（B×0.7，C×0.4，再乘半凯利修正）
-        "ai_daily_trade": True,     # AI 自动盘每个交易日至少交易一次（收集迭代数据）
+        "ai_daily_trade": True,
+        "ai_mode": "high",          # AI 自动盘：high 高频（盘中每3分钟量化进出）/ low 低频（只在竞价、尾盘选股时交易）     # AI 自动盘每个交易日至少交易一次（收集迭代数据）
         "min_score": 72.0,          # 综合分门槛：宁缺毋滥
         "min_amount_yi": 1.0,       # 成交额至少 1 亿（尾盘），竞价按比例
         "exclude_st": True,

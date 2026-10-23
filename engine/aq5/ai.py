@@ -277,10 +277,18 @@ def daily_review(force: bool = False) -> dict:
                 f"{t['side']} {t['name']} {t['qty']}股@{t['price']} 盈亏{t['pnl']} 心态{t['emotion']} {t['reason']}"
                 for t in t_me], "按心态统计": me["stats"]["by_emotion"]},
             "选股成绩单": L["picks"], "最近一次因子迭代": (L["history"][0]["note"] if L["history"] else "暂无")}
+    try:
+        from . import marketstate
+        data["大盘全天"] = marketstate.brief_for_ai()
+        data["今日预判对错"] = [f"{r['name']} {r['predicted']} 实际{r['actual']:+.2f}% {'✓' if r['correct'] else '✗'} {r['note']}"
+                            for r in db.q("SELECT * FROM forecasts WHERE date=?", (today(),))]
+    except Exception:  # noqa: BLE001
+        pass
     prompt = ("请根据下面的当日数据写一份盘后复盘（Markdown，400~700 字）：\n"
               f"{json.dumps(data, ensure_ascii=False, default=str)}\n\n"
               "结构：\n### 今日市场一句话\n### 系统表现（选股是否合理、AI盘操作是否守纪律）\n"
               "### 我的交易点评（结合心态，指出做得好的和要改的；没有交易就说没有）\n"
+              "### 预判对错复盘（早盘判断和盘前信号哪些错了、为什么错——盘中大盘/板块发生了什么变化；下次怎么改）\n"
               "### 明天关注什么（基于数据，不预测涨跌点位）\n### 今日学习点")
     text, tok = chat([{"role": "user", "content": prompt}], max_tokens=1600)
     _save("review", "", text, {"breadth": br}, tok)
@@ -406,6 +414,11 @@ def _ctx(code: str | None = None, light: bool = False) -> dict:
         out["市场"] = {"上涨": br["up"], "下跌": br["down"], "涨停": br["limit_up"], "跌停": br["limit_down"],
                      "成交额亿": br["amount_yi"], "中位涨幅": br["median_pct"]}
         out["大盘状态"] = regime()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from . import marketstate
+        out["大盘实时状态"] = marketstate.brief_for_ai()
     except Exception:  # noqa: BLE001
         pass
     if not light:
@@ -640,3 +653,18 @@ try:
     from .factors import LABELS as LABELS_CN
 except Exception:  # noqa: BLE001
     LABELS_CN = {}
+
+
+# ----------------------------------------------------------------------------- 盘中更新（大盘状态变化时）
+def intraday_update(reason: str) -> dict:
+    """大盘状态切换时：对照早上的简报，分析为什么变了、现在怎么做。"""
+    ctx = _ctx()
+    mb = latest("brief", "", today())
+    prompt = (f"盘中出现变化：{reason}。\n【早上的简报】{(mb or {}).get('content', '无')[:900]}\n"
+              f"【现在的实时数据】{json.dumps(ctx, ensure_ascii=False, default=str)}\n\n"
+              "请写一份盘中更新（Markdown，200~400 字）：\n### 发生了什么（用数据说：大盘、量能、板块）\n"
+              "### 早上的判断哪里需要修正，为什么\n### 现在怎么做（持仓、自选、仓位）")
+    text, tok = chat([{"role": "user", "content": prompt}], max_tokens=1000)
+    _save("brief", "", text, {"update": reason}, tok)
+    db.event("ai", "AI 盘中更新：" + reason, "到「监控」页查看")
+    return latest("brief", "")

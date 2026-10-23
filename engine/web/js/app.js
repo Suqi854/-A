@@ -48,6 +48,7 @@
       case 'strategies': return sj('strategies.json');
       case 'sectors': return sj('sectors.json');
       case 'track': return sj('track.json');
+      case 'market/state': return sj('market.json');
       case 't/stats': return sj('t.json');
       case 'watch/signals': return [];
       case 'sector': throw new Error('公开版只有板块排行，成分股请在电脑端或局域网完整版查看');
@@ -199,6 +200,7 @@
   function renderMon() {
     $('#p-mon').innerHTML = `<div class="grid">
       ${panel('INDEX <small>主要指数 · 分时</small>', '<div class="idx" id="idxCards"></div>', { cls: 'c12', np: true })}
+      ${panel('MARKET <small>大盘状态 · 放量/缩量/阴跌/异动 · 每分钟更新</small>', '<div id="mktBox" class="loading">载入</div>', { cls: 'c12' })}
       ${panel('BREADTH <small>市场温度 · 沪深主板</small>', '<div id="breadth" class="loading">载入</div>', { cls: 'c4' })}
       ${panel('SIGNAL <small>最新选股</small>', '<div id="monPick" class="loading">载入</div>', { cls: 'c4', right: '<button class="btn sm" onclick="location.hash=\'pick\'">全部 ›</button>' })}
       ${panel('ACCOUNT <small>模拟账户</small>', '<div id="monAcct"></div>', { cls: 'c4', right: '<button class="btn sm" onclick="location.hash=\'sim\'">模拟盘 ›</button>' })}
@@ -214,8 +216,21 @@
     if (!STATIC && $('#wlAdd')) bindWlSearch();
     if (S.ov) updateMon(S.ov);
     $$('#secSeg button').forEach(b => b.onclick = () => { S.secMode = b.dataset.m; drawSectors(); });
-    loadSectors(); loadBrief(); clearInterval(S.timers.sec); S.timers.sec = setInterval(() => S.page === 'mon' && !document.hidden && loadSectors(), 60000);
+    loadSectors(); loadBrief(); loadMarket(); clearInterval(S.timers.mkt); S.timers.mkt = setInterval(() => S.page === 'mon' && !document.hidden && loadMarket(), 60000); clearInterval(S.timers.sec); S.timers.sec = setInterval(() => S.page === 'mon' && !document.hidden && loadSectors(), 60000);
     loadIdxSpark(); clearInterval(S.timers.spark); S.timers.spark = setInterval(() => S.page === 'mon' && loadIdxSpark(), 60000);
+  }
+  async function loadMarket() {
+    const box = $('#mktBox'); if (!box) return;
+    let m; try { m = await api('market/state'); } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    S.mkt = m; box.className = '';
+    const tc = m.risk_off ? 'down' : m.temperature >= 60 ? 'up' : m.temperature < 40 ? 'down' : 'amber';
+    const ltone = l => /跳水|下跌|阴跌|回落/.test(l || '') ? 'd' : /拉升|上涨|反转/.test(l || '') ? 'u' : 'a';
+    box.innerHTML = `<div class="mkt"><div class="mktl"><div class="hint">市场温度</div><div class="temp ${tc}">${num(m.temperature, 0)}</div><div class="tbar"><i style="left:${m.temperature}%"></i></div>
+        <div><span class="chip ${ltone(m.label)}" style="font-size:13px">${esc(m.label || '--')}</span> <b class="${tc}">${esc(m.stance)}</b></div><div class="hint" style="margin-top:4px">${esc(m.advice)}</div></div>
+      <div class="mkti">${m.indices.map(x => `<div><div class="row"><b>${esc(x.name)}</b><span class="sp"></span><span class="${cls(x.pct)}">${x.pct == null ? '--' : pct(x.pct)}</span></div>
+        <div class="row" style="margin-top:3px"><span class="chip ${ltone(x.label)}">${esc(x.label || '--')}</span><span class="sp"></span><span class="hint mono">量比 ${x.vol_ratio == null ? '--' : num(x.vol_ratio)}</span></div>
+        <div class="hint mono">5分 ${x.speed5 == null ? '--' : pct(x.speed5)} · 15分 ${x.speed15 == null ? '--' : pct(x.speed15)} · 近5日 ${x.sum5 == null ? '--' : pct(x.sum5)}${x.yin ? ' · <b class="down">阴跌</b>' : ''}</div></div>`).join('')}</div>
+      <div class="mkts"><div class="hint">今日状态变化（变化时自动重新分析自选、AI 写盘中更新）</div>${(m.shifts || []).slice().reverse().map(x => `<div class="mono" style="font-size:12px">${esc(x.time.slice(0, 5))} <span class="muted">${esc(x.from)}</span> → <b>${esc(x.to)}</b></div>`).join('') || '<div class="muted">暂无</div>'}</div></div>`;
   }
   async function loadSectors() {
     if (!$('#secBox')) return;
@@ -329,9 +344,13 @@
     const lr = ov.last_run, mp = $('#monPick'); mp.className = '';
     if (!lr) mp.innerHTML = `<div class="empty">还没有选股记录<br><br>交易日 09:26 / 14:45 自动运行<br><br><button class="btn pri" onclick="location.hash='pick'">去手动选股</button></div>`;
     else mp.innerHTML = `<div class="row"><span class="chip a">${SESSION[lr.session] || lr.session}</span><span class="mono muted">${lr.date} ${lr.finished || ''}</span><span class="sp"></span><span class="mono muted">扫描${lr.scanned}·精评${lr.candidates}</span></div>
-        ${lr.items.length ? `<table class="t" style="margin-top:6px"><tr><th>股票</th><th>评分</th><th>买入价</th><th>止损</th><th>目标</th></tr>${lr.items.map(p => `<tr class="click" data-c="${p.code}"><td>${p.tier ? `<span class="tier t${p.tier}">${p.tier}</span>` : ''}${nameCell(p.name, p.code)}</td><td class="amber">${num(p.score, 1)}</td><td>${num(p.price)}</td><td class="down">${num(p.stop)}</td><td class="up">${num(p.target1)}</td></tr>`).join('')}</table>`
+        ${lr.items.length ? `<table class="t" style="margin-top:6px"><tr><th>股票</th><th>评分</th><th>选出价</th><th>现价</th><th>涨幅</th><th class="hide-m">较选出</th><th>止损</th><th>目标</th></tr>${lr.items.map(p => { const lq = (S.pq || {})[p.code] || {}; const since = lq.price && p.price ? (lq.price / p.price - 1) * 100 : null;
+          return `<tr class="click" data-c="${p.code}"><td>${p.tier ? `<span class="tier t${p.tier}">${p.tier}</span>` : ''}${nameCell(p.name, p.code)}</td><td class="amber">${num(p.score, 1)}</td><td class="muted">${num(p.price)}</td>
+          <td class="${cls(lq.pct)}">${num(lq.price)}</td><td class="${cls(lq.pct)}">${pct(lq.pct)}</td><td class="hide-m ${cls(since)}">${pct(since)}</td><td class="down">${num(p.stop)}</td><td class="up">${num(p.target1)}</td></tr>`; }).join('')}</table>`
         : `<div class="nopick" style="margin-top:8px"><b>宁缺毋滥</b><span class="hint">本次没有达到门槛的机会，今天先观望</span></div>`}`;
     mp.querySelectorAll('[data-c]').forEach(tr => tr.onclick = () => go('anly', tr.dataset.c));
+    if (lr && lr.items.length && (!S.pqT || Date.now() - S.pqT > 4000)) { S.pqT = Date.now();
+      api('quotes?codes=' + lr.items.map(p => p.code).join(',')).then(r => { S.pq = { ...(S.pq || {}), ...r }; }).catch(() => { }); }
     // 账户
     $('#monAcct').innerHTML = Object.values(ov.accounts).map(a => `<div style="margin-bottom:10px"><div class="row"><b>${esc(a.name)}</b><span class="sp"></span><span class="mono">${yuan(a.equity)}</span></div>
       <div class="row hint mono"><span>今日 <b class="${cls(a.today_pnl)}">${sgn(a.today_pnl)}</b></span><span>累计 <b class="${cls(a.total_pnl)}">${sgn(a.total_pnl)} (${pct(a.total_pct)})</b></span><span class="sp"></span><span>持仓 ${a.positions.length}</span></div>
@@ -390,6 +409,7 @@
       return `<div class="pick"><div class="hd">${p.tier ? `<span class="tier t${p.tier}" title="${TIER[p.tier]}">${p.tier}</span><span class="muted mono" style="margin-right:6px">#${p.rank}</span>` : ''}<span class="nm">${esc(p.name)}</span><span class="cd">${short(p.code)}</span></div>
         <div class="score"><b>${num(p.score, 1)}</b><small>综合评分 · 估计胜率 ${num(p.prob * 100, 0)}%</small></div>
         <div class="row" style="margin-top:6px">${p.industry ? `<span class="chip c">${esc(p.industry)}</span>` : ''}${p.strategies.slice(0, 3).map(s => `<span class="chip a">${esc(s.name)}</span>`).join('')}</div>
+        <div class="row mono livep" data-lp="${p.code}" data-base="${p.price}" style="margin-top:6px"><span class="muted">现价</span><b class="lpx">--</b><b class="lpc">--</b><span class="muted">较选出</span><b class="lps">--</b></div>
         <div class="plan"><div><div class="l">选出价</div><div class="v">${num(p.price)}</div></div>
           <div><div class="l">止损</div><div class="v down">${num(pl.stop)}</div><div class="p down">${pct((pl.stop / p.price - 1) * 100, 1)}</div></div>
           <div><div class="l">止盈①</div><div class="v up">${num(pl.target1)}</div><div class="p up">${pct((pl.target1 / p.price - 1) * 100, 1)}</div></div>
@@ -411,9 +431,16 @@
     const showRunAi = n => { const el = $('#runAi'); if (el) el.innerHTML = n && n.content ? md(n.content) + `<div class="hint mono">${esc(n.created || '')}</div>` : `<div class="hint">${STATIC ? '这次还没有 AI 解读' : '还没有 AI 解读。配置了 AI 后，每次选股会自动生成；也可以点「生成解读」。'}</div>`; };
     if (STATIC) showRunAi(r.ai); else api('ai/run?id=' + r.id).then(showRunAi).catch(() => showRunAi(null));
     const rg2 = $('#runAiGo'); if (rg2) rg2.onclick = async () => { rg2.disabled = true; $('#runAi').innerHTML = '<div class="loading">AI 解读中</div>'; try { showRunAi(await api('ai/run', { id: r.id })); } catch (e) { $('#runAi').innerHTML = `<div class="up">${esc(e.message)}</div>`; } rg2.disabled = false; };
+    const upd = async () => { const els = $$('#runDetail [data-lp]'); if (!els.length) return; try {
+        const qs = await api('quotes?codes=' + els.map(e => e.dataset.lp).join(','));
+        els.forEach(e => { const q = qs[e.dataset.lp]; if (!q) return; const sc = (q.price / +e.dataset.base - 1) * 100;
+          $('.lpx', e).textContent = num(q.price); $('.lpx', e).className = 'lpx ' + cls(q.pct); $('.lpc', e).textContent = pct(q.pct); $('.lpc', e).className = 'lpc ' + cls(q.pct);
+          $('.lps', e).textContent = pct(sc); $('.lps', e).className = 'lps ' + cls(sc); }); } catch { } };
+    upd(); clearInterval(S.timers.lp); S.timers.lp = setInterval(() => { if (S.page !== 'pick') return clearInterval(S.timers.lp); if (!document.hidden) upd(); }, 5000);
     const c = await api('picks/candidates?run=' + r.id);
     const names = { breakout: '突破', pullback: '回踩', volume_start: '放量', oversold: '超跌', macd_cross: '金叉', accumulate: '吸筹', tail_strong: '尾强', auction_strong: '竞强' };
-    $('#candT').innerHTML = `<tr><th>#</th><th class="l">股票</th><th>评分</th><th>价格</th><th class="l">信号</th></tr>` + c.map((x, i) => `<tr class="click" data-c="${x.code}"><td class="muted">${i + 1}</td><td class="l">${star(x.code, x.name)} ${nameCell(x.name, x.code)}</td><td class="${x.score >= m.min_score ? 'amber' : ''}">${num(x.score, 1)}</td><td>${num(x.price)}</td><td class="l">${x.strategies.map(s => `<span class="chip">${names[s] || s}</span>`).join(' ')}</td></tr>`).join('');
+    const cq = await api('quotes?codes=' + c.map(x => x.code).join(',')).catch(() => ({}));
+    $('#candT').innerHTML = `<tr><th>#</th><th class="l">股票</th><th>评分</th><th>选出价</th><th>现价</th><th>涨幅</th><th class="l">信号</th></tr>` + c.map((x, i) => `<tr class="click" data-c="${x.code}"><td class="muted">${i + 1}</td><td class="l">${star(x.code, x.name)} ${nameCell(x.name, x.code)}</td><td class="${x.score >= m.min_score ? 'amber' : ''}">${num(x.score, 1)}</td><td class="muted">${num(x.price)}</td><td class="${cls((cq[x.code] || {}).pct)}">${num((cq[x.code] || {}).price)}</td><td class="${cls((cq[x.code] || {}).pct)}">${pct((cq[x.code] || {}).pct)}</td><td class="l">${x.strategies.map(s => `<span class="chip">${names[s] || s}</span>`).join(' ')}</td></tr>`).join('');
     $$('#candT [data-c]').forEach(tr => tr.onclick = () => go('anly', tr.dataset.c));
   }
   // ------------------------------------------------------------------ 选股跟踪复盘
@@ -548,7 +575,7 @@
         <div class="qgrid"><div><span>今开</span>${num(q.open)}</div><div><span>最高</span><b class="up">${num(q.high)}</b></div><div><span>最低</span><b class="down">${num(q.low)}</b></div><div><span>昨收</span>${num(q.prev)}</div>
           <div><span>量比</span>${num(q.vr)}</div><div><span>换手</span>${num(q.turnover)}%</div><div><span>成交额</span>${money(q.amount)}</div><div><span>主力净额</span><b class="${cls(q.main_net)}">${money(q.main_net)}</b></div>
           <div><span>市盈</span>${num(q.pe, 1)}</div><div><span>市净</span>${num(q.pb)}</div><div><span>总市值</span>${num(q.mcap, 0)}亿</div><div><span>流通</span>${num(q.fmcap, 0)}亿</div>
-          <div><span>涨停</span>${num(q.up_limit)}</div><div><span>跌停</span>${num(q.dn_limit)}</div><div><span>大盘</span>${esc(a.regime.state)}</div><div class="${a.sector ? 'click' : ''}" id="aSec"><span>行业</span>${a.sector ? `${esc(a.sector.name)} <b style="color:${secCol(a.sector.score)}">${num(a.sector.score, 0)}</b><small class="muted"> ${a.sector.rank}/${a.sector.total}</small>` : '--'}</div></div></div>
+          <div><span>涨停</span>${num(q.up_limit)}</div><div><span>跌停</span>${num(q.dn_limit)}</div><div><span>大盘</span>${esc(a.regime.state)}${a.market && a.market.label ? ` · <b class="${a.market.risk_off ? 'down' : 'amber'}">${esc(a.market.label)}</b>` : ''}</div><div class="${a.sector ? 'click' : ''}" id="aSec"><span>行业</span>${a.sector ? `${esc(a.sector.name)} <b style="color:${secCol(a.sector.score)}">${num(a.sector.score, 0)}</b><small class="muted"> ${a.sector.rank}/${a.sector.total}</small>` : '--'}</div></div></div>
       ${panel('SIGNAL <small>今日信号 · 进出场 / 做T / 止盈止损 / 加减仓</small>', '<div id="sigBox" class="loading">载入</div>', { cls: 'c12', right: '<div class="seg" id="sigPh"></div><button class="btn sm rw" id="sigRe">重新分析</button>' })}
       <div class="panel c8"><div class="chartbar"><div class="seg" id="chPer">${[['i', '分时'], ['day', '日K'], ['week', '周K'], ['month', '月K'], ['m60', '60分'], ['m30', '30分'], ['m15', '15分'], ['m5', '5分']].map(([k, t]) => `<button data-p="${k}" class="${k === 'day' ? 'on' : ''}">${t}</button>`).join('')}</div>
           <div class="seg" id="chMain"><button data-m="ma" class="on">均线</button><button data-m="boll">BOLL</button></div>
@@ -751,7 +778,7 @@
         <div class="summary"><div><div class="l">总资产</div><div class="v">${yuan(a.equity)}</div></div><div><div class="l">可用现金</div><div class="v">${yuan(a.cash)}</div></div>
           <div><div class="l">持仓市值</div><div class="v">${yuan(a.market_value)}</div></div><div><div class="l">今日盈亏</div><div class="v ${cls(a.today_pnl)}">${sgn(a.today_pnl)}</div></div>
           <div><div class="l">累计盈亏</div><div class="v ${cls(a.total_pnl)}">${sgn(a.total_pnl)}</div></div><div><div class="l">累计收益率</div><div class="v ${cls(a.total_pct)}">${pct(a.total_pct)}</div></div></div>
-        ${S.acct === 'ai' ? '<div class="pb hint">AI自动盘：每次自动选股后按 20% 仓位模拟买入，并严格执行止损 / 止盈① 卖一半并保本 / 止盈② 清仓 / 10日时间止损。它的成绩就是这套系统的“实战成绩单”，也是自我迭代的数据来源。</div>' : ''}</div>
+        ${S.acct === 'ai' ? '<div class="pb" id="hfBox"><div class="loading">载入</div></div>' : ''}</div>
       ${panel('POSITIONS <small>持仓</small>', a.positions.length ? `<div class="scroll"><table class="t"><tr><th>股票</th><th>数量/可卖</th><th>成本</th><th>现价</th><th>盈亏</th><th>止损</th><th>止盈①</th><th class="hide-m">持有</th><th></th></tr>
         ${a.positions.map(p => `<tr><td class="click" data-c="${p.code}">${nameCell(p.name, p.code)}</td><td>${p.qty}/<span class="muted">${p.avail}</span></td><td>${num(p.cost, 3)}</td><td class="${cls(p.pct)}">${num(p.price)}</td>
           <td class="${cls(p.pnl)}">${sgn(p.pnl)}<br><small>${pct(p.pnl_pct)}</small></td><td class="down">${num(p.stop)}<br><small>${pct(p.to_stop, 1)}</small></td><td class="up">${num(p.target1)}<br><small>${pct(p.to_target, 1)}</small></td>
@@ -771,6 +798,7 @@
           <td>${S.acct === 'me' && t.side === 'sell' && (!STATIC || (S.priv && S.priv.ai && S.priv.ai.trades[t.id])) ? `<button class="btn sm" data-tr="${t.id}">AI复盘</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="8" class="muted">暂无</td></tr>'}</table></div>`, { cls: 'c12', np: true })}
     </div>`;
     $$('#acctSeg button').forEach(b => b.onclick = () => { S.acct = b.dataset.a; renderSim(); });
+    if (S.acct === 'ai') loadHF();
     $$('#p-sim [data-tr]').forEach(b => b.onclick = async () => {
       if (STATIC) return mdModal('AI 交易复盘', S.priv.ai.trades[b.dataset.tr]);
       b.disabled = true; b.textContent = '复盘中…';
@@ -799,6 +827,20 @@
     const eq = a.equity_curve;
     Charts.lines($('#eqC'), eq.map(e => e.date), [{ values: eq.map(e => e.equity), color: '#ffb000', width: 1.6 }], { base: a.init, fmt: v => (v / 1e4).toFixed(2) + '万' });
   }
+  async function loadHF() {
+    const box = $('#hfBox'); if (!box) return;
+    let h; try { h = await api('hf/status'); } catch (e) { box.innerHTML = `<div class="hint">AI自动盘：自动选股后按级别买入，严格执行止损止盈。${STATIC ? '' : esc(e.message)}</div>`; return; }
+    const hi = h.mode === 'high';
+    box.innerHTML = `<div class="row"><span class="hint">交易模式</span><div class="seg rw" id="hfSeg"><button data-m="high" class="${hi ? 'on' : ''}">高频（日内量化）</button><button data-m="low" class="${hi ? '' : 'on'}">低频（波段）</button></div>
+        <span class="sp"></span>${hi ? `<span class="hint mono">上次扫描 ${esc(h.last_scan || '--')} · 上次运行 ${esc(h.last_step || '--')}</span><button class="btn sm rw" id="hfNow">立即运行一轮</button>` : ''}</div>
+      <p class="hint" style="margin:6px 0">${hi ? '高频：交易时间每 3 分钟一轮——每 15 分钟快速扫描全市场取前 12 只为候选；站上均价线、5分钟RSI 45~75、涨幅 0.5%~7% 时进场（单票约 6% 仓位）；浮盈回落 2% 跌破均价移动止盈、跌破均价且动能转弱减仓；持仓按做T信号高抛低吸；大盘异动跳水时暂停买入；每天最多 40 笔。'
+        : '低频：只在 9:26 竞价选股、14:45 尾盘选股时按 A/B/C 分级买入（仓位 = 基础 × 级别系数 × 半凯利），尾盘调仓弱势持仓，盘中只做止损止盈和做T。'} 两种模式都受 A 股规则约束：T+1、100股一手、涨跌停、手续费。和「我的模拟盘」互不影响。</p>
+      ${hi && h.candidates.length ? `<div class="hint">当前候选池</div><div class="row" style="flex-wrap:wrap">${h.candidates.map(c => `<span class="chip click" data-c="${c.code}">${esc(c.name)} ${num(c.score, 0)}分 <b class="${cls(c.pct)}">${pct(c.pct)}</b></span>`).join('')}</div>` : ''}
+      ${h.log.length ? `<details class="fx"><summary>高频运行日志（${h.log.length}）</summary>${h.log.map(x => `<div class="mono" style="font-size:12px">${esc(x)}</div>`).join('')}</details>` : ''}`;
+    $$('#hfSeg button').forEach(b => b.onclick = async () => { await api('ai/mode', { mode: b.dataset.m }); toast(b.dataset.m === 'high' ? '已切换到高频：交易时间每 3 分钟运行一轮' : '已切换到低频'); loadHF(); });
+    const hn = $('#hfNow'); if (hn) hn.onclick = async () => { hn.disabled = true; hn.textContent = '运行中…'; try { const r = await api('hf/step', {}); toast(r.acted && r.acted.length ? r.acted.join('；') : (r.skipped === true ? '现在不是连续交易时间' : r.paused ? '大盘风险，本轮暂停买入' : r.skipped || '本轮没有满足条件的交易')); } catch (e) { toast(e.message, 1); } renderSim(); };
+    box.querySelectorAll('[data-c]').forEach(e => e.onclick = () => go('anly', e.dataset.c));
+  }
   function mdModal(title, n) {
     const m = document.createElement('div'); m.className = 'modal'; m.onclick = e => { if (e.target === m) m.remove(); };
     m.innerHTML = `<div class="box" style="max-width:640px">${panel(`AI <small>${esc(title)}</small>`, (n && n.content ? md(n.content) + `<div class="hint mono">${esc(n.created || '')}</div>` : '<div class="empty">暂无内容</div>'), { right: '<button class="btn sm" data-x>×</button>' })}</div>`;
@@ -818,6 +860,11 @@
   // ================================================================== F5 自我迭代
   async function renderLearn() {
     const L = await api('learn');
+    setTimeout(async () => { const el = $('#fcBox'); if (!el) return; try { const f = await api('market/accuracy'); el.className = '';
+      el.innerHTML = `<div class="row" style="padding:8px 10px">${Object.entries(f.by).map(([k, v]) => `<span class="chip ${v.acc >= 0.55 ? 'u' : 'd'}">${esc(k)}：${num(v.acc * 100, 0)}%（${v.n} 次）</span>`).join('') || '<span class="hint">每天 15:12 自动对照：早盘（10:00）大盘判断、自选股盘前信号 vs 收盘实际涨跌。积累几天后这里会显示准确率。</span>'}</div>
+        <div class="scroll" style="max-height:300px"><table class="t"><tr><th>日期</th><th class="l">对象</th><th class="l">预判</th><th>实际</th><th>对错</th><th class="l">说明</th></tr>${f.recent.map(r => `<tr><td class="muted">${r.date.slice(5)}</td><td class="l">${esc(r.name || r.code)}</td><td class="l">${esc(r.predicted)}</td><td class="${cls(r.actual)}">${pct(r.actual)}</td><td>${r.correct ? '<b class="up">✓</b>' : '<b class="down">✗</b>'}</td><td class="l hint">${esc(r.note || '')}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">暂无</td></tr>'}</table></div>
+        <div class="hint" style="padding:6px 10px">判断错了不是坏事：盘后 AI 复盘会写「预判对错复盘」，分析盘中大盘、板块发生了什么、下次怎么改；盘中大盘状态一变，系统会立刻重新分析自选并写「盘中更新」。</div>`;
+    } catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; } }, 80);
     setTimeout(async () => { const el = $('#tStats'); if (!el) return; try { const t = await api('t/stats');
       el.className = ''; el.innerHTML = `<table class="t"><tr><th class="l">做T策略</th><th>方向</th><th>样本</th><th>胜率</th><th>均收益</th><th>权重</th></tr>${t.stats.map(x => `<tr title="${esc(x.desc)}"><td class="l">${esc(x.name)}</td><td class="${x.side === 'buy' ? 'up' : 'down'}">${x.side === 'buy' ? '低吸' : '高抛'}</td><td>${x.n}</td><td>${x.win == null ? '--' : num(x.win * 100, 0) + '%'}</td><td class="${cls(x.avg)}">${x.avg == null ? '--' : pct(x.avg)}</td><td class="amber">${num(x.weight, 2)}</td></tr>`).join('')}</table>
         <div class="hint" style="padding:6px 10px">自选股和 AI 自动盘持仓盘中每 2 分钟检查一次；收盘后评估：低吸后日内最高 ≥+0.8% 或收盘 ≥+0.3% 算成功（高抛反之）。最近触发 ${t.recent.length} 次。</div>
@@ -854,6 +901,7 @@
           return `<div class="scroll"><table class="t"><tr><th class="l" rowspan="2">策略</th>${sess.map(([, n]) => `<th colspan="3">${n}</th>`).join('')}</tr><tr>${sess.map(() => '<th>样本</th><th>胜率</th><th>权重</th>').join('')}</tr>${rows}</table></div>
             <div class="hint" style="padding:6px 10px">同一个策略在早盘和尾盘的表现往往不同：每个场次单独统计 3 日胜率和收益，样本 ≥10 后该场次用自己的权重（0.5~1.5）。</div>`; })(), { cls: 'c8', np: true })}
       ${panel('T STRATEGIES <small>盘中做T策略 · 自动统计胜率</small>', '<div id="tStats" class="loading">载入</div>', { cls: 'c4', np: true })}
+      ${panel('FORECAST <small>预判 vs 实际 · 早盘判断和盘前信号对不对</small>', '<div id="fcBox" class="loading">载入</div>', { cls: 'c12', np: true })}
       ${panel('SCORECARD <small>选股成绩单</small>', `<dl class="kv"><dt>次日胜率</dt><dd>${st(pk.d1)}</dd><dt>3日胜率</dt><dd>${st(pk.d3)}</dd><dt>5日胜率</dt><dd>${st(pk.d5)}</dd></dl><div class="sep"></div>
           <dl class="kv">${Object.entries(pk.outcomes).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl><div class="sep"></div>
           <div class="hint">概率模型</div>${md ? `<dl class="kv"><dt>训练时间</dt><dd>${L.model.created}</dd><dt>样本</dt><dd>${md.n}</dd><dt>基准成功率</dt><dd>${num(md.base_rate * 100, 1)}%</dd>
