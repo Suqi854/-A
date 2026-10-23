@@ -596,6 +596,10 @@ def _restart():
     import subprocess
     import time as _t
     _t.sleep(1)
+    try:
+        tunnel.stop()  # 子进程不会随引擎退出，先关掉隧道
+    except Exception:  # noqa: BLE001
+        pass
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     log = open(os.path.join(str(DATA), "server-restart.log"), "a", encoding="utf-8")
     subprocess.Popen([sys.executable, "-c", "import time;time.sleep(2);from aq5.server import main;main()"],
@@ -619,6 +623,7 @@ def main():
     ai.init()
     sectors.init()
     sectors.refresh_map_async()
+    tunnel.cleanup_stale()
     tunnel.watchdog()
     _migrate_secrets()
     sim.ensure_accounts()

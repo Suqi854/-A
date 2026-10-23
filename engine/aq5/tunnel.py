@@ -117,8 +117,46 @@ def _reader(p):
                 pass
 
 
-def start() -> dict:
+PIDFILE = TOOLS / "cloudflared.pid"
+
+
+def _kill_pid(pid: int) -> None:
+    try:
+        if sys.platform == "win32":
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=10, creationflags=flags)
+        else:
+            os.kill(pid, 15)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def cleanup_stale() -> None:
+    """引擎启动时：把上一次留下的 cloudflared 进程关掉（引擎重启时子进程不会自动退出）。
+    只关从本程序 data\\tools 目录启动的 cloudflared，不影响你自己运行的其他 cloudflared。"""
+    if sys.platform == "win32":
+        ps = ("Get-CimInstance Win32_Process -Filter \"Name='cloudflared.exe'\" | "
+              f"Where-Object {{ $_.ExecutablePath -eq '{EXE}' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}")
+        try:
+            subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, timeout=20,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        pid = int(PIDFILE.read_text().strip())
+    except (OSError, ValueError):
+        return
+    _kill_pid(pid)
+    try:
+        PIDFILE.unlink()
+    except OSError:
+        pass
+
+
+def start(only_if_enabled: bool = False) -> dict:
     with _lock:
+        if only_if_enabled and not load_settings().get("remote", {}).get("enabled"):
+            return {"running": False}
         if _proc["p"] and _proc["p"].poll() is None:
             return {"running": True, "url": STATE["url"]}
         if not installed():
@@ -131,6 +169,10 @@ def start() -> dict:
                               "--url", f"http://127.0.0.1:{port}"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=flags)
         _proc["p"] = p
+        try:
+            PIDFILE.write_text(str(p.pid))
+        except OSError:
+            pass
         STATE.update(running=True, connected=False, url=None, error=None)
         threading.Thread(target=_reader, args=(p,), daemon=True, name="aq5-cfread").start()
         return {"running": True}
@@ -141,7 +183,12 @@ def stop() -> dict:
         p = _proc["p"]
         if p and p.poll() is None:
             p.terminate()
+            try:
+                p.wait(5)
+            except Exception:  # noqa: BLE001
+                _kill_pid(p.pid)
         _proc["p"] = None
+        cleanup_stale()
         STATE.update(running=False, connected=False, url=None)
     return {"running": False}
 
@@ -172,7 +219,7 @@ def watchdog() -> None:
                 if load_settings().get("remote", {}).get("enabled") and installed():
                     p = _proc["p"]
                     if not p or p.poll() is not None:
-                        start()
+                        start(only_if_enabled=True)
             except Exception as e:  # noqa: BLE001
                 STATE["error"] = str(e)[:200]
             time.sleep(30)
