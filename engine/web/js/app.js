@@ -149,6 +149,7 @@
     $('#lkReset').onclick = () => { Object.keys(LOOK).forEach(k => delete LOOK[k]); applyLook(); renderSet(); };
   }
   applyLook();
+  (() => { const c = $('#cmd'); const f = () => { if (c) c.placeholder = innerWidth <= 600 ? '代码 / 名称 / 拼音' : '输入代码或名称，回车分析 · F1-F8 切换页面'; }; f(); addEventListener('resize', f); })();
   function md(t) {
     const lines = esc(t || '').split(/\n/); let html = '', inList = false;
     const inline = s => s.replace(/\*\*(.+?)\*\*/g, '<b class="amber">$1</b>').replace(/`(.+?)`/g, '<code>$1</code>');
