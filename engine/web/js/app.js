@@ -862,6 +862,7 @@
         : `<p>还没有账号。创建后，手机访问需要登录，个人数据也可以加密备份。</p><button class="btn pri" id="pfCreate">创建账号</button>`, { cls: 'c6' })}
       ${panel('SECURITY <small>账号安全</small>', me.user ? `<div class="ticket">
         <label>原密码<input class="in" id="pwOld" type="password" autocomplete="current-password"></label><label>新密码<input class="in" id="pwNew" type="password" autocomplete="new-password"></label></div>
+        ${me.local ? `<div class="row" style="margin-top:6px"><span class="hint">忘记密码？用户名是 <b class="amber">${esc(me.user.username)}</b>（不区分大小写）</span><input class="in" id="pwReset" type="password" autocomplete="new-password" placeholder="直接设新密码（≥6位）" style="flex:1;min-width:120px"><button class="btn" id="pwResetGo">重置</button></div>` : ''}
         <div class="row" style="margin-top:6px"><label class="hint"><input type="checkbox" id="secLocal" ${me.security.local_no_login !== false ? 'checked' : ''} ${me.local ? '' : 'disabled'}> 本机（这台电脑）免登录</label><span class="sp"></span><button class="btn" id="pwGo">修改密码</button></div>
         <div class="sep"></div><div class="hint">已登录的设备</div>
         <table class="t"><tr><th>类型</th><th>设备 / 名称</th><th>登录时间</th><th>到期</th><th></th></tr>${me.sessions.map(x => `<tr><td>${x.kind === 'api' ? 'API' : '网页'}</td><td class="nm" title="${esc(x.ua)}">${esc(x.kind === 'api' ? x.name : (x.ip + ' ' + (x.ua || '').slice(0, 24)))}</td><td>${x.created}</td><td>${x.expires}</td><td><button class="btn sm" data-rv="${x.id}">注销</button></td></tr>`).join('') || '<tr><td colspan="5" class="muted">无</td></tr>'}</table>
@@ -970,6 +971,7 @@
     on('bkLocal', async () => { const r = await api('me/backup', { push: false }); toast('已加密备份到本机 ' + r.bytes + ' 字节'); renderSet(); });
     on('bkGo', async () => { await cfg(); toast('正在加密并推送…'); const r = await api('me/backup', { push: true }); toast(r.pushed ? '已推送到私有仓库' : '已备份'); renderSet(); });
     on('dbSnap', async () => { const r = await api('me/dbsnap', {}); toast(`已保存 ${r.file}（${(r.bytes / 1048576).toFixed(1)} MB）`); renderSet(); });
+    on('pwResetGo', async () => { const v = $('#pwReset').value; if (!v) return toast('先输入新密码', 1); const r = await api('auth/reset', { password: v }); toast(`密码已重置（用户名 ${r.username}），手机需要用新密码重新登录`); renderSet(); });
     on('rsGo', async () => { if (!confirm('恢复会用备份覆盖「我的模拟盘」当前的持仓和记录，确定吗？')) return; const r = await api('me/restore', { password: $('#rsPw').value }); toast('已恢复（备份时间 ' + r.time + '）'); });
   }
 
@@ -1038,7 +1040,8 @@
       ? '<p>还没有账号。请先在<b class="amber">电脑本机</b>打开 A量化，在「设置 → 账号安全」里创建账号，然后手机再来登录。</p>'
       : `<div class="ticket"><label class="full">用户名<input class="in" id="lgU" autocomplete="username" value="${setup ? 'me' : ''}"></label>
          <label class="full">密码<input class="in" id="lgP" type="password" autocomplete="${setup ? 'new-password' : 'current-password'}" placeholder="${setup ? '至少8位，字母+数字' : ''}"></label></div>
-         <p class="hint">${setup ? '账号只保存在你自己的电脑上（密码加盐哈希），用于保护手机访问。' : '登录后 30 天内免登录。'}</p>
+         <p class="hint">${setup ? '账号只保存在你自己的电脑上（密码加盐哈希），用于保护手机访问。' : `登录后半年内免登录；用户名不区分大小写${me.username_hint ? `，以「${esc(me.username_hint)}」开头` : ''}。建议让浏览器记住密码。`}</p>
+         ${!setup && me.local ? '<p class="hint"><a href="#" id="lgForgot">忘记用户名或密码？在这台电脑上直接重置</a></p>' : !setup ? '<p class="hint">忘记了？回到电脑上打开 A量化，「设置 → 账号安全」可以直接重置。</p>' : ''}
          <div class="row"><span class="sp"></span><button class="btn pri" id="lgGo">${setup ? '创建并登录' : '登录'}</button></div>`)}</div>`;
     document.body.appendChild(m);
     const go = async () => {
@@ -1048,6 +1051,9 @@
       } catch (e) { toast(e.message, 1); }
     };
     const b = $('#lgGo', m); if (b) { b.onclick = go; $('#lgP', m).onkeydown = e => { if (e.key === 'Enter') go(); }; }
+    const fg = $('#lgForgot', m); if (fg) fg.onclick = async e => { e.preventDefault();
+      const pw = prompt('输入新密码（至少 6 位）'); if (!pw) return;
+      try { const r = await api('auth/reset', { password: pw }); m.remove(); toast(`已重置，你的用户名是「${r.username}」`); boot(); } catch (er) { toast(er.message, 1); } };
   }
   // ------------------------------------------------------------------ 全局 AI 助手
   function initAssistant() {

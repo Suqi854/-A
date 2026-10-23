@@ -502,11 +502,13 @@ class Handler(BaseHTTPRequestHandler):
         return auth.check(self._token()) is not None
 
     def _auth_route(self, path, body) -> bool:
-        ip, ua = self.client_address[0], self.headers.get("User-Agent") or ""
+        ip = self.headers.get("Cf-Connecting-Ip") or self.client_address[0]  # 隧道过来的按真实 IP 计失败次数
+        ua = self.headers.get("User-Agent") or ""
         try:
             if path == "/api/auth/me":
                 sess = auth.check(self._token())
                 self._json({"has_user": auth.has_user(), "local": self._is_local(), "authorized": self._authorized(),
+                            "username_hint": ((auth.user() or {}).get("username") or "")[:1] + "…" if auth.has_user() else None,
                             "user": (auth.user() or {}).get("username") if (sess or self._authorized()) else None})
             elif path == "/api/auth/setup":
                 if not self._is_local():
@@ -517,6 +519,12 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/auth/login":
                 tok = auth.login(body.get("username", ""), body.get("password", ""), ip, ua)
                 self._json({"ok": True}, cookie=self._cookie(tok))
+            elif path == "/api/auth/reset":
+                if not self._is_local():
+                    return self._json({"error": "忘记密码只能在电脑本机重置"}, 403) or True
+                name = auth.reset_password(body.get("password", ""))
+                tok = auth.login(name, body.get("password", ""), ip, ua)
+                self._json({"ok": True, "username": name}, cookie=self._cookie(tok))
             elif path == "/api/auth/logout":
                 auth.logout(self._token())
                 self._json({"ok": True}, cookie="aq5s=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")

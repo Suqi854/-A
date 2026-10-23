@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS auth_user(id INTEGER PRIMARY KEY CHECK(id=1), usernam
 CREATE TABLE IF NOT EXISTS auth_session(token TEXT PRIMARY KEY, created REAL, expires REAL, ip TEXT, ua TEXT,
   kind TEXT DEFAULT 'web', name TEXT);
 """
-SESSION_DAYS = 30
+SESSION_DAYS = 180          # 登录一次半年内免登录
+MAX_FAILS, FAIL_WINDOW, LOCK_SECS = 20, 600, 120   # 10 分钟内错 20 次才锁 2 分钟（防公网暴力猜密码）
 _fails: dict[str, list[float]] = {}
 LOCAL = ("127.0.0.1", "::1")
 
@@ -57,19 +58,21 @@ def setup(username: str, password: str) -> None:
 
 
 def _check_pw(pw: str) -> None:
-    if len(pw) < 8 or pw.isdigit() or pw.isalpha():
-        raise ValueError("密码至少 8 位，并且要同时包含字母和数字")
+    if len(pw) < 6:
+        raise ValueError("密码至少 6 位")
 
 
 def login(username: str, password: str, ip: str, ua: str) -> str:
     t = time.time()
-    fails = [x for x in _fails.get(ip, []) if t - x < 600]
-    if len(fails) >= 5:
-        raise ValueError("失败次数太多，请 10 分钟后再试")
+    fails = [x for x in _fails.get(ip, []) if t - x < FAIL_WINDOW]
+    if len(fails) >= MAX_FAILS and t - fails[-1] < LOCK_SECS:
+        raise ValueError(f"错误次数太多，请 {int(LOCK_SECS - (t - fails[-1])) + 1} 秒后再试；忘记密码可在电脑本机重置")
     u = db.q1("SELECT username, pw, salt FROM auth_user WHERE id=1")
-    if not u or u["username"] != username.strip() or not hmac.compare_digest(u["pw"], _hash(password, u["salt"])):
+    if not u or u["username"].strip().lower() != username.strip().lower() or not hmac.compare_digest(u["pw"], _hash(password, u["salt"])):
         _fails[ip] = fails + [t]
-        raise ValueError("用户名或密码错误")
+        left = MAX_FAILS - len(_fails[ip])
+        raise ValueError("用户名或密码错误（用户名不区分大小写）" + (f"，再错 {left} 次会暂停 2 分钟" if left <= 5 else "")
+                         + "。忘记了可以在电脑本机打开 A量化 →「设置 → 账号安全」直接重置")
     _fails.pop(ip, None)
     return _new_session(ip, ua, "web", "网页登录", SESSION_DAYS * 86400)
 
@@ -95,6 +98,21 @@ def logout(token: str | None) -> None:
     if token:
         with db.tx() as c:
             c.execute("DELETE FROM auth_session WHERE token=?", (hashlib.sha256(token.encode()).hexdigest(),))
+
+
+def reset_password(new: str) -> str:
+    """忘记密码：只允许在电脑本机调用（server 层校验），不需要原密码。返回用户名。"""
+    u = db.q1("SELECT username FROM auth_user WHERE id=1")
+    if not u:
+        raise ValueError("还没有账号")
+    _check_pw(new)
+    salt = secrets.token_hex(16)
+    with db.tx() as c:
+        c.execute("UPDATE auth_user SET pw=?, salt=? WHERE id=1", (_hash(new, salt), salt))
+        c.execute("DELETE FROM auth_session WHERE kind='web'")
+    _fails.clear()
+    db.event("system", "登录密码已在本机重置", u["username"])
+    return u["username"]
 
 
 def change_password(old: str, new: str) -> None:
