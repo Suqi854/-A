@@ -40,6 +40,8 @@
       case 'events': { const e = await sj('events.json'); return S.priv ? [...S.priv.events, ...e].sort((x, y) => y.time < x.time ? -1 : 1) : e; }
       case 'settings': return sj('settings.json');
       case 'strategies': return sj('strategies.json');
+      case 'sectors': return sj('sectors.json');
+      case 'sector': throw new Error('公开版只有板块排行，成分股请在电脑端或局域网完整版查看');
       case 'quotes': return {};
       case 'search': { const v = (q.get('q') || '').toLowerCase(); const idx = [...(S.priv ? Object.values(S.priv.analysis).map(x => ({ code: x.code, name: x.name })) : []), ...await sj('analysis/index.json').catch(() => [])];
         return idx.filter(x => x.code.includes(v) || (x.name || '').toLowerCase().includes(v)).slice(0, 12); }
@@ -158,7 +160,8 @@
       if (S.page === 'mon') updateMon(ov);
     } catch (e) { $('#lastUpd').textContent = '连接中断'; }
   }
-  setInterval(() => { if (!document.hidden) poll(); }, STATIC ? 60000 : 5000);
+  function restartPoll() { clearInterval(S.timers.poll); const sec = STATIC ? +(lsGet('aq5_refresh') || 60) : 5; S.timers.poll = setInterval(() => { if (!document.hidden) poll(); }, sec * 1000); }
+  restartPoll();
 
   // ================================================================== F1 监控
   function renderMon() {
@@ -167,6 +170,8 @@
       ${panel('BREADTH <small>市场温度 · 沪深主板</small>', '<div id="breadth" class="loading">载入</div>', { cls: 'c4' })}
       ${panel('SIGNAL <small>最新选股</small>', '<div id="monPick" class="loading">载入</div>', { cls: 'c4', right: '<button class="btn sm" onclick="location.hash=\'pick\'">全部 ›</button>' })}
       ${panel('ACCOUNT <small>模拟账户</small>', '<div id="monAcct"></div>', { cls: 'c4', right: '<button class="btn sm" onclick="location.hash=\'sim\'">模拟盘 ›</button>' })}
+      ${panel('SECTORS <small>板块热度</small>', '<div id="secBox" class="scroll" style="max-height:380px"><div class="loading">载入</div></div>', { cls: 'c8', np: true, right: '<div class="seg" id="secSeg"><button data-m="ind" class="on">行业强度</button><button data-m="con">热门概念</button></div>' })}
+      ${panel('AI BRIEF <small>AI 今日简报</small>', '<div id="aiBrief" class="scroll" style="max-height:380px"><div class="loading">载入</div></div>', { cls: 'c4', right: '<button class="btn sm rw" id="aiBriefGo">生成</button>' })}
       ${STATIC && !S.priv ? '' : panel('WATCHLIST <small>自选监控 · 3秒刷新</small>', '<div class="scroll" style="max-height:420px"><table class="t" id="wlT"></table></div>',
         { cls: 'c8', np: true, right: `<span class="rw" style="position:relative"><input class="in" id="wlAdd" placeholder="搜索名称/代码 加自选" autocomplete="off" style="width:170px;height:22px"><div class="suggest" id="wlSug" style="top:24px;left:0;right:auto;min-width:220px"></div></span>` })}
       ${panel('OVERSEAS <small>外围市场</small>', '<table class="t" id="ovsT"></table>', { cls: 'c4', np: true })}
@@ -176,7 +181,62 @@
     </div>`;
     if (!STATIC && $('#wlAdd')) bindWlSearch();
     if (S.ov) updateMon(S.ov);
+    $$('#secSeg button').forEach(b => b.onclick = () => { S.secMode = b.dataset.m; drawSectors(); });
+    loadSectors(); loadBrief(); clearInterval(S.timers.sec); S.timers.sec = setInterval(() => S.page === 'mon' && !document.hidden && loadSectors(), 60000);
     loadIdxSpark(); clearInterval(S.timers.spark); S.timers.spark = setInterval(() => S.page === 'mon' && loadIdxSpark(), 60000);
+  }
+  async function loadSectors() {
+    if (!$('#secBox')) return;
+    try { S.sec = await api('sectors'); } catch (e) { $('#secBox').innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    drawSectors();
+  }
+  const secCol = v => v >= 65 ? 'var(--up)' : v < 35 ? 'var(--down)' : 'var(--amber)';
+  function drawSectors() {
+    const box = $('#secBox'), v = S.sec; if (!box || !v) return;
+    const mode = S.secMode || 'ind';
+    $$('#secSeg button').forEach(b => b.classList.toggle('on', b.dataset.m === mode));
+    if (mode === 'ind') {
+      if (!v.industries.length) {
+        box.innerHTML = `<div class="empty">${v.map && v.map.running ? '正在下载行业分类（约 1 分钟）…' : '还没有行业分类数据'}${STATIC ? '' : '<br><br><button class="btn sm rw" id="secRefresh">下载行业分类</button>'}</div>`;
+        const b = $('#secRefresh'); if (b) b.onclick = async () => { await api('sectors/refresh', {}); toast('开始下载行业分类，约 1 分钟'); setTimeout(loadSectors, 30000); };
+        return;
+      }
+      box.innerHTML = `<table class="t"><tr><th>#</th><th class="l">行业</th><th class="l">强度</th><th>涨跌</th><th class="hide-m">上涨</th><th>涨停</th><th class="hide-m">5日</th><th class="l">领涨</th></tr>` +
+        v.industries.map(x => `<tr class="click" data-sec="${x.code}"><td class="muted">${x.rank}</td><td class="l nm">${esc(x.name)} <small class="muted">${x.n}</small></td>
+          <td class="l"><div class="sbar"><i style="width:${x.score}%;background:${secCol(x.score)}"></i><span>${num(x.score, 0)}</span></div></td>
+          <td class="${cls(x.pct)}">${pct(x.pct)}</td><td class="hide-m">${num(x.up_ratio * 100, 0)}%</td><td class="${x.limit_up ? 'up' : 'muted'}">${x.limit_up}</td>
+          <td class="hide-m ${cls(x.mom5)}">${x.mom5 == null ? '--' : pct(x.mom5, 1)}</td><td class="l nm">${esc(x.leader.name || '')} <small class="${cls(x.leader.pct)}">${pct(x.leader.pct, 1)}</small></td></tr>`).join('') +
+        `</table><div class="hint" style="padding:6px 10px">强度 0~100：今日涨幅、上涨家数、涨停数、近5日动量的排名合成。${(v.industries[0].hist_days || 0) < 2 ? '近5日数据在积累中（每天收盘记录一次）。' : ''}点行业看成分股 · ${esc(v.time)}</div>`;
+    } else {
+      const c = v.concepts_top || [];
+      box.innerHTML = c.length ? `<table class="t"><tr><th class="l">概念</th><th>涨跌</th><th class="hide-m">成分</th><th class="l">领涨</th></tr>` +
+        c.map(x => `<tr class="click" data-sec="${x.code}"><td class="l nm">${esc(x.name)}</td><td class="${cls(x.pct)}">${pct(x.pct)}</td><td class="hide-m muted">${x.count}</td>
+          <td class="l nm">${esc(x.leader_name || '')} <small class="${cls(x.leader_pct)}">${pct(x.leader_pct, 1)}</small></td></tr>`).join('') + `</table><div class="hint" style="padding:6px 10px">共 ${v.concept_total} 个概念，显示涨幅前 20</div>`
+        : '<div class="empty">暂时取不到概念板块</div>';
+    }
+    box.querySelectorAll('[data-sec]').forEach(tr => tr.onclick = () => openSector(tr.dataset.sec));
+  }
+  async function openSector(code) {
+    const m = document.createElement('div'); m.className = 'modal'; m.onclick = e => { if (e.target === m) m.remove(); };
+    m.innerHTML = `<div class="box" style="max-width:640px">${panel('SECTOR <small>板块成分</small>', '<div class="loading">载入</div>', { right: '<button class="btn sm" data-x>×</button>' })}</div>`;
+    document.body.appendChild(m); $('[data-x]', m).onclick = () => m.remove();
+    const body = $('.pb', m);
+    try {
+      const d = await api('sector?code=' + encodeURIComponent(code)), i = d.info || {};
+      $('.ph h3', m).innerHTML = `SECTOR <small>${esc(d.name)} · 主板 ${d.total} 只</small>`;
+      body.innerHTML = (i.score != null ? `<div class="row hint mono" style="margin-bottom:8px"><span>强度 <b style="color:${secCol(i.score)}">${num(i.score, 0)}</b>（第 ${i.rank} 名 · ${esc(i.tag)}）</span><span>均涨 <b class="${cls(i.pct)}">${pct(i.pct)}</b></span><span>上涨 ${num(i.up_ratio * 100, 0)}%</span><span>涨停 ${i.limit_up}</span></div>` : '') +
+        `<div class="scroll" style="max-height:60vh"><table class="t"><tr><th class="l">股票</th><th>现价</th><th>涨跌</th><th class="hide-m">换手</th><th>成交额</th></tr>${d.stocks.map(x => `<tr class="click" data-c="${x.code}"><td class="l">${star(x.code, x.name)} ${nameCell(x.name, x.code)}</td><td class="${cls(x.pct)}">${num(x.price)}</td><td class="${cls(x.pct)}">${pct(x.pct)}</td><td class="hide-m">${num(x.turnover)}%</td><td>${money(x.amount)}</td></tr>`).join('')}</table></div>`;
+      body.querySelectorAll('[data-c]').forEach(tr => tr.onclick = () => { m.remove(); go('anly', tr.dataset.c); });
+    } catch (e) { body.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  }
+  async function loadBrief() {
+    const el = $('#aiBrief'); if (!el) return;
+    let n = null;
+    if (STATIC) { if (!S.priv) { el.innerHTML = '<div class="empty">解锁个人数据后可以看 AI 简报</div>'; return; } n = S.priv.ai && S.priv.ai.brief; }
+    else { try { n = (await api('ai/notes?kinds=brief&limit=1'))[0]; } catch { } }
+    el.innerHTML = n ? md(n.content) + `<div class="hint mono">${esc(n.created)}</div>` : '<div class="empty">还没有今日简报<br><small>交易日 9:00 自动生成，也可以点「生成」</small></div>';
+    const b = $('#aiBriefGo'); if (b) b.onclick = async () => { b.disabled = true; b.textContent = '生成中…'; el.innerHTML = '<div class="loading">AI 读盘中</div>';
+      try { const r = await api('ai/brief', {}); el.innerHTML = md(r.content) + `<div class="hint mono">${esc(r.created)}</div>`; } catch (e) { el.innerHTML = `<div class="up">${esc(e.message)}</div>`; } b.disabled = false; b.textContent = '生成'; };
   }
   const inWatch = c => !!(S.ov && S.ov.watchlist.some(w => w.code === c));
   const star = (c, name) => STATIC ? '' : `<button class="btn sm star rw ${inWatch(c) ? 'on' : ''}" data-star="${c}" data-n="${esc(name || '')}" title="${inWatch(c) ? '移出自选' : '加入自选'}">${inWatch(c) ? '★' : '☆'}</button>`;
@@ -292,7 +352,7 @@
     const m = r.market || {}, br = m.breadth || {}, rg = m.regime || {};
     const cards = r.items.map(p => {
       const pl = { stop: p.stop, target1: p.target1, target2: p.target2 };
-      return `<div class="pick"><div class="hd"><span class="nm">${esc(p.name)}</span><span class="cd">${short(p.code)}</span></div>
+      return `<div class="pick"><div class="hd"><span class="nm">${esc(p.name)}</span><span class="cd">${short(p.code)}</span>${p.industry ? `<span class="chip" style="margin-left:auto">${esc(p.industry)}</span>` : ''}</div>
         <div class="score"><b>${num(p.score, 1)}</b><small>综合评分 · 估计胜率 ${num(p.prob * 100, 0)}%</small></div>
         <div class="row" style="margin-top:6px">${p.strategies.slice(0, 3).map(s => `<span class="chip a">${esc(s.name)}</span>`).join('')}</div>
         <div class="plan"><div><div class="l">选出价</div><div class="v">${num(p.price)}</div></div>
@@ -308,9 +368,13 @@
       `<div class="row hint mono" style="margin-bottom:10px"><span>扫描 <b class="amber">${r.scanned}</b></span><span>精评 <b class="amber">${r.candidates}</b></span><span>门槛 <b class="amber">${num(m.min_score, 0)}</b></span>
         <span>大盘 <b>${esc(rg.state || '--')}</b></span><span>上涨 <b class="up">${br.up ?? '--'}</b> / 下跌 <b class="down">${br.down ?? '--'}</b></span><span>涨停 <b class="up">${br.limit_up ?? '--'}</b></span></div>
        ${r.items.length ? `<div class="picks">${cards}</div>` : `<div class="nopick"><b>宁缺毋滥 · 本次无机会</b><span class="hint">扫描 ${r.scanned} 只、精评 ${r.candidates} 只，没有股票同时满足：综合分≥${num(m.min_score, 0)}、至少一个策略信号、盈亏比≥1.4、不过热。<br>空仓也是一种仓位。</span></div>`}`, {}) +
+      `<div style="height:10px"></div>` + panel('AI <small>AI 解读这次选股</small>', '<div id="runAi"><div class="loading">载入</div></div>', { right: '<button class="btn sm rw" id="runAiGo">生成解读</button>' }) +
       `<div style="height:10px"></div>` + panel('CANDIDATES <small>候选前30（参考，不是推荐）</small>', '<div class="scroll" style="max-height:420px"><table class="t" id="candT"><tr><td class="loading">载入</td></tr></table></div>', { np: true });
     $$('#runDetail [data-a]').forEach(b => b.onclick = () => go('anly', b.dataset.a));
     $$('#runDetail [data-b]').forEach(b => b.onclick = () => openOrder(JSON.parse(b.dataset.b)));
+    const showRunAi = n => { const el = $('#runAi'); if (el) el.innerHTML = n && n.content ? md(n.content) + `<div class="hint mono">${esc(n.created || '')}</div>` : `<div class="hint">${STATIC ? '这次还没有 AI 解读' : '还没有 AI 解读。配置了 AI 后，每次选股会自动生成；也可以点「生成解读」。'}</div>`; };
+    if (STATIC) showRunAi(r.ai); else api('ai/run?id=' + r.id).then(showRunAi).catch(() => showRunAi(null));
+    const rg2 = $('#runAiGo'); if (rg2) rg2.onclick = async () => { rg2.disabled = true; $('#runAi').innerHTML = '<div class="loading">AI 解读中</div>'; try { showRunAi(await api('ai/run', { id: r.id })); } catch (e) { $('#runAi').innerHTML = `<div class="up">${esc(e.message)}</div>`; } rg2.disabled = false; };
     const c = await api('picks/candidates?run=' + r.id);
     const names = { breakout: '突破', pullback: '回踩', volume_start: '放量', oversold: '超跌', macd_cross: '金叉', accumulate: '吸筹', tail_strong: '尾强', auction_strong: '竞强' };
     $('#candT').innerHTML = `<tr><th>#</th><th class="l">股票</th><th>评分</th><th>价格</th><th class="l">信号</th></tr>` + c.map((x, i) => `<tr class="click" data-c="${x.code}"><td class="muted">${i + 1}</td><td class="l">${star(x.code, x.name)} ${nameCell(x.name, x.code)}</td><td class="${x.score >= m.min_score ? 'amber' : ''}">${num(x.score, 1)}</td><td>${num(x.price)}</td><td class="l">${x.strategies.map(s => `<span class="chip">${names[s] || s}</span>`).join(' ')}</td></tr>`).join('');
@@ -347,7 +411,7 @@
         <div class="qgrid"><div><span>今开</span>${num(q.open)}</div><div><span>最高</span><b class="up">${num(q.high)}</b></div><div><span>最低</span><b class="down">${num(q.low)}</b></div><div><span>昨收</span>${num(q.prev)}</div>
           <div><span>量比</span>${num(q.vr)}</div><div><span>换手</span>${num(q.turnover)}%</div><div><span>成交额</span>${money(q.amount)}</div><div><span>主力净额</span><b class="${cls(q.main_net)}">${money(q.main_net)}</b></div>
           <div><span>市盈</span>${num(q.pe, 1)}</div><div><span>市净</span>${num(q.pb)}</div><div><span>总市值</span>${num(q.mcap, 0)}亿</div><div><span>流通</span>${num(q.fmcap, 0)}亿</div>
-          <div><span>涨停</span>${num(q.up_limit)}</div><div><span>跌停</span>${num(q.dn_limit)}</div><div><span>大盘</span>${esc(a.regime.state)}</div><div><span>权重版本</span>v${a.weights_ver}</div></div></div>
+          <div><span>涨停</span>${num(q.up_limit)}</div><div><span>跌停</span>${num(q.dn_limit)}</div><div><span>大盘</span>${esc(a.regime.state)}</div><div class="${a.sector ? 'click' : ''}" id="aSec"><span>行业</span>${a.sector ? `${esc(a.sector.name)} <b style="color:${secCol(a.sector.score)}">${num(a.sector.score, 0)}</b><small class="muted"> ${a.sector.rank}/${a.sector.total}</small>` : '--'}</div></div></div>
       <div class="panel c8"><div class="chartbar"><div class="seg" id="chMode"><button data-m="k" class="on">日K</button><button data-m="i">分时</button></div>
           <div class="seg" id="chSub"><button data-s="macd" class="on">MACD</button><button data-s="rsi">RSI</button></div>
           <label class="hint"><input type="checkbox" id="chPlan" checked> 叠加交易计划</label><span class="sp"></span><span class="hint hide-m">拖动平移 · 滚轮/双指缩放 · ←→键</span></div>
@@ -369,12 +433,12 @@
           <div class="flowbars">${a.flows.map(f => `<div title="${f.date} ${money(f.main)}"><i style="${f.main >= 0 ? `bottom:50%;height:${(f.main / maxF * 50).toFixed(1)}%;background:var(--up)` : `top:50%;height:${(-f.main / maxF * 50).toFixed(1)}%;background:var(--down)`}"></i></div>`).join('')}</div>
           <div class="hint mono" style="display:flex;justify-content:space-between"><span>${a.flows[0] ? a.flows[0].date.slice(5) : ''}</span><span>近20日主力净额</span><span>${a.flows.length ? a.flows[a.flows.length - 1].date.slice(5) : ''}</span></div>`, { cls: 'c4' })}
       ${panel('FACTORS <small>多维度因子</small>', a.factors.map(f => `<div class="fbar" title="${esc(f.explain)}"><span>${f.label}</span><div class="bar"><em></em><i style="width:${f.score}%;background:${f.score >= 60 ? 'var(--up)' : f.score < 40 ? 'var(--down)' : 'var(--amber)'}"></i></div><span class="mono">${num(f.score, 0)}</span></div>`).join('') +
-        '<div class="hint" style="margin-top:6px">每根条 = 0~100 分，中线 = 50。权重会随实战结果自动迭代（见「迭代」页）。悬停查看含义。</div>', { cls: 'c4' })}
+        `<div class="hint" style="margin-top:6px">每根条 = 0~100 分，中线 = 50。权重 v${a.weights_ver}，会随实战结果自动迭代（见「迭代」页）。悬停查看含义。</div>`, { cls: 'c4' })}
       ${panel('SIGNALS <small>策略信号</small>', (a.signals.length ? a.signals.map(s => `<div style="margin-bottom:8px"><div class="row"><span class="chip a">${esc(s.name)}</span><span class="mono hint">置信度 ${num(s.conf * 100, 0)}% · 权重 ${num(s.weight, 2)}</span></div><div style="margin-top:3px">${esc(s.why)}</div><div class="hint">${esc(a.strategy_desc[s.id])}</div></div>`).join('')
         : '<div class="empty" style="padding:12px">当前没有触发任何买点策略</div>') +
         `<div class="sep"></div><div class="hint">看多理由</div><ul class="why">${a.reasons.map(x => `<li>${esc(x)}</li>`).join('') || '<li>暂无明显优势</li>'}</ul>
          <div class="hint">风险提示</div><ul class="why risk">${a.risks.map(x => `<li>${esc(x)}</li>`).join('') || '<li>暂无明显风险项</li>'}</ul>`, { cls: 'c4' })}
-      ${STATIC ? '' : panel('AI <small>AI 点评 · ' + esc((S.aiStatus && S.aiStatus.cfg.model) || '未配置') + '</small>', '<div id="aiCmt" class="hint">载入中…</div>', { cls: 'c8', right: '<button class="btn sm" id="aiCmtGo">生成 / 刷新</button>' })}
+      ${STATIC ? (S.priv && S.priv.ai && S.priv.ai.comments[a.code] ? panel('AI <small>AI 点评 · 电脑端生成</small>', md(S.priv.ai.comments[a.code].content) + `<div class="hint mono">${esc(S.priv.ai.comments[a.code].created)}</div>`, { cls: 'c12' }) : '') : panel('AI <small>AI 点评 · ' + esc((S.aiStatus && S.aiStatus.cfg.model) || '未配置') + '</small>', '<div id="aiCmt" class="hint">载入中…</div>', { cls: 'c8', right: '<button class="btn sm" id="aiCmtGo">生成 / 刷新</button>' })}
       ${STATIC ? '' : panel('NEWS <small>公告与新闻</small>', '<div id="aiNews" class="scroll" style="max-height:330px"><div class="loading">抓取中</div></div>', { cls: 'c4', np: true })}
       ${STATIC ? '' : panel('ASK <small>问 AI 关于这只股票</small>', `<div class="row"><input class="in" id="aiQ" style="flex:1" placeholder="例如：现在缩量回调，适合低吸吗？止损为什么设在这里？"><button class="btn pri" id="aiQGo">提问</button></div><div id="aiA" style="margin-top:8px"></div>`, { cls: 'c12' })}
       ${panel('LEARN <small>学习要点 · 这只股票教会你什么</small>', a.lessons.map(x => `<div class="lesson">${esc(x)}</div>`).join(''), { cls: 'c12' })}
@@ -398,6 +462,7 @@
     $('#aBuy').onclick = () => openOrder({ code: a.code, name: a.name, price: q.price, stop: pl.stop, target1: pl.target1, target2: pl.target2 });
     $('#aSell').onclick = () => openOrder({ code: a.code, name: a.name, price: q.price, side: 'sell' });
     $('#aBt').onclick = () => { S.btCode = a.code; go('bt'); };
+    if (a.sector) $('#aSec').onclick = () => openSector(a.sector.code);
     $('#aWl').onclick = async () => { await api('watchlist', { code: a.code, op: inWl ? 'remove' : 'add' }); toast(inWl ? '已移出自选' : '已加入自选'); await poll(); renderAnly(a.code); };
     clearInterval(S.timers.anly);
     S.timers.anly = setInterval(async () => {
@@ -481,12 +546,25 @@
         <label>理由<input class="in" id="oWhy" placeholder="为什么买/卖？" value="${o.pick_id ? '系统选股' : ''}"></label>
       </div>
       <p class="hint">A股规则：100股一手、T+1（今天买明天才能卖）、涨停买不进/跌停卖不出、佣金万2.5最低5元、卖出印花税0.05%。非交易时间下单会挂起，开盘后自动成交。</p>
-      <div class="row"><span class="sp"></span><button class="btn" id="oCancel">取消</button><button class="btn pri" id="oOk">确认下单</button></div>`)}</div>`;
+      <div id="oAi"></div>
+      <div class="row"><button class="btn rw" id="oChk" title="让 AI 按你的规矩、仓位和行情检查这笔单">AI 检查</button><span class="sp"></span><button class="btn" id="oCancel">取消</button><button class="btn pri" id="oOk">确认下单</button></div>`)}</div>`;
     document.body.appendChild(m);
     let sd = side;
     $$('#oSide button', m).forEach(b => b.onclick = () => { sd = b.dataset.v; $$('#oSide button', m).forEach(x => x.classList.toggle('on', x === b)); });
     m.onclick = e => { if (e.target === m) m.remove(); };
     $('#oCancel', m).onclick = () => m.remove();
+    $('#oChk', m).onclick = async () => {
+      const box = $('#oAi', m), b = $('#oChk', m); b.disabled = true; box.innerHTML = '<div class="loading">AI 检查中</div>';
+      try {
+        const r = await api('ai/check', { code: o.code, side: sd, qty: +$('#oQty', m).value, price: $('#oPrice', m).value });
+        const c = { '通过': 'd', '谨慎': 'a', '不建议': 'u' }[r.verdict] || 'a';
+        box.innerHTML = `<div class="aichk"><div class="row"><span class="chip ${c}">${esc(r.verdict)}</span><span class="hint">${esc(r.tip)}</span></div>
+          <ul class="why">${r.points.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
+          <div class="row hint mono"><span>建议仓位 <b class="amber">${esc(r.position || '--')}</b></span><span>AI 止损 <b class="down">${r.stop ? num(r.stop) : '--'}</b></span><span>系统止损 <b class="down">${num(r.system.stop)}</b></span>${r.stop ? '<span class="sp"></span><button class="btn sm" id="oUseStop">用 AI 止损</button>' : ''}</div></div>`;
+        const us = $('#oUseStop', m); if (us) us.onclick = () => { $('#oStop', m).value = r.stop; toast('已填入 AI 建议的止损价'); };
+      } catch (e) { box.innerHTML = `<div class="up">${esc(e.message)}</div>`; }
+      b.disabled = false;
+    };
     $('#oOk', m).onclick = async () => {
       try {
         const r = await api('sim/order', { acct: $('#oAcct', m).value, code: o.code, side: sd, qty: +$('#oQty', m).value, kind: $('#oKind', m).value,
@@ -513,7 +591,7 @@
       ${panel('POSITIONS <small>持仓</small>', a.positions.length ? `<div class="scroll"><table class="t"><tr><th>股票</th><th>数量/可卖</th><th>成本</th><th>现价</th><th>盈亏</th><th>止损</th><th>止盈①</th><th class="hide-m">持有</th><th></th></tr>
         ${a.positions.map(p => `<tr><td class="click" data-c="${p.code}">${nameCell(p.name, p.code)}</td><td>${p.qty}/<span class="muted">${p.avail}</span></td><td>${num(p.cost, 3)}</td><td class="${cls(p.pct)}">${num(p.price)}</td>
           <td class="${cls(p.pnl)}">${sgn(p.pnl)}<br><small>${pct(p.pnl_pct)}</small></td><td class="down">${num(p.stop)}<br><small>${pct(p.to_stop, 1)}</small></td><td class="up">${num(p.target1)}<br><small>${pct(p.to_target, 1)}</small></td>
-          <td class="hide-m">${p.hold_days}天${p.auto ? '<br><small class="amber">自动</small>' : ''}</td><td><button class="btn sm" data-ed="${p.code}">改</button> <button class="btn sm sell" data-sl='${esc(JSON.stringify({ code: p.code, name: p.name, price: p.price, side: 'sell', qty: p.avail }))}'>卖</button></td></tr>`).join('')}</table></div>` : '<div class="empty">空仓</div>', { cls: 'c8', np: !!a.positions.length })}
+          <td class="hide-m">${p.hold_days}天${p.auto ? '<br><small class="amber">自动</small>' : ''}</td><td><button class="btn sm rw" data-ed="${p.code}">改</button> <button class="btn sm sell rw" data-sl='${esc(JSON.stringify({ code: p.code, name: p.name, price: p.price, side: 'sell', qty: p.avail }))}'>卖</button></td></tr>`).join('')}</table></div>` : '<div class="empty">空仓</div>', { cls: 'c8', np: !!a.positions.length, right: S.acct === 'me' ? `<button class="btn sm ${STATIC ? '' : 'rw'}" id="aiHold">AI 持仓体检</button>` : '' })}
       ${panel('STATS <small>交易统计</small>', `<dl class="kv"><dt>平仓次数</dt><dd>${st.sells}</dd><dt>胜率</dt><dd class="amber">${st.win_rate == null ? '--' : num(st.win_rate * 100, 1) + '%'}</dd>
         <dt>平均盈利</dt><dd class="up">${num(st.avg_win)}</dd><dt>平均亏损</dt><dd class="down">${num(st.avg_loss)}</dd><dt>盈亏比(PF)</dt><dd>${num(st.profit_factor)}</dd>
         <dt>最大回撤</dt><dd class="down">${num(st.max_dd)}%</dd><dt>平均持有</dt><dd>${st.avg_hold ?? '--'} 天</dd><dt>累计手续费</dt><dd>${num(st.fees)}</dd></dl>
@@ -523,11 +601,24 @@
       ${panel('ORDERS <small>委托</small>', `<div class="scroll" style="max-height:240px"><table class="t"><tr><th>时间</th><th class="l">股票</th><th>方向</th><th>数量</th><th>成交价</th><th>状态</th><th></th></tr>
         ${a.orders.map(o => `<tr><td class="muted">${o.created.slice(5, 16)}</td><td class="l">${esc(o.name)}</td><td class="${o.side === 'buy' ? 'up' : 'down'}">${o.side === 'buy' ? '买' : '卖'}${o.kind === 'limit' ? '(限' + num(o.price) + ')' : ''}</td><td>${o.qty}</td><td>${num(o.fill_price)}</td>
           <td>${{ pending: '<span class="amber">挂单</span>', filled: '成交', cancelled: '<span class="muted">已撤</span>', rejected: '<span class="up">废单</span>' }[o.status] || o.status}</td><td>${o.status === 'pending' ? `<button class="btn sm" data-cx="${o.id}">撤</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="7" class="muted">暂无</td></tr>'}</table></div>`, { cls: 'c6', np: true })}
-      ${panel('TRADES <small>成交记录 · 复盘</small>', `<div class="scroll" style="max-height:360px"><table class="t"><tr><th>时间</th><th class="l">股票</th><th>方向</th><th>数量</th><th>价格</th><th>盈亏</th><th class="l hide-m">理由 / 心态</th></tr>
+      ${panel('TRADES <small>成交记录 · 复盘</small>', `<div class="scroll" style="max-height:360px"><table class="t"><tr><th>时间</th><th class="l">股票</th><th>方向</th><th>数量</th><th>价格</th><th>盈亏</th><th class="l hide-m">理由 / 心态</th><th></th></tr>
         ${a.trades.map(t => `<tr><td class="muted">${t.time.slice(5, 16)}</td><td class="l click" data-c="${t.code}">${esc(t.name)}</td><td class="${t.side === 'buy' ? 'up' : 'down'}">${t.side === 'buy' ? '买入' : '卖出'}</td><td>${t.qty}</td><td>${num(t.price)}</td>
-          <td class="${cls(t.pnl)}">${t.pnl == null ? '' : sgn(t.pnl)}</td><td class="l hide-m nm">${esc(t.reason || '')} <span class="chip">${esc(t.emotion || '')}</span></td></tr>`).join('') || '<tr><td colspan="7" class="muted">暂无</td></tr>'}</table></div>`, { cls: 'c12', np: true })}
+          <td class="${cls(t.pnl)}">${t.pnl == null ? '' : sgn(t.pnl)}</td><td class="l hide-m nm">${esc(t.reason || '')} <span class="chip">${esc(t.emotion || '')}</span></td>
+          <td>${S.acct === 'me' && t.side === 'sell' && (!STATIC || (S.priv && S.priv.ai && S.priv.ai.trades[t.id])) ? `<button class="btn sm" data-tr="${t.id}">AI复盘</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="8" class="muted">暂无</td></tr>'}</table></div>`, { cls: 'c12', np: true })}
     </div>`;
     $$('#acctSeg button').forEach(b => b.onclick = () => { S.acct = b.dataset.a; renderSim(); });
+    $$('#p-sim [data-tr]').forEach(b => b.onclick = async () => {
+      if (STATIC) return mdModal('AI 交易复盘', S.priv.ai.trades[b.dataset.tr]);
+      b.disabled = true; b.textContent = '复盘中…';
+      try { mdModal('AI 交易复盘', await api('ai/trade', { id: +b.dataset.tr })); } catch (e) { toast(e.message, 1); }
+      b.disabled = false; b.textContent = 'AI复盘';
+    });
+    const ah = $('#aiHold'); if (ah) ah.onclick = async () => {
+      if (STATIC) { const n = S.priv && S.priv.ai && S.priv.ai.holdings; return n ? mdModal('AI 持仓体检', n) : toast('电脑端还没有生成过持仓体检', 1); }
+      ah.disabled = true; ah.textContent = '体检中…';
+      try { mdModal('AI 持仓体检', await api('ai/holdings', {})); } catch (e) { toast(e.message, 1); }
+      ah.disabled = false; ah.textContent = 'AI 持仓体检';
+    };
     $$('#p-sim [data-c]').forEach(e => e.onclick = () => go('anly', e.dataset.c));
     $$('#p-sim [data-sl]').forEach(b => b.onclick = () => { const o = JSON.parse(b.dataset.sl); if (S.acct === 'ai') return toast('AI自动盘由系统按计划操作', 1); openOrder(o); });
     $$('#p-sim [data-cx]').forEach(b => b.onclick = async () => { await api('sim/cancel', { id: +b.dataset.cx }); renderSim(); });
@@ -543,6 +634,11 @@
     $('#simReset').onclick = async () => { if (!confirm(`确定把「${a.name}」重置为初始资金？所有持仓和记录会清空。`)) return; await api('sim/reset', { acct: S.acct }); toast('已重置'); renderSim(); };
     const eq = a.equity_curve;
     Charts.lines($('#eqC'), eq.map(e => e.date), [{ values: eq.map(e => e.equity), color: '#ffb000', width: 1.6 }], { base: a.init, fmt: v => (v / 1e4).toFixed(2) + '万' });
+  }
+  function mdModal(title, n) {
+    const m = document.createElement('div'); m.className = 'modal'; m.onclick = e => { if (e.target === m) m.remove(); };
+    m.innerHTML = `<div class="box" style="max-width:640px">${panel(`AI <small>${esc(title)}</small>`, (n && n.content ? md(n.content) + `<div class="hint mono">${esc(n.created || '')}</div>` : '<div class="empty">暂无内容</div>'), { right: '<button class="btn sm" data-x>×</button>' })}</div>`;
+    document.body.appendChild(m); $('[data-x]', m).onclick = () => m.remove();
   }
   function editExit(p) {
     const m = document.createElement('div'); m.className = 'modal';
@@ -630,7 +726,30 @@
   }
 
   // ================================================================== F8 设置
+  async function renderStaticSet() {
+    const s = await api('settings').catch(() => ({})), p = S.priv, prof = (p && p.profile) || {};
+    const refresh = +(lsGet('aq5_refresh') || 60), rem = !!lsGet('aq5_pw');
+    $('#p-set').innerHTML = `<div class="grid">
+      ${panel('PHONE <small>手机设置 · 只保存在这台手机</small>', `<dl class="kv"><dt>个人数据</dt><dd>${p ? '<b class="down">已解锁</b> · 数据时间 ' + esc(p.time.slice(5, 16)) : '<b class="up">未解锁</b>'}</dd></dl>
+        <div class="ticket"><label>自动刷新<select class="in" id="phRef">${[30, 60, 120, 300].map(x => `<option value="${x}" ${x === refresh ? 'selected' : ''}>${x < 60 ? x + ' 秒' : x / 60 + ' 分钟'}</option>`).join('')}</select></label>
+          <label>解锁密码<select class="in" id="phRem"><option value="1" ${rem ? 'selected' : ''}>记住（自动解锁）</option><option value="0" ${rem ? '' : 'selected'}>不记住</option></select></label></div>
+        <div class="row" style="margin-top:8px"><button class="btn ${p ? '' : 'pri'}" id="phLock">${p ? '锁定并清除密码' : '解锁个人数据'}</button><span class="sp"></span><button class="btn" id="phClear">清除本机缓存</button></div>
+        <p class="hint">公开数据每 10 分钟（盘中）由电脑自动发布一次；页面刷新只是去拿最新发布的那份。</p>`, { cls: 'c6' })}
+      ${panel('EDIT <small>在手机上改设置</small>', `<p>这里是 GitHub 上的只读版，不能直接改电脑上的设置。要在手机上改 AI 接口、选股参数、自选股或下单：</p>
+        <ul class="why"><li>手机连上和电脑同一个 WiFi</li><li>打开 ${p && p.lan ? `<a class="amber mono" href="${esc(p.lan)}">${esc(p.lan)}</a>` : '电脑端「设置 → 手机访问」里的地址'}</li><li>用你的账号登录，就是完整版，所有设置都能改，和电脑上一样</li></ul>
+        <p class="hint">不在家时：之后可以装 Tailscale，让手机在外面也能安全连回电脑。</p>`, { cls: 'c6' })}
+      ${p ? panel('PROFILE <small>个人资料 · 只读</small>', `<dl class="kv"><dt>昵称</dt><dd>${esc(prof.nickname || '--')}</dd><dt>风险偏好</dt><dd>${esc(prof.risk || '--')}</dd><dt>交易风格</dt><dd>${esc(prof.style || '--')}</dd><dt>本金</dt><dd>${esc(prof.capital || '--')}</dd></dl>${prof.goal ? `<div class="hint">给自己的规矩</div><p>${esc(prof.goal)}</p>` : ''}`, { cls: 'c6' }) : ''}
+      ${panel('SYSTEM <small>系统参数 · 只读</small>', `<dl class="kv"><dt>选股时间</dt><dd>${esc(((s.pick && s.pick.times) || []).join(' / '))}</dd><dt>入选门槛</dt><dd>${s.pick ? s.pick.min_score + ' 分' : '--'}</dd>
+        <dt>每次最多</dt><dd>${s.pick ? s.pick.max_picks + ' 只' : '--'}</dd><dt>止损</dt><dd>${s.risk ? s.risk.stop_atr + ' × ATR，最多 ' + num(s.risk.max_stop_pct * 100, 0) + '%' : '--'}</dd>
+        <dt>AI 模型</dt><dd>${s.ai ? esc(s.ai.provider + ' · ' + (s.ai.model || '默认')) : '--'}</dd></dl>`, { cls: 'c6' })}
+    </div>`;
+    $('#phRef').onchange = e => { lsSet('aq5_refresh', e.target.value); restartPoll(); toast('已保存'); };
+    $('#phRem').onchange = e => { if (e.target.value === '0') lsSet('aq5_pw', null); else if (!S.priv) toast('下次解锁时勾选「记住」即可'); toast('已保存'); };
+    $('#phLock').onclick = () => { if (S.priv) { S.priv = null; lsSet('aq5_pw', null); location.reload(); } else showUnlock(); };
+    $('#phClear').onclick = () => { if (!confirm('清除这台手机上保存的密码和设置？')) return; ['aq5_pw', 'aq5_refresh', 'aq5_chat'].forEach(k => lsSet(k, null)); location.reload(); };
+  }
   async function renderSet() {
+    if (STATIC) return renderStaticSet();
     const s = await api('settings'); S.settings = s;
     const me = await api('me').catch(() => null);
     const f = (id, label, val, hint = '') => `<label>${label}<input class="in" id="${id}" value="${esc(val)}">${hint ? `<small class="hint">${hint}</small>` : ''}</label>`;
@@ -668,16 +787,20 @@
         <p class="hint">备份内容：我的模拟盘、委托、成交、资产曲线、自选、个人资料、参数。先用备份密码加密，仓库里只有密文。<b class="amber">仓库必须设为 Private</b>，密钥不在备份里。</p>
         <div class="row"><span class="hint mono">${me.backup.last ? '上次备份 ' + esc(me.backup.last) : '还没有备份'}${me.backup.error ? ' · <span class="up">' + esc(me.backup.error) + '</span>' : ''}</span><span class="sp"></span>
           <button class="btn" id="bkSaveCfg">保存</button><button class="btn" id="bkLocal">仅本机备份</button><button class="btn pri" id="bkGo">立即备份并推送</button></div>
-        <div class="row" style="margin-top:6px"><input class="in" id="rsPw" type="password" placeholder="恢复时输入备份密码（本机已保存可留空）" style="flex:1"><button class="btn sell" id="rsGo">从备份恢复</button></div>`, { cls: 'c6' })}` : '';
+        <div class="row" style="margin-top:6px"><input class="in" id="rsPw" type="password" placeholder="恢复时输入备份密码（本机已保存可留空）" style="flex:1"><button class="btn sell" id="rsGo">从备份恢复</button></div>
+        <div class="sep"></div><div class="row"><span class="hint">本机整库快照（行情缓存、学习样本、AI 笔记全部），每天 15:55 自动一份，保留 7 天${me.backup.db_last ? ' · 上次 ' + esc(me.backup.db_last) : ''}</span><span class="sp"></span><button class="btn sm" id="dbSnap">立即快照</button></div>`, { cls: 'c6' })}` : '';
     $('#p-set').innerHTML = `<div class="grid">${personal}
       ${panel('AI <small>AI 接口（Key 在密钥保险箱）</small>', `<div class="ticket">
         <label>服务商<select class="in" id="aiProv">${['DeepSeek', 'OpenAI', '通义千问', 'Kimi', 'Claude', '自定义'].map(p => `<option ${s.ai.provider === p ? 'selected' : ''}>${p}</option>`).join('')}</select></label>
-        <label>模型<input class="in" id="aiModel" value="${esc(s.ai.model)}" placeholder="留空用默认，如 deepseek-chat"></label>
+        <label>模型<span class="row" style="flex-wrap:nowrap;gap:4px"><input class="in" id="aiModel" value="${esc(s.ai.model)}" placeholder="留空用默认，如 deepseek-chat" style="flex:1;min-width:0"><button class="btn sm" id="aiPull" type="button" title="向服务商拉取可用模型">拉取</button></span>
+          <select class="in" id="aiModelSel" style="display:none;margin-top:4px"></select></label>
         <label class="full">接口地址<input class="in" id="aiBase" value="${esc(s.ai.base_url)}" placeholder="留空用默认，如 https://api.deepseek.com"></label>
         <label>接口格式<select class="in" id="aiFmt"><option value="">自动</option><option value="openai" ${s.ai.format === 'openai' ? 'selected' : ''}>OpenAI 兼容</option><option value="anthropic" ${s.ai.format === 'anthropic' ? 'selected' : ''}>Claude</option></select></label>
         <label>每天最多调用<input class="in" id="aiLimit" value="${esc(s.ai.daily_limit)}"></label>
         <label class="full"><span><input type="checkbox" id="aiAutoRev" ${s.ai.auto_review ? 'checked' : ''}> 每天 15:40 自动生成 AI 盘后复盘</span></label>
-        <label class="full"><span><input type="checkbox" id="aiAutoSen" ${s.ai.auto_sentiment ? 'checked' : ''}> 选股时让 AI 读前 8 名的新闻打情绪分（±4 分）</span></label></div>
+        <label class="full"><span><input type="checkbox" id="aiAutoSen" ${s.ai.auto_sentiment ? 'checked' : ''}> 选股时让 AI 读前 8 名的新闻打情绪分（±4 分）</span></label>
+        <label class="full"><span><input type="checkbox" id="aiAutoExp" ${s.ai.auto_explain !== false ? 'checked' : ''}> 每次选股后 AI 自动写解读</span></label>
+        <label class="full"><span><input type="checkbox" id="aiAutoBrief" ${s.ai.auto_brief !== false ? 'checked' : ''}> 交易日 9:00 自动生成 AI 今日简报</span></label></div>
         <div class="row"><span class="hint mono" id="aiTestR"></span><span class="sp"></span><button class="btn" id="aiSave">保存</button><button class="btn pri" id="aiTest">测试连接</button></div>`, { cls: 'c6' })}
       ${panel('MOBILE <small>手机访问</small>', `<p>手机和电脑连同一个 WiFi，用手机浏览器打开：</p><div class="mono amber" style="font-size:20px;word-break:break-all">${esc(S.ov ? S.ov.lan : '')}</div>
         <p class="hint">打开后点浏览器菜单「添加到主屏幕」，就像 App 一样使用。若打不开，请在 Windows 防火墙允许 Python 访问专用网络。</p>`, { cls: 'c4' })}
@@ -715,7 +838,19 @@
       } catch (e) { toast(e.message, 1); }
     };
     if (me) bindPersonal(me);
-    const aiCfg = () => api('ai/config', { provider: $('#aiProv').value, model: $('#aiModel').value.trim(), base_url: $('#aiBase').value.trim(), format: $('#aiFmt').value, daily_limit: +$('#aiLimit').value || 300, auto_review: $('#aiAutoRev').checked, auto_sentiment: $('#aiAutoSen').checked });
+    const aiCfg = () => api('ai/config', { provider: $('#aiProv').value, model: $('#aiModel').value.trim(), base_url: $('#aiBase').value.trim(), format: $('#aiFmt').value, daily_limit: +$('#aiLimit').value || 300, auto_review: $('#aiAutoRev').checked, auto_sentiment: $('#aiAutoSen').checked, auto_explain: $('#aiAutoExp').checked, auto_brief: $('#aiAutoBrief').checked });
+    $('#aiProv').onchange = () => { const p = ((S.aiStatus && S.aiStatus.presets) || {})[$('#aiProv').value]; if (p) { $('#aiModel').value = p.model; $('#aiBase').value = ''; $('#aiFmt').value = ''; } $('#aiModelSel').style.display = 'none'; };
+    $('#aiPull').onclick = async () => {
+      const b = $('#aiPull'); b.disabled = true; b.textContent = '…';
+      try {
+        const q = new URLSearchParams({ provider: $('#aiProv').value, base_url: $('#aiBase').value.trim(), format: $('#aiFmt').value });
+        const r = await api('ai/models?' + q); const sel = $('#aiModelSel'), cur = $('#aiModel').value.trim();
+        sel.innerHTML = `<option value="">— 从 ${r.models.length} 个模型中选择 —</option>` + r.models.map(x => `<option ${x === cur ? 'selected' : ''}>${esc(x)}</option>`).join('');
+        sel.style.display = ''; sel.onchange = () => { if (sel.value) $('#aiModel').value = sel.value; };
+        toast(`拉取到 ${r.models.length} 个模型，选好后点「保存」`);
+      } catch (e) { toast(e.message, 1); }
+      b.disabled = false; b.textContent = '拉取';
+    };
     $('#aiSave').onclick = async () => { try { await aiCfg(); toast('AI 设置已保存'); } catch (e) { toast(e.message, 1); } };
     $('#aiTest').onclick = async () => { $('#aiTestR').textContent = '连接中…'; try { await aiCfg(); const r = await api('ai/test', {}); $('#aiTestR').innerHTML = `<span class="up">成功</span> ${esc(r.model)} ${r.ms}ms：${esc(r.reply)}`; } catch (e) { $('#aiTestR').innerHTML = `<span class="up">失败：${esc(e.message)}</span>`; } };
     $('#pNow').onclick = async () => { try { await api('publish', { full: true }); toast('开始发布，约需 1 分钟，结果见日志'); } catch (e) { toast(e.message, 1); } };
@@ -737,6 +872,7 @@
     on('bkSaveCfg', async () => { await cfg(); toast('备份设置已保存'); });
     on('bkLocal', async () => { const r = await api('me/backup', { push: false }); toast('已加密备份到本机 ' + r.bytes + ' 字节'); renderSet(); });
     on('bkGo', async () => { await cfg(); toast('正在加密并推送…'); const r = await api('me/backup', { push: true }); toast(r.pushed ? '已推送到私有仓库' : '已备份'); renderSet(); });
+    on('dbSnap', async () => { const r = await api('me/dbsnap', {}); toast(`已保存 ${r.file}（${(r.bytes / 1048576).toFixed(1)} MB）`); renderSet(); });
     on('rsGo', async () => { if (!confirm('恢复会用备份覆盖「我的模拟盘」当前的持仓和记录，确定吗？')) return; const r = await api('me/restore', { password: $('#rsPw').value }); toast('已恢复（备份时间 ' + r.time + '）'); });
   }
 
@@ -815,7 +951,47 @@
     };
     const b = $('#lgGo', m); if (b) { b.onclick = go; $('#lgP', m).onkeydown = e => { if (e.key === 'Enter') go(); }; }
   }
+  // ------------------------------------------------------------------ 全局 AI 助手
+  function initAssistant() {
+    if (STATIC || $('#aiFab')) return;
+    const fab = document.createElement('button'); fab.id = 'aiFab'; fab.title = 'AI 助手（Ctrl+K）'; fab.innerHTML = '<b>AI</b>';
+    const dr = document.createElement('div'); dr.id = 'aiDrawer'; dr.hidden = true;
+    dr.innerHTML = `<div class="ph"><h3>AI <small>助手 · 看得到平台实时数据</small></h3><div class="r"><button class="btn sm" id="aiClr">清空</button><button class="btn sm" id="aiX">×</button></div></div>
+      <div id="aiMsgs"></div><div id="aiQuick"></div>
+      <div class="aiIn"><textarea id="aiInput" rows="2" placeholder="问我：今天哪个板块最强？我的持仓要不要止损？这只股票能买吗？"></textarea><button class="btn pri" id="aiSend">发送</button></div>`;
+    document.body.append(fab, dr);
+    try { S.chat = JSON.parse(sessionStorage.getItem('aq5_chat') || '[]'); } catch { S.chat = []; }
+    const save = () => { try { sessionStorage.setItem('aq5_chat', JSON.stringify(S.chat.slice(-20))); } catch { } };
+    const draw = () => {
+      $('#aiMsgs').innerHTML = S.chat.length ? S.chat.map(m => `<div class="msg ${m.role}">${m.role === 'user' ? esc(m.content) : md(m.content)}</div>`).join('')
+        : '<div class="hint" style="padding:10px">我能看到大盘、板块、你的持仓、自选和最近的选股。在个股页打开我，我还会读那只股票的完整分析。</div>';
+      $('#aiMsgs').scrollTop = 1e9;
+      const qs = ['今天市场怎么样？', '哪些板块最强，为什么？', '我的持仓该怎么处理？'];
+      if (S.page === 'anly' && S.anly) qs.unshift(`${S.anly.name} 现在能买吗？`);
+      if (S.page === 'pick') qs.unshift('解释一下最近这次选股');
+      $('#aiQuick').innerHTML = qs.map(q => `<button class="chip" data-q="${esc(q)}">${esc(q)}</button>`).join('');
+      $$('#aiQuick [data-q]').forEach(b => b.onclick = () => { $('#aiInput').value = b.dataset.q; send(); });
+    };
+    const send = async () => {
+      const t = $('#aiInput').value.trim(); if (!t) return;
+      $('#aiInput').value = ''; S.chat.push({ role: 'user', content: t }); draw();
+      $('#aiMsgs').insertAdjacentHTML('beforeend', '<div class="msg assistant loading">思考中</div>'); $('#aiMsgs').scrollTop = 1e9;
+      try {
+        const r = await api('ai/chat', { messages: S.chat, page: S.page, code: S.page === 'anly' && S.anly ? S.anly.code : null });
+        S.chat.push({ role: 'assistant', content: r.answer });
+      } catch (e) { S.chat.push({ role: 'assistant', content: '出错了：' + e.message }); }
+      save(); draw();
+    };
+    const open = v => { dr.hidden = !v; fab.classList.toggle('on', v); if (v) { draw(); setTimeout(() => $('#aiInput').focus(), 50); } };
+    fab.onclick = () => open(dr.hidden);
+    $('#aiX').onclick = () => open(false);
+    $('#aiClr').onclick = () => { S.chat = []; save(); draw(); };
+    $('#aiSend').onclick = send;
+    $('#aiInput').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } };
+    document.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); open(dr.hidden); } });
+  }
   async function boot() {
+    initAssistant();
     if (STATIC && !$('#unlockBtn')) {
       const b = document.createElement('button'); b.className = 'btn sm pri'; b.id = 'unlockBtn'; b.textContent = '解锁个人';
       b.onclick = showUnlock; $('.status').prepend(b);

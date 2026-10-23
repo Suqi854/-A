@@ -11,7 +11,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import ai, analysis, auth, backtest, backup, db, learn, market, notify, picker, publisher, scheduler, sim, vault
+from . import ai, analysis, auth, backtest, backup, db, learn, market, notify, picker, publisher, scheduler, sim, vault, sectors
 from .config import DATA, MOCK, WEB, load_settings, now, public_settings, save_settings
 from .strategies import DESC, NAMES
 
@@ -252,7 +252,7 @@ def api_ai_note(q):
 
 def p_ai_config(b):
     allowed = {k: b[k] for k in ("provider", "base_url", "model", "format", "daily_limit", "auto_review",
-                                  "auto_sentiment", "temperature") if k in b}
+                                  "auto_sentiment", "temperature", "auto_explain", "auto_brief") if k in b}
     return save_settings({"ai": allowed})["ai"]
 
 
@@ -260,12 +260,41 @@ def p_ai_ask(b):
     return ai.ask(b["code"], b["question"])
 
 
+def api_ai_models(q):
+    g = lambda k: (q.get(k) or [None])[0]  # noqa: E731
+    return ai.list_models(g("provider"), g("base_url"), g("format"))
+
+
+def api_ai_notes(q):
+    kinds = tuple((q.get("kinds") or ["brief,review,run,holdings"])[0].split(","))
+    return ai.notes(kinds, int((q.get("limit") or [30])[0]))
+
+
+def api_ai_run(q):
+    r = ai.latest("run", q["id"][0])
+    return r or {}
+
+
+def api_ai_trade(q):
+    return ai.latest("trade", q["id"][0]) or {}
+
+
+def api_sector(q):
+    return sectors.detail(q["code"][0])
+
+
 GET = {"/api/ai/status": api_ai_status, "/api/ai/comment": api_ai_comment, "/api/ai/news": api_ai_news,
        "/api/ai/note": api_ai_note, "/api/me": api_me, "/api/overview": api_overview, "/api/quotes": api_quotes, "/api/kline": api_kline,
        "/api/intraday": api_intraday, "/api/analyze": api_analyze, "/api/search": api_search,
        "/api/picks/runs": api_runs, "/api/picks/candidates": api_candidates, "/api/picks/state": api_pick_state,
        "/api/sim": api_sim, "/api/learn": api_learn, "/api/backtest": api_backtest, "/api/settings": api_settings,
-       "/api/events": api_events, "/api/strategies": api_strategies}
+       "/api/events": api_events, "/api/strategies": api_strategies,
+       "/api/sectors": lambda q: sectors.view(), "/api/sector": api_sector, "/api/ai/models": api_ai_models,
+       "/api/ai/notes": api_ai_notes, "/api/ai/run": api_ai_run, "/api/ai/trade": api_ai_trade,
+       "/api/diag/net": lambda q: {"probes": market.probe(q.get("raw", ["0"])[0] == "1",
+                                                     {"1": True, "0": False}.get(q.get("direct", [""])[0]),
+                                                     q.get("url")), "blocked": market.host_status(),
+                                   "snap": market.SNAP_INFO}}
 
 
 def p_pick_run(b):
@@ -373,7 +402,16 @@ POST = {"/api/picks/run": p_pick_run, "/api/sim/order": p_order, "/api/sim/cance
         "/api/me/restore": p_restore, "/api/me/security": p_security,
         "/api/ai/config": p_ai_config, "/api/ai/test": lambda b: ai.test_connection(), "/api/ai/ask": p_ai_ask,
         "/api/ai/review": lambda b: ai.daily_review(force=True), "/api/ai/suggest": lambda b: ai.suggest_iteration(),
-        "/api/ai/adopt": lambda b: ai.adopt_suggestion()}
+        "/api/ai/adopt": lambda b: ai.adopt_suggestion(),
+        "/api/ai/chat": lambda b: ai.assistant(b.get("messages") or [], b.get("page", ""), b.get("code")),
+        "/api/ai/check": lambda b: ai.order_check(b["code"], b.get("side", "buy"), int(b.get("qty") or 100),
+                                                  float(b["price"]) if b.get("price") else None),
+        "/api/ai/brief": lambda b: ai.morning_brief(force=True),
+        "/api/ai/holdings": lambda b: ai.holdings_check(),
+        "/api/ai/run": lambda b: ai.explain_run(int(b["id"]), force=True),
+        "/api/ai/trade": lambda b: ai.trade_review(int(b["id"]), force=bool(b.get("force"))),
+        "/api/me/dbsnap": lambda b: backup.db_snapshot(),
+        "/api/sectors/refresh": lambda b: (sectors.refresh_map_async(force=True), {"started": True})[1]}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -541,6 +579,8 @@ def main():
     db.init()
     auth.init()
     ai.init()
+    sectors.init()
+    sectors.refresh_map_async()
     _migrate_secrets()
     sim.ensure_accounts()
     market.ensure_universe_mock()

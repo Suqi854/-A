@@ -75,6 +75,27 @@ def _block(host: str, secs: int):
         pass
 
 
+# 国内行情站点默认直连：系统代理（如 Clash 走境外节点）会被东财等站点直接断开连接
+_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_PROXY = urllib.request.build_opener()
+CN_HOSTS = ("eastmoney.com", "gtimg.cn", "sina.com.cn", "sina.cn", "sinajs.cn", "qq.com", "10jqka.com.cn")
+
+
+_net_cfg = {"t": 0.0, "direct": True}
+
+
+def _opener_for(url: str):
+    host = urllib.parse.urlsplit(url).hostname or ""
+    if time.time() - _net_cfg["t"] > 15:
+        try:
+            from .config import load_settings
+            _net_cfg.update(t=time.time(), direct=load_settings().get("net", {}).get("direct_cn", True))
+        except Exception:  # noqa: BLE001
+            pass
+    direct = _net_cfg["direct"]
+    return _DIRECT if direct and host.endswith(CN_HOSTS) else _PROXY
+
+
 def http_get(url: str, referer: str = "https://finance.qq.com", timeout: float = 8, retries: int = 2) -> bytes:
     host = urllib.parse.urlsplit(url).hostname or ""
     last = None
@@ -84,7 +105,7 @@ def http_get(url: str, referer: str = "https://finance.qq.com", timeout: float =
             with sem:
                 req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": referer,
                                                            "Accept-Encoding": "gzip"})
-                with urllib.request.urlopen(req, timeout=timeout) as r:
+                with _opener_for(url).open(req, timeout=timeout) as r:
                     final = r.geturl()
                     raw = r.read()
                     if r.headers.get("Content-Encoding") == "gzip":
@@ -676,3 +697,42 @@ def ensure_universe_mock():
 def settings_codes() -> tuple[list, list, list]:
     s = load_settings()
     return s["indices"], s["overseas"], s["watchlist"]
+
+
+# ----------------------------------------------------------------------------- 数据源体检
+PROBES = {
+    "东财全市场快照": "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=2&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:1+t:2&fields=f12,f14,f3,f100",
+    "东财行业板块": "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=2&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:2&fields=f12,f14,f3,f62,f104,f105,f109,f160,f128,f140,f136",
+    "东财资金流": "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=2&klt=101&secid=1.600519&fields1=f1,f2,f3&fields2=f51,f52,f53",
+    "东财K线": "https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=1.600519&klt=101&fqt=1&lmt=2&end=20500101&fields1=f1&fields2=f51,f53",
+    "腾讯行情": "https://qt.gtimg.cn/q=sh600519",
+    "腾讯K线": "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sh600519,day,,,2,qfq",
+    "新浪行业板块": "https://vip.stock.finance.sina.com.cn/q/view/newSinaHy.php",
+    "新浪概念板块": "https://money.finance.sina.com.cn/q/view/newFLJK.php?param=class",
+    "东财新闻": "https://search-api-web.eastmoney.com/search/jsonp?cb=cb&param=%7B%22keyword%22%3A%22600519%22%2C%22type%22%3A%5B%22cmsArticleWebOld%22%5D%2C%22client%22%3A%22web%22%2C%22param%22%3A%7B%22cmsArticleWebOld%22%3A%7B%22pageIndex%22%3A1%2C%22pageSize%22%3A1%7D%7D%7D",
+}
+
+
+def probe(raw: bool = False, direct: bool | None = None, urls: list | None = None) -> list[dict]:
+    """逐个测试数据源能否连通（不走限速；每个最多 6 秒）。direct=True 绕过系统代理。"""
+    out = []
+    op = _DIRECT if direct else (_PROXY if direct is False else _opener_for)
+    items = PROBES.items()
+    if urls:
+        items = [(u, u) for u in urls if (urllib.parse.urlsplit(u).hostname or "").endswith(CN_HOSTS)]
+    for name, url in items:
+        t0 = time.time()
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA, "Referer": "https://quote.eastmoney.com/",
+                                                       "Accept-Encoding": "gzip"})
+            o = op(url) if callable(op) and op is _opener_for else op
+            with o.open(req, timeout=6) as r:
+                b = r.read()
+                if r.headers.get("Content-Encoding") == "gzip":
+                    b = gzip.decompress(b)
+            txt = b[:600].decode("gbk" if "sina" in url or "gtimg" in url else "utf-8", "ignore")
+            out.append({"name": name, "ok": True, "ms": int((time.time() - t0) * 1000), "bytes": len(b),
+                        "head": txt if raw else txt[:80]})
+        except Exception as e:  # noqa: BLE001
+            out.append({"name": name, "ok": False, "ms": int((time.time() - t0) * 1000), "error": str(e)[:160]})
+    return out

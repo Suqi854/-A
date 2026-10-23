@@ -53,7 +53,8 @@ def cfg() -> dict:
     return {"provider": a.get("provider") or "DeepSeek", "base_url": a.get("base_url") or p["base_url"],
             "model": a.get("model") or p["model"], "format": a.get("format") or p["format"],
             "daily_limit": int(a.get("daily_limit") or 300), "auto_review": a.get("auto_review", True),
-            "auto_sentiment": a.get("auto_sentiment", True), "temperature": float(a.get("temperature", 0.3))}
+            "auto_sentiment": a.get("auto_sentiment", True), "temperature": float(a.get("temperature", 0.3)),
+            "auto_explain": a.get("auto_explain", True), "auto_brief": a.get("auto_brief", True)}
 
 
 def ready() -> bool:
@@ -85,7 +86,7 @@ def chat(messages: list[dict], system: str = SYSTEM, json_mode: bool = False, ma
         url = c["base_url"].rstrip("/") + "/chat/completions"
         body = {"model": c["model"], "messages": [{"role": "system", "content": system}] + messages,
                 "temperature": c["temperature"], "max_tokens": max_tokens}
-        if json_mode:
+        if json_mode and "reason" not in c["model"]:  # 推理模型不支持 JSON 模式
             body["response_format"] = {"type": "json_object"}
         headers = {"Authorization": "Bearer " + key, "Content-Type": "application/json"}
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers, method="POST")
@@ -283,7 +284,7 @@ def daily_review(force: bool = False) -> dict:
               "### 明天关注什么（基于数据，不预测涨跌点位）\n### 今日学习点")
     text, tok = chat([{"role": "user", "content": prompt}], max_tokens=1600)
     _save("review", "", text, {"breadth": br}, tok)
-    db.event("learn", "AI 盘后复盘已生成", text[:120])
+    db.event("ai", "AI 盘后复盘已生成", "到「迭代」页查看")
     return latest("review", "")
 
 
@@ -364,3 +365,251 @@ def test_connection() -> dict:
     t0 = time.time()
     text, tok = chat([{"role": "user", "content": "用一句话回复：A量化 AI 接口连接成功。"}], max_tokens=50, timeout=30)
     return {"ok": True, "reply": text.strip(), "ms": int((time.time() - t0) * 1000), "model": cfg()["model"]}
+
+
+# ----------------------------------------------------------------------------- 模型列表
+def list_models(provider: str | None = None, base_url: str | None = None, fmt: str | None = None) -> dict:
+    """向服务商拉取可用模型列表（OpenAI 兼容：GET /models；Claude：GET /v1/models）。"""
+    key = vault.get("ai_key")
+    if not key:
+        raise ValueError("先在「密钥保险箱」填写 AI 接口 Key")
+    c = cfg()
+    p = PRESETS.get(provider or c["provider"], {})
+    base = (base_url or (p.get("base_url") if provider and provider != c["provider"] else c["base_url"])
+            or c["base_url"]).rstrip("/")
+    fmt = fmt or p.get("format") or c["format"]
+    if fmt == "anthropic":
+        url, headers = base + "/v1/models?limit=100", {"x-api-key": key, "anthropic-version": "2023-06-01"}
+    else:
+        url, headers = base + "/models", {"Authorization": "Bearer " + key}
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            d = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"拉取模型列表失败（{e.code}）：{e.read().decode('utf-8', 'ignore')[:200]}") from None
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise RuntimeError(f"连不上 AI 接口：{e}") from None
+    items = d.get("data") if isinstance(d, dict) else d
+    ids = sorted({(m.get("id") if isinstance(m, dict) else str(m)) for m in (items or []) if m})
+    chatty = [i for i in ids if not re.search(r"embed|whisper|tts|dall|moderation|audio|image|rerank", i, re.I)]
+    return {"models": chatty or ids, "all": len(ids), "base_url": base, "format": fmt}
+
+
+# ----------------------------------------------------------------------------- 平台上下文（给 AI 的“现在的情况”）
+def _ctx(code: str | None = None, light: bool = False) -> dict:
+    from . import picker, sim, sectors
+    from .analysis import regime
+    out: dict = {"时间": now().strftime("%Y-%m-%d %H:%M"), "交易阶段": market.market_phase()}
+    try:
+        br = market.breadth(market.snapshot())
+        out["市场"] = {"上涨": br["up"], "下跌": br["down"], "涨停": br["limit_up"], "跌停": br["limit_down"],
+                     "成交额亿": br["amount_yi"], "中位涨幅": br["median_pct"]}
+        out["大盘状态"] = regime()
+    except Exception:  # noqa: BLE001
+        pass
+    if not light:
+        out["板块"] = sectors.brief(5)
+    try:
+        me = sim.view("me", light=True)
+        out["我的模拟盘"] = {"总资产": me["equity"], "现金": me["cash"], "累计收益%": me["total_pct"],
+                         "今日盈亏": me["today_pnl"],
+                         "持仓": [f"{p['name']}({p['code'][2:]}) {p['qty']}股 成本{p['cost']:.2f} 现价{p['price']} "
+                                f"盈亏{p['pnl_pct']:+.1f}% 止损{p['stop']} 目标{p['target1']} 持有{p['hold_days']}天"
+                                for p in me["positions"]]}
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        wl = [market.norm_code(c) for c in load_settings()["watchlist"]][:15]
+        qs = market.quotes(wl)
+        out["自选股"] = [f"{q.get('name')}({c[2:]}) {q.get('price')} {q.get('pct'):+.2f}%" for c, q in qs.items()
+                      if q.get("pct") is not None]
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        rs = picker.runs(2)
+        if rs:
+            out["最近选股"] = [{"时间": f"{r['date']} {r.get('session')}", "入选": [
+                f"{p['name']}({p['code'][2:]}) 评分{p['score']}" for p in r["items"]] or "无（宁缺毋滥）"} for r in rs]
+    except Exception:  # noqa: BLE001
+        pass
+    if code:
+        try:
+            from .analysis import analyze
+            out["当前股票"] = _brief(analyze(code))
+        except Exception as e:  # noqa: BLE001
+            out["当前股票"] = f"{code} 分析失败：{e}"
+    p = _profile()
+    out["用户"] = {"风险偏好": p.get("risk", "均衡"), "风格": p.get("style", "短线"), "给自己的规矩": p.get("goal", "无")}
+    return out
+
+
+# ----------------------------------------------------------------------------- 全局 AI 助手
+ASSIST_SYS = SYSTEM + ("你嵌在“A量化”交易终端里，能看到平台实时数据（会在消息里给你）。回答要结合这些数据，"
+                       "提到股票时写出代码；涉及买卖时必须给出止损位和仓位建议并提醒风险；"
+                       "用户问的是平台用法时，简单说明在哪个页面操作（监控/选股/个股/模拟盘/迭代/回测/日志/设置）。")
+
+
+def assistant(messages: list[dict], page: str = "", code: str | None = None) -> dict:
+    msgs = [{"role": m["role"], "content": str(m["content"])[:2000]} for m in messages[-10:]
+            if m.get("role") in ("user", "assistant") and m.get("content")]
+    if not msgs or msgs[-1]["role"] != "user":
+        raise ValueError("请输入问题")
+    ctx = _ctx(code)
+    msgs[-1] = {"role": "user", "content": f"【平台实时数据】{json.dumps(ctx, ensure_ascii=False, default=str)}\n"
+                                           f"【我在看的页面】{page or '未知'}\n【我的问题】{msgs[-1]['content']}"}
+    text, tok = chat(msgs, ASSIST_SYS, max_tokens=1200)
+    _save("chat", code or "", f"**问：**{messages[-1]['content'][:300]}\n\n{text}", {"page": page}, tok)
+    return {"answer": text, "tokens": tok}
+
+
+# ----------------------------------------------------------------------------- 选股解读
+def explain_run(run_id: int, force: bool = False) -> dict:
+    from . import picker, sectors
+    if not force:
+        r = latest("run", str(run_id))
+        if r:
+            return r
+    run = next((x for x in picker.runs(30) if x["id"] == run_id), None)
+    if not run:
+        raise ValueError("找不到这次选股")
+    cands = picker.top_candidates(run_id, 8)
+    data = {"场次": f"{run['date']} {run.get('session')}", "扫描": run.get("scanned"), "精评": run.get("candidates"),
+            "门槛": (run.get("market") or {}).get("min_score"), "大盘": (run.get("market") or {}).get("regime"),
+            "入选": [{"股票": f"{p['name']}({p['code'][2:]})", "行业": p.get("industry"), "评分": p["score"],
+                    "现价": p["price"], "止损": p["stop"], "目标1": p["target1"],
+                    "理由": p["reasons"][:4], "风险": p["risks"][:3]} for p in run["items"]],
+            "落选的高分候选": [f"{c.get('name')}({c['code'][2:]}) {c['score']}分" for c in cands[:6]],
+            "板块": sectors.brief(5)}
+    prompt = ("下面是 A量化 一次自动选股的结果。请写一份简短解读（Markdown，250~450 字）：\n"
+              f"{json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+              "结构：\n### 这次选股的结论（有机会还是观望，为什么）\n"
+              "### 逐只点评（每只一两句：机会在哪、最大风险、怎么操作；没有入选就分析落选的高分股差在哪）\n"
+              "### 和板块的关系（入选股是否在强势行业）\n### 学习点")
+    text, tok = chat([{"role": "user", "content": prompt}], max_tokens=1100)
+    _save("run", str(run_id), text, {"picks": len(run["items"])}, tok)
+    return latest("run", str(run_id))
+
+
+def explain_run_async(run_id: int) -> None:
+    def go():
+        try:
+            explain_run(run_id)
+            if load_settings().get("publish", {}).get("enabled"):
+                from . import publisher
+                publisher.publish_async(full=True)
+        except Exception as e:  # noqa: BLE001
+            db.event("system", "AI 选股解读失败", str(e)[:150], "warn")
+    threading.Thread(target=go, daemon=True, name="aq5-ai-run").start()
+
+
+# ----------------------------------------------------------------------------- 下单前风控检查
+def order_check(code: str, side: str, qty: int, price: float | None = None) -> dict:
+    from .analysis import analyze
+    from . import sim
+    a = analyze(code)
+    me = sim.view("me", light=True)
+    pos = next((p for p in me["positions"] if p["code"] == a["code"]), None)
+    px = price or a["quote"].get("price") or 0
+    amt = px * qty
+    data = {"下单": {"方向": "买入" if side == "buy" else "卖出", "股票": f"{a['name']}({a['code']})", "数量": qty,
+                   "价格": px, "金额": round(amt, 2), "占总资产%": round(amt / me["equity"] * 100, 1) if me["equity"] else None},
+            "账户": {"总资产": me["equity"], "现金": me["cash"], "持仓数": len(me["positions"]),
+                   "这只股票现有持仓": (f"{pos['qty']}股 成本{pos['cost']:.2f} 盈亏{pos['pnl_pct']:+.1f}%" if pos else "无")},
+            "量化数据": _brief(a), "行业": a.get("sector"), "用户": _ctx(light=True).get("用户")}
+    d = chat_json("你是交易风控助手。根据下面的数据，判断这笔模拟单是否符合纪律（仓位、止损、趋势、大盘、用户自己定的规矩）。\n"
+                  f"{json.dumps(data, ensure_ascii=False, default=str)}\n"
+                  '输出 {"verdict": "通过" 或 "谨慎" 或 "不建议", "points": ["最多4条要点，每条20字以内"], '
+                  '"stop": 建议止损价(数字), "position": "建议仓位，如 10%", "tip": "一句话提醒"}', max_tokens=500)
+    out = {"verdict": d.get("verdict") if d.get("verdict") in ("通过", "谨慎", "不建议") else "谨慎",
+           "points": [str(x)[:60] for x in (d.get("points") or [])][:4], "stop": d.get("stop"),
+           "position": str(d.get("position", ""))[:20], "tip": str(d.get("tip", ""))[:100],
+           "system": {"score": a["score"], "rating": a["rating"], "stop": a["plan"]["stop"]}}
+    _save("check", a["code"], f"{out['verdict']}：{out['tip']}", out)
+    return out
+
+
+# ----------------------------------------------------------------------------- 单笔交易复盘
+def trade_review(trade_id: int, force: bool = False) -> dict:
+    if not force:
+        r = latest("trade", str(trade_id))
+        if r:
+            return r
+    t = db.q1("SELECT * FROM trades WHERE id=?", (trade_id,))
+    if not t:
+        raise ValueError("找不到这笔成交")
+    buys = db.q("SELECT * FROM trades WHERE account=? AND code=? AND side='buy' AND id<? ORDER BY id DESC LIMIT 3",
+                (t["account"], t["code"], trade_id))
+    try:
+        rows = market.kline(t["code"], 40)[-25:]
+    except RuntimeError:
+        rows = []
+    data = {"这笔成交": t, "之前的买入": buys,
+            "近25日K线(日期,开,收,高,低)": [(r["date"], r["open"], r["close"], r["high"], r["low"]) for r in rows],
+            "用户": _ctx(light=True).get("用户")}
+    prompt = ("请复盘这笔模拟交易（Markdown，200~350 字）：\n"
+              f"{json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+              "结构：\n### 结果\n### 做对了什么\n### 可以改进什么（买点、卖点、仓位、心态；结合K线说具体）\n### 下次怎么做")
+    text, tok = chat([{"role": "user", "content": prompt}], max_tokens=900)
+    _save("trade", str(trade_id), text, {"code": t["code"], "pnl": t["pnl"]}, tok)
+    return latest("trade", str(trade_id))
+
+
+# ----------------------------------------------------------------------------- 盘前简报 / 持仓体检
+def morning_brief(force: bool = False) -> dict:
+    if not force:
+        r = latest("brief", "", today())
+        if r:
+            return r
+    ctx = _ctx()
+    try:
+        ov = market.quotes(load_settings().get("overseas", []))
+        ctx["外围市场"] = [f"{q.get('name')} {q.get('pct'):+.2f}%" for q in ov.values() if q.get("pct") is not None]
+    except Exception:  # noqa: BLE001
+        pass
+    rv = latest("review", "")
+    if rv:
+        ctx["上一次盘后复盘摘要"] = rv["content"][:600]
+    prompt = ("现在是开盘前（或盘中），请根据数据写一份今日简报（Markdown，300~500 字）：\n"
+              f"{json.dumps(ctx, ensure_ascii=False, default=str)}\n\n"
+              "结构：\n### 一句话看今天\n### 关注的板块（基于数据，说明理由）\n"
+              "### 我的持仓怎么处理（逐只：继续拿/减仓/到止损就走；没有持仓就说空仓等机会）\n"
+              "### 今天的纪律提醒（结合用户自己的规矩）")
+    text, tok = chat([{"role": "user", "content": prompt}], max_tokens=1200)
+    _save("brief", "", text, {}, tok)
+    db.event("ai", "AI 今日简报已生成", "到「监控」页查看")
+    return latest("brief", "")
+
+
+def holdings_check() -> dict:
+    from . import sim
+    from .analysis import analyze
+    me = sim.view("me", light=True)
+    if not me["positions"]:
+        raise ValueError("「我的模拟盘」现在没有持仓")
+    items = []
+    for p in me["positions"][:8]:
+        try:
+            a = analyze(p["code"])
+            items.append({"持仓": f"{p['name']}({p['code'][2:]}) {p['qty']}股 成本{p['cost']:.2f} 盈亏{p['pnl_pct']:+.1f}% "
+                                f"持有{p['hold_days']}天 止损{p['stop']} 目标{p['target1']}",
+                          "评分": a["score"], "评级": a["rating"], "主力": a["main_force"]["label"],
+                          "行业": (a.get("sector") or {}).get("name"), "行业强度": (a.get("sector") or {}).get("score"),
+                          "风险": a["risks"][:3]})
+        except Exception:  # noqa: BLE001
+            continue
+    prompt = ("请给下面的模拟盘持仓做体检（Markdown，每只 2~3 句，最后总结仓位）：\n"
+              f"{json.dumps({'持仓': items, '账户': {'总资产': me['equity'], '现金': me['cash']}, '用户': _ctx(light=True).get('用户')}, ensure_ascii=False, default=str)}\n"
+              "每只给出：持有/减仓/止损离场 之一，以及理由和具体价位。")
+    text, tok = chat([{"role": "user", "content": prompt}], max_tokens=1200)
+    _save("holdings", "", text, {"n": len(items)}, tok)
+    return latest("holdings", "")
+
+
+def notes(kinds=("brief", "review", "run", "holdings"), limit: int = 30) -> list[dict]:
+    q = ",".join("?" * len(kinds))
+    rows = db.q(f"SELECT id, kind, code, date, created, content, meta FROM ai_notes WHERE kind IN ({q}) "
+                f"ORDER BY id DESC LIMIT ?", (*kinds, limit))
+    for r in rows:
+        r["meta"] = db.loads(r["meta"], {})
+    return rows

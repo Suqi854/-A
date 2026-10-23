@@ -93,8 +93,11 @@ def export(full: bool = True) -> dict:
             pass
     if full:
         runs = picker.runs(60)
+        from . import ai
         for r in runs:
             r["cand_list"] = picker.top_candidates(r["id"], 30)
+            n = ai.latest("run", str(r["id"]))
+            r["ai"] = {"content": n["content"], "created": n["created"]} if n else None
         _w(d / "runs.json", runs)
         by_day = {}
         for r in runs:
@@ -105,10 +108,17 @@ def export(full: bool = True) -> dict:
         _w(d / "ai.json", _ai_view())
         _w(d / "learn.json", api_learn({}))
         _w(d / "strategies.json", api_strategies({}))
+        try:
+            from . import sectors
+            _w(d / "sectors.json", sectors.view())
+            files.append("sectors.json")
+        except Exception as e:  # noqa: BLE001
+            db.event("publish", "导出板块数据失败", str(e)[:150], "warn")
         _w(d / "events.json", public_events(200))
         s = load_settings()
         _w(d / "settings.json", {"pick": {k: s["pick"][k] for k in ("times", "max_picks", "min_score")},
-                                 "risk": s["risk"], "emotions": sim.EMOTIONS, "static": True})
+                                 "risk": s["risk"], "emotions": sim.EMOTIONS, "static": True,
+                                 "ai": {"provider": s.get("ai", {}).get("provider"), "model": s.get("ai", {}).get("model")}})
         idx = []
         for code in _analysis_codes():
             try:
@@ -170,10 +180,36 @@ def _private_pack(d: Path, full: bool) -> list[str]:
     u = auth.user() if auth.has_user() else None
     pack = {"time": now().strftime("%Y-%m-%d %H:%M:%S"), "watchlist": [qs.get(c) or {"code": c} for c in wl],
             "analysis": _PRIV_CACHE["analysis"], "me": me, "profile": (u or {}).get("profile", {}),
-            "events": db.q("SELECT * FROM events WHERE kind IN ('alert','trade') ORDER BY id DESC LIMIT 80")}
+            "events": db.q("SELECT * FROM events WHERE kind IN ('alert','trade','ai') ORDER BY id DESC LIMIT 80"),
+            "ai": _private_ai(wl), "lan": _lan()}
     raw = gzip.compress(json.dumps(clean(pack), ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
     target.write_bytes(vault.seal_web(raw, pw))
     return [f"private.enc({len(_PRIV_CACHE['analysis'])}只自选,加密)"]
+
+
+def _lan() -> str:
+    try:
+        from .server import lan_ip
+        return f"http://{lan_ip()}:{load_settings()['port']}"
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _private_ai(wl: list[str]) -> dict:
+    """个人相关的 AI 内容（含持仓/交易），只进加密包。"""
+    from . import ai
+    pick = lambda n: {"content": n["content"], "created": n["created"], "date": n["date"]} if n else None  # noqa: E731
+    out = {"brief": pick(ai.latest("brief", "")), "review": pick(ai.latest("review", "")),
+           "holdings": pick(ai.latest("holdings", "")), "comments": {}, "trades": {}}
+    for c in wl:
+        n = ai.latest("comment", c)
+        if n:
+            out["comments"][c] = {**pick(n), "meta": n["meta"]}
+    for t in db.q("SELECT id FROM trades WHERE account='me' ORDER BY id DESC LIMIT 30"):
+        n = ai.latest("trade", str(t["id"]))
+        if n:
+            out["trades"][str(t["id"])] = pick(n)
+    return out
 
 
 def _site(root: Path) -> None:

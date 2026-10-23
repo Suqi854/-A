@@ -169,6 +169,12 @@ def _run(session: str, top_n: int) -> dict:
     if br["total"] and br["up"] / br["total"] < 0.2:
         min_score += 3
     picks = []
+    try:
+        from . import sectors
+        sec_data = sectors.compute()
+    except Exception:  # noqa: BLE001
+        sec_data = {"stock": {}, "by_code": {}}
+    per_ind: dict[str, int] = {}
     for ev in evaluated:
         if len(picks) >= max_picks:
             break
@@ -179,6 +185,12 @@ def _run(session: str, top_n: int) -> dict:
             continue
         if ev["ind"]["extra"]["rsi6"] > 88:
             continue
+        ic = sec_data["stock"].get(ev["code"])
+        if ic and per_ind.get(ic, 0) >= 2:  # 同一行业最多 2 只，分散风险
+            continue
+        if ic:
+            per_ind[ic] = per_ind.get(ic, 0) + 1
+        ev["sector"] = sec_data["by_code"].get(ic) if ic else None
         picks.append(ev)
 
     with db.tx() as c:
@@ -201,7 +213,12 @@ def _run(session: str, top_n: int) -> dict:
             se = e.get("sentiment")
             if se and se["score"] >= 0.2:
                 reasons.append(f"AI 读新闻：偏正面（{se['score']:+.1f}）{se['reason']}")
-            risks = [f"{LABELS[k]}偏弱（{v:.0f}分）" for k, v in parts[::-1][:2] if v < 45]
+            sc = e.get("sector")
+            if sc and sc["score"] >= 60:
+                reasons.append(f"所属行业「{sc['name']}」{sc['tag']}，强度 {sc['score']:.0f}（第 {sc['rank']} 名），领涨 {sc['leader']['name']}")
+            risks = [f"{LABELS[k]}偏弱（{v:.0f}分）" for k, v in parts[::-1][:3] if v < 45 and k != "sector"][:2]
+            if sc and sc["score"] < 35:
+                risks.append(f"所属行业「{sc['name']}」{sc['tag']}（强度 {sc['score']:.0f}），属于逆势个股，注意持续性")
             ex_ = e["ind"]["extra"]
             if ex_["rsi6"] > 75:
                 risks.append(f"RSI6={ex_['rsi6']:.0f}，短线偏热，别追高，回落到买入区再分批")
@@ -216,6 +233,7 @@ def _run(session: str, top_n: int) -> dict:
                              pl["stop"], pl["target1"], pl["target2"], db.dumps(e["parts"]),
                              db.dumps(e["signals"]), db.dumps(reasons), db.dumps(risks)))
             out.append({"id": cur.lastrowid, "code": e["code"], "name": r.get("name"), "score": e["score"],
+                        "industry": sc["name"] if sc else None,
                         "prob": e["prob"], "price": r["price"], "pct": r.get("pct"), "plan": pl,
                         "signals": e["signals"], "reasons": reasons, "risks": risks})
         c.execute("UPDATE pick_runs SET finished=? WHERE id=?", (now().strftime("%H:%M:%S"), run_id))
@@ -233,7 +251,15 @@ def _run(session: str, top_n: int) -> dict:
     if out and cfg.get("auto_trade") and session in ("auction", "close"):
         from . import sim
         sim.auto_follow(out, session)
-    if s["publish"].get("enabled"):
+    explaining = False
+    try:
+        from . import ai
+        if ai.ready() and ai.cfg()["auto_explain"]:
+            ai.explain_run_async(run_id)  # 解读完成后会自动再发布一次
+            explaining = True
+    except Exception:  # noqa: BLE001
+        pass
+    if s["publish"].get("enabled") and not explaining:
         from . import publisher
         publisher.publish_async(full=True)
     return {"run_id": run_id, "picks": out, "scanned": len(snap), "candidates": len(evaluated),
@@ -249,7 +275,8 @@ def runs(limit: int = 30) -> list[dict]:
 
 
 def picks_of(run_id: int) -> list[dict]:
-    ps = db.q("SELECT * FROM picks WHERE run_id=? ORDER BY score DESC", (run_id,))
+    ps = db.q("SELECT p.*, s.industry FROM picks p LEFT JOIN stock_sector s ON s.code=p.code WHERE run_id=? "
+              "ORDER BY score DESC", (run_id,))
     for p in ps:
         for k in ("factors", "strategies", "reasons", "risks"):
             p[k] = db.loads(p[k], [])

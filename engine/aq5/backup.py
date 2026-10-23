@@ -16,7 +16,7 @@ from .config import DATA, load_settings, now, save_settings
 
 REPO = DATA / "private_backup"
 FILE = "aq5-personal.enc"
-STATE = {"last": None, "error": None, "running": False}
+STATE = {"last": None, "error": None, "running": False, "db_last": None}
 _lock = threading.Lock()
 TABLES = ("accounts", "positions", "orders", "trades", "equity")
 
@@ -135,3 +135,28 @@ def restore(password: str | None = None) -> dict:
     if password:
         vault.set_many({"backup_password": password})
     return import_personal(d)
+
+
+def db_snapshot(keep: int | None = None) -> dict:
+    """整库本机快照（含行情缓存、学习样本、AI 笔记），每天一份，保留最近 N 天。不推送、不加密，只在本机。"""
+    import sqlite3
+    from .config import DB_PATH
+    keep = keep or int(load_settings().get("backup", {}).get("keep_days", 7))
+    d = DATA / "backups"
+    d.mkdir(exist_ok=True)
+    target = d / f"aq5-db-{now().strftime('%Y%m%d')}.sqlite3"
+    src = sqlite3.connect(DB_PATH, timeout=30)
+    dst = sqlite3.connect(target)
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+    olds = sorted(d.glob("aq5-db-*.sqlite3"))
+    for f in olds[:-keep]:
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    STATE["db_last"] = now().strftime("%Y-%m-%d %H:%M:%S")
+    return {"file": target.name, "bytes": target.stat().st_size, "kept": min(len(olds), keep)}

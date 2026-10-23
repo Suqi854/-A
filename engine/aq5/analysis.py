@@ -108,6 +108,14 @@ def rating(total: float, ind) -> tuple[str, str, str]:
 def evaluate(code, rows, live, session="intraday", market_median=0.0, flows=None, weights=None, sw=None,
              risk=None) -> dict:
     raw, ind = raw_factors(rows, live, market_median, flows)
+    if live and live.get("price"):
+        try:
+            from . import sectors
+            st = sectors.strength(code)
+            if st is not None:
+                raw["sector"] = st
+        except Exception:  # noqa: BLE001 - 板块数据失败时按中性处理
+            pass
     fscore, parts = score(raw, weights)
     sigs = detect(rows, ind, live, session, sw)
     sscore = strategy_score(sigs)
@@ -148,6 +156,16 @@ def analyze(code: str) -> dict:
         risks.append(f"股价高出20日线 {e['dev20']:.0f}%，乖离过大，回调概率上升")
     if mf["tone"] == "down":
         risks.append("主力资金" + mf["label"])
+    try:
+        from . import sectors
+        sec = sectors.of_stock(code)
+    except Exception:  # noqa: BLE001
+        sec = None
+    if sec:
+        if sec["score"] >= 65:
+            reasons.append(f"所属行业「{sec['name']}」{sec['tag']}（强度 {sec['score']:.0f}，排名 {sec['rank']}/{sec['total']}），顺势")
+        elif sec["score"] < 30:
+            risks.append(f"所属行业「{sec['name']}」{sec['tag']}（强度 {sec['score']:.0f}，排名 {sec['rank']}/{sec['total']}），逆势个股更难走强")
     lessons = [
         f"均线排列：MA5 {_r(ind['ma5'][-1])} / MA10 {_r(ind['ma10'][-1])} / MA20 {_r(ind['ma20'][-1])} / "
         f"MA60 {_r(ind['ma60'][-1])}。短均线在上、长均线在下叫“多头排列”，代表趋势向上。",
@@ -156,6 +174,7 @@ def analyze(code: str) -> dict:
         f"ATR（平均真实波幅）= {ev['plan']['atr']}，约占股价 {e['atrp']:.1f}%：止损一般放在 2 倍 ATR 以外，"
         f"避免被正常波动“洗”出去。",
         f"盈亏比 {ev['plan']['rr']}：赚的空间 / 亏的空间。长期看，盈亏比≥1.5 且胜率≥45% 的交易才值得做。",
+        "板块效应：A股资金常按行业和题材轮动，同一行业的股票往往同涨同跌。选股先看行业强不强，再挑行业里的龙头或补涨股，胜率更高。",
     ]
     return {"code": code, "name": live.get("name"), "quote": {k: live.get(k) for k in (
                 "price", "pct", "chg", "open", "high", "low", "prev", "vol", "amount", "turnover", "vr", "pe", "pb",
@@ -164,4 +183,5 @@ def analyze(code: str) -> dict:
             "prob_src": ev["prob_src"], "rating": lab, "tone": tone, "advice": advice, "factors": factors,
             "signals": ev["signals"], "strategy_desc": DESC, "plan": ev["plan"], "main_force": mf,
             "reasons": reasons, "risks": risks, "lessons": lessons, "regime": regime(), "weights_ver": ver,
+            "sector": sec,
             "flows": [{"date": f["date"], "main": f["main"], "main_pct": f["main_pct"]} for f in flows[-20:]]}

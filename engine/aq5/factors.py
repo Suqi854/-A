@@ -20,13 +20,15 @@ SPECS = [
     ("value", "估值", 0.6, 0.35, "市盈率越低越安全；亏损股（PE<0）明显扣分"),
     ("position", "位置", 88.0, 6.0, "距60日最高价的位置，接近新高更好；短线过热（RSI、乖离过大）扣分"),
     ("liquidity", "流动性", 8.3, 0.4, "近5日平均成交额（对数）；太冷门的股票买卖都困难"),
+    ("sector", "板块", 50.0, 15.0, "所属行业的强度（今日涨幅、上涨家数、涨停数、近5日动量的排名合成）；强行业里的个股更容易走强"),
 ]
 KEYS = [s[0] for s in SPECS]
 LABELS = {s[0]: s[1] for s in SPECS}
 EXPLAIN = {s[0]: s[4] for s in SPECS}
 
 DEFAULT_WEIGHTS = {"momentum": 0.13, "trend": 0.16, "volume": 0.10, "capital": 0.14, "strength": 0.12,
-                   "volatility": 0.06, "value": 0.08, "position": 0.11, "liquidity": 0.10}
+                   "volatility": 0.06, "value": 0.08, "position": 0.11, "liquidity": 0.10,
+                   "sector": 0.08}
 
 
 def current_weights() -> tuple[int, dict]:
@@ -99,7 +101,7 @@ def raw_factors(rows: list[dict], live: dict | None, market_median: float = 0.0,
 
     raw = {"momentum": 0.5 * r5 + 0.5 * r20, "trend": trend, "volume": volume, "capital": capital,
            "strength": strength, "volatility": volatility, "value": value, "position": position,
-           "liquidity": liquidity}
+           "liquidity": liquidity, "sector": 50.0}  # 板块强度由 analysis.evaluate 用实时行业数据覆盖
     extra = {"r5": r5, "r20": r20, "vr": vr, "atrp": atrp, "rsi6": rsi6, "dev20": dev20, "pos_day": pos_day,
              "h60": h60, "pct": pct, "main_pct": mp, "main5": m5, "align": align}
     ind["extra"] = extra

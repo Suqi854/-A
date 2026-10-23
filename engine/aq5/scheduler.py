@@ -5,7 +5,7 @@ import threading
 import time
 import traceback
 
-from . import ai, backup, db, learn, market, picker, publisher, sim
+from . import ai, backup, db, learn, market, picker, publisher, sectors, sim
 from .config import load_settings, now, today
 
 STATUS = {"started": None, "last_tick": None, "jobs": {}, "errors": []}
@@ -88,8 +88,11 @@ def loop() -> None:
                     if time.time() - last_alert > 30:
                         last_alert = time.time()
                         alerts()
+                if 900 <= hm < 1130 and ai.ready() and ai.cfg().get("auto_brief", True):
+                    _once("ai_brief", lambda: threading.Thread(target=ai.morning_brief, daemon=True).start())
                 if hm >= 1505:
                     _once("equity", sim.record_equity)
+                    _once("sector_daily", sectors.record_daily)
                 if hm >= 1530:
                     _once("learn", learn.daily)
                 pub = s["publish"]
@@ -101,9 +104,13 @@ def loop() -> None:
                         _once("publish", lambda: publisher.publish(full=True))
                 if hm >= 1540 and ai.ready() and ai.cfg()["auto_review"]:
                     _once("ai_review", ai.daily_review)
+                if hm >= 820:
+                    _once("sector_map", sectors.refresh_map_async)  # 每周自动刷新一次行业分类（未到期会直接跳过）
                 bk = s.get("backup", {})
                 if bk.get("enabled") and hm >= _hm(bk.get("time", "15:50")):
                     _once("backup", lambda: backup.backup(push=bool(bk.get("remote"))))
+                if hm >= 1555:
+                    _once("db_snapshot", backup.db_snapshot)
         except Exception as e:  # noqa: BLE001
             STATUS["errors"] = (STATUS["errors"] + [f"{now():%H:%M:%S} loop: {e}"])[-20:]
         time.sleep(5)

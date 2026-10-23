@@ -274,7 +274,7 @@ ul.why.risk li::marker { color: var(--warn); } ul.why li::marker { color: var(--
 }
 
 /* 公开只读版（GitHub Pages） */
-body.static .rw, body.static #nav a[data-p="bt"], body.static #nav a[data-p="set"] { display: none !important; }
+body.static .rw, body.static #nav a[data-p="bt"] { display: none !important; }
 body.static.unlocked .pv { display: inline-flex !important; }
 #top .cmd { flex: 1 1 0; min-width: 0; }
 #top .status { flex: 0 0 auto; }
@@ -285,3 +285,32 @@ body.static.unlocked .pv { display: inline-flex !important; }
 .mdh:first-child { margin-top: 0; }
 .mdp { margin: 4px 0; line-height: 1.7; }
 code { font-family: var(--mono); color: var(--cyan); }
+
+/* 板块强度条 */
+.sbar { position: relative; width: 90px; height: 14px; background: #000; border: 1px solid var(--line); }
+.sbar i { position: absolute; left: 0; top: 0; bottom: 0; opacity: .75; }
+.sbar span { position: relative; z-index: 1; font: 700 10px/12px var(--mono); padding-left: 4px; color: #fff; text-shadow: 0 0 3px #000; }
+.aichk { border: 1px dashed var(--amber-dim); padding: 8px 10px; margin: 6px 0 10px; background: rgba(255,176,0,.04); }
+/* 全局 AI 助手 */
+#aiFab { position: fixed; right: 18px; bottom: 18px; z-index: 80; width: 46px; height: 46px; border-radius: 50%; cursor: pointer;
+  border: 1px solid var(--amber); background: radial-gradient(circle at 35% 30%, #3a2a00, #0c0a04); color: var(--amber);
+  font: 700 14px var(--mono); box-shadow: 0 0 14px rgba(255,176,0,.35); }
+#aiFab:hover, #aiFab.on { background: var(--amber); color: #000; }
+#aiDrawer { position: fixed; right: 18px; bottom: 74px; z-index: 85; width: 420px; max-width: calc(100vw - 24px); height: min(620px, calc(100vh - 140px));
+  display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--amber-dim); box-shadow: 0 10px 40px rgba(0,0,0,.6); }
+#aiDrawer[hidden] { display: none; }
+#aiDrawer .ph { flex: none; }
+#aiMsgs { flex: 1; overflow: auto; padding: 8px 10px; }
+#aiMsgs .msg { margin: 6px 0; padding: 7px 10px; border: 1px solid var(--line); max-width: 92%; }
+#aiMsgs .msg.user { margin-left: auto; background: rgba(255,176,0,.08); border-color: var(--amber-dim); white-space: pre-wrap; }
+#aiMsgs .msg.assistant { background: var(--panel2); }
+#aiQuick { flex: none; display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 10px; }
+#aiQuick .chip { cursor: pointer; background: none; }
+#aiQuick .chip:hover { color: var(--amber); border-color: var(--amber-dim); }
+.aiIn { flex: none; display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--line); }
+.aiIn textarea { flex: 1; resize: none; background: #000; border: 1px solid var(--line2); padding: 6px; outline: none; }
+.aiIn textarea:focus { border-color: var(--amber-dim); }
+@media (max-width: 900px) {
+  #aiFab { bottom: 68px; right: 12px; width: 42px; height: 42px; }
+  #aiDrawer { right: 6px; left: 6px; width: auto; max-width: none; bottom: 116px; height: calc(100vh - 220px); }
+}
