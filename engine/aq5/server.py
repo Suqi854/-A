@@ -260,6 +260,26 @@ def p_ai_config(b):
     return save_settings({"ai": allowed})["ai"]
 
 
+def _follow(run_id: int) -> dict:
+    """让 AI 自动盘按某次选股结果补一次跟单（错过时用）。"""
+    r = next((x for x in picker.runs(10) if x["id"] == run_id), None)
+    if not r:
+        raise ValueError("找不到这次选股")
+    from .analysis import analyze
+    items = []
+    for p in r["items"]:
+        try:
+            a = analyze(p["code"])
+        except (RuntimeError, ValueError):
+            continue
+        items.append({"id": p["id"], "code": p["code"], "name": p["name"], "score": p["score"], "prob": p["prob"],
+                      "price": a["quote"]["price"], "plan": a["plan"], "signals": a["signals"], "tier": p.get("tier"),
+                      "rank": p.get("rank")})
+    before = len(db.q("SELECT id FROM orders WHERE account='ai'"))
+    sim.auto_follow(items, "close" if r["session"] == "close" else "auction")
+    return {"orders": len(db.q("SELECT id FROM orders WHERE account='ai'")) - before}
+
+
 def p_ai_ask(b):
     return ai.ask(b["code"], b["question"])
 
@@ -427,6 +447,7 @@ POST = {"/api/picks/run": p_pick_run, "/api/sim/order": p_order, "/api/sim/cance
         "/api/watch/run": lambda b: signals.run_watch(b.get("phase")),
         "/api/ai/mode": lambda b: save_settings({"pick": {"ai_mode": "high" if b.get("mode") == "high" else "low"}})["pick"]["ai_mode"],
         "/api/hf/scan": lambda b: hf.quick_scan(force=True),
+        "/api/sim/follow": lambda b: _follow(int(b["run_id"])),
         "/api/hf/step": lambda b: hf.step(),
         "/api/watch/plan": lambda b: signals.plan(b["code"]),
         "/api/ai/pick": lambda b: ai.pick_review(int(b["id"])),

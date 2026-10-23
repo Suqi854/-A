@@ -353,7 +353,7 @@ def auto_follow(picks: list[dict], session: str) -> None:
     ensure_accounts()
     cfg = load_settings()["pick"]
     base = float(cfg.get("ai_position_pct", 0.12))
-    max_pos = int(cfg.get("ai_max_positions", 12))
+    max_pos = max(int(cfg.get("ai_max_positions", 12)), 30)  # 真正的约束是杠杆上限（下单时检查），持仓只数放宽
     v = view("ai", light=True)
     held = {p["code"] for p in v["positions"]}
     pend = {o["code"] for o in db.q("SELECT code FROM orders WHERE account='ai' AND status='pending'")}
