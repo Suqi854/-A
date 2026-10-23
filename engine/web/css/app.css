@@ -279,3 +279,5 @@ body.static.unlocked .pv { display: inline-flex !important; }
 #top .cmd { flex: 1 1 0; min-width: 0; }
 #top .status { flex: 0 0 auto; }
 @media (max-width: 900px) { body.static #mockTag { display: none; } #unlockBtn { padding: 0 6px; } }
+.btn.star { padding: 0 5px; height: 20px; color: var(--muted); border-color: transparent; background: transparent; font-size: 13px; }
+.btn.star.on, .btn.star:hover { color: var(--amber); }

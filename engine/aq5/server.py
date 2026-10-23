@@ -298,6 +298,11 @@ def p_watch(b):
     code = market.norm_code(b["code"])
     if b.get("op") == "remove":
         wl = [c for c in wl if c != code]
+    elif b.get("op") == "move" and code in wl:  # 调整顺序：dir=-1 上移，1 下移，"top" 置顶
+        i = wl.index(code)
+        d = b.get("dir", -1)
+        j = 0 if d == "top" else max(0, min(len(wl) - 1, i + int(d)))
+        wl.insert(j, wl.pop(i))
     elif code not in wl:
         wl.append(code)
     save_settings({"watchlist": wl})

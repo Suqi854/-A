@@ -157,21 +157,38 @@
       ${panel('SIGNAL <small>最新选股</small>', '<div id="monPick" class="loading">载入</div>', { cls: 'c4', right: '<button class="btn sm" onclick="location.hash=\'pick\'">全部 ›</button>' })}
       ${panel('ACCOUNT <small>模拟账户</small>', '<div id="monAcct"></div>', { cls: 'c4', right: '<button class="btn sm" onclick="location.hash=\'sim\'">模拟盘 ›</button>' })}
       ${STATIC && !S.priv ? '' : panel('WATCHLIST <small>自选监控 · 3秒刷新</small>', '<div class="scroll" style="max-height:420px"><table class="t" id="wlT"></table></div>',
-        { cls: 'c8', np: true, right: `<input class="in rw" id="wlAdd" placeholder="代码 如600519" style="width:130px;height:22px"><button class="btn sm pri rw" id="wlAddB">+ 自选</button>` })}
+        { cls: 'c8', np: true, right: `<span class="rw" style="position:relative"><input class="in" id="wlAdd" placeholder="搜索名称/代码 加自选" autocomplete="off" style="width:170px;height:22px"><div class="suggest" id="wlSug" style="top:24px;left:0;right:auto;min-width:220px"></div></span>` })}
       ${panel('OVERSEAS <small>外围市场</small>', '<table class="t" id="ovsT"></table>', { cls: 'c4', np: true })}
       ${panel('TOP <small>涨幅榜</small>', '<div class="scroll" style="max-height:330px"><table class="t" id="topT"></table></div>', { cls: 'c4', np: true })}
       ${panel('INFLOW <small>主力净流入榜</small>', '<div class="scroll" style="max-height:330px"><table class="t" id="inT"></table></div>', { cls: 'c4', np: true })}
       ${panel('FEED <small>实时动态</small>', '<div class="scroll" style="max-height:330px" id="feed"></div>', { cls: 'c4', np: true })}
     </div>`;
-    if (!STATIC) $('#wlAddB').onclick = addWatch; if (!STATIC) $('#wlAdd').onkeydown = e => { if (e.key === 'Enter') addWatch(); };
+    if (!STATIC && $('#wlAdd')) bindWlSearch();
     if (S.ov) updateMon(S.ov);
     loadIdxSpark(); clearInterval(S.timers.spark); S.timers.spark = setInterval(() => S.page === 'mon' && loadIdxSpark(), 60000);
   }
-  async function addWatch() {
-    const v = $('#wlAdd').value.trim(); if (!v) return;
-    try { const r = await api('search?q=' + encodeURIComponent(v)); if (!r.length) throw new Error('找不到该股票');
-      await api('watchlist', { code: r[0].code, op: 'add' }); $('#wlAdd').value = ''; toast('已加入自选：' + r[0].name); poll();
+  const inWatch = c => !!(S.ov && S.ov.watchlist.some(w => w.code === c));
+  const star = (c, name) => STATIC ? '' : `<button class="btn sm star rw ${inWatch(c) ? 'on' : ''}" data-star="${c}" data-n="${esc(name || '')}" title="${inWatch(c) ? '移出自选' : '加入自选'}">${inWatch(c) ? '★' : '☆'}</button>`;
+  async function toggleWatch(code, name) {
+    const on = inWatch(code);
+    try { await api('watchlist', { code, op: on ? 'remove' : 'add' }); toast((on ? '已移出自选：' : '已加入自选：') + (name || code)); await poll();
+      $$(`[data-star="${code}"]`).forEach(b => { b.classList.toggle('on', !on); b.textContent = on ? '☆' : '★'; });
     } catch (e) { toast(e.message, 1); }
+  }
+  document.addEventListener('click', e => { const b = e.target.closest('[data-star]'); if (!b) return; e.stopPropagation(); e.preventDefault(); toggleWatch(b.dataset.star, b.dataset.n); }, true);
+  function bindWlSearch() {
+    const inp = $('#wlAdd'), box = $('#wlSug'); let list = [], idx = 0, t;
+    const draw = () => { if (!list.length) { box.style.display = 'none'; return; }
+      box.innerHTML = list.map((s, i) => `<div class="${i === idx ? 'on' : ''}" data-i="${i}"><span>${esc(s.name)} <small class="muted">${short(s.code)}</small></span><span>${inWatch(s.code) ? '已自选' : '+ 加入'}</span></div>`).join('');
+      box.style.display = 'block'; };
+    const add = async s => { if (!s) return; if (inWatch(s.code)) return toast('已经在自选里了'); inp.value = ''; list = []; draw(); await toggleWatch(s.code, s.name); };
+    inp.oninput = () => { clearTimeout(t); const v = inp.value.trim(); if (!v) { list = []; return draw(); }
+      t = setTimeout(async () => { try { list = await api('search?q=' + encodeURIComponent(v)); } catch { list = []; } idx = 0; draw(); }, 150); };
+    inp.onkeydown = e => { if (e.key === 'ArrowDown') { idx = Math.min(list.length - 1, idx + 1); draw(); e.preventDefault(); }
+      else if (e.key === 'ArrowUp') { idx = Math.max(0, idx - 1); draw(); e.preventDefault(); }
+      else if (e.key === 'Enter') add(list[idx]); else if (e.key === 'Escape') { list = []; draw(); } };
+    box.onmousedown = e => { const d = e.target.closest('[data-i]'); if (d) { e.preventDefault(); add(list[+d.dataset.i]); } };
+    inp.onblur = () => setTimeout(() => { box.style.display = 'none'; }, 150);
   }
   async function loadIdxSpark() {
     if (!S.ov) return;
@@ -222,11 +239,12 @@
     wl.innerHTML = `<thead><tr><th>股票</th><th>现价</th><th>涨跌幅</th><th>涨跌</th><th class="hide-m">量比</th><th class="hide-m">换手</th><th class="hide-m">振幅</th><th class="hide-m">成交额</th><th class="hide-m">市盈</th><th></th></tr></thead><tbody>` +
       ov.watchlist.map(q => `<tr class="click" data-c="${q.code}" data-p="${q.price || 0}"><td>${nameCell(q.name || '--', q.code)}</td><td class="${cls(q.pct)} ${old[q.code] && q.price !== old[q.code] ? (q.price > old[q.code] ? 'flash-up' : 'flash-down') : ''}">${num(q.price)}</td>
         <td class="${cls(q.pct)}">${pct(q.pct)}</td><td class="${cls(q.chg)}">${sgn(q.chg)}</td><td class="hide-m ${q.vr > 2 ? 'amber' : ''}">${num(q.vr)}</td><td class="hide-m">${num(q.turnover)}%</td><td class="hide-m">${num(q.amp)}%</td>
-        <td class="hide-m">${money(q.amount)}</td><td class="hide-m">${num(q.pe, 1)}</td><td><button class="btn sm rw" data-rm="${q.code}">×</button></td></tr>`).join('') + '</tbody>';
-    wl.querySelectorAll('tr[data-c]').forEach(tr => tr.onclick = e => { if (e.target.dataset.rm) return; go('anly', tr.dataset.c); });
+        <td class="hide-m">${money(q.amount)}</td><td class="hide-m">${num(q.pe, 1)}</td><td><button class="btn sm rw" data-up="${q.code}" title="上移">↑</button> <button class="btn sm rw" data-rm="${q.code}" title="移出自选">×</button></td></tr>`).join('') + '</tbody>';
+    wl.querySelectorAll('tr[data-c]').forEach(tr => tr.onclick = e => { if (e.target.dataset.rm || e.target.dataset.up) return; go('anly', tr.dataset.c); });
+    wl.querySelectorAll('[data-up]').forEach(b => b.onclick = async () => { await api('watchlist', { code: b.dataset.up, op: 'move', dir: -1 }); poll(); });
     wl.querySelectorAll('[data-rm]').forEach(b => b.onclick = async () => { await api('watchlist', { code: b.dataset.rm, op: 'remove' }); poll(); });
     $('#ovsT').innerHTML = `<tr><th>市场</th><th>点位</th><th>涨跌幅</th></tr>` + ov.overseas.map(q => `<tr><td class="nm">${esc(q.name)}</td><td>${num(q.price)}</td><td class="${cls(q.pct)}">${pct(q.pct)}</td></tr>`).join('');
-    const rowT = r => `<tr class="click" data-c="${r.code}"><td>${nameCell(r.name, r.code)}</td><td class="${cls(r.pct)}">${num(r.price)}</td><td class="${cls(r.pct)}">${pct(r.pct)}</td><td class="${cls(r.main_net)}">${money(r.main_net)}</td></tr>`;
+    const rowT = r => `<tr class="click" data-c="${r.code}"><td>${star(r.code, r.name)} ${nameCell(r.name, r.code)}</td><td class="${cls(r.pct)}">${num(r.price)}</td><td class="${cls(r.pct)}">${pct(r.pct)}</td><td class="${cls(r.main_net)}">${money(r.main_net)}</td></tr>`;
     $('#topT').innerHTML = `<tr><th>股票</th><th>现价</th><th>涨幅</th><th>主力</th></tr>` + ov.top.map(rowT).join('');
     $('#inT').innerHTML = `<tr><th>股票</th><th>现价</th><th>涨幅</th><th>主力</th></tr>` + ov.inflow.map(rowT).join('');
     [$('#topT'), $('#inT')].forEach(t => t.querySelectorAll('[data-c]').forEach(tr => tr.onclick = () => go('anly', tr.dataset.c)));
@@ -273,7 +291,7 @@
         <div class="hint">机会：</div><ul class="why">${p.reasons.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
         ${p.risks.length ? `<div class="hint" style="margin-top:4px">风险：</div><ul class="why risk">${p.risks.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
         ${p.ret_1d != null ? `<div class="sep"></div><div class="row mono" style="font-size:12px"><span class="muted">事后验证</span><span>1日 <b class="${cls(p.ret_1d)}">${pct(p.ret_1d)}</b></span><span>3日 <b class="${cls(p.ret_3d)}">${pct(p.ret_3d)}</b></span><span>5日 <b class="${cls(p.ret_5d)}">${pct(p.ret_5d)}</b></span><span class="chip">${esc(p.outcome || '')}</span></div>` : ''}
-        <div class="row" style="margin-top:8px"><button class="btn sm" data-a="${p.code}">详细分析</button><span class="sp"></span><button class="btn sm buy rw" data-b='${esc(JSON.stringify({ code: p.code, name: p.name, price: p.price, stop: p.stop, target1: p.target1, target2: p.target2, pick_id: p.id }))}'>模拟买入</button></div></div>`;
+        <div class="row" style="margin-top:8px"><button class="btn sm" data-a="${p.code}">详细分析</button>${star(p.code, p.name)}<span class="sp"></span><button class="btn sm buy rw" data-b='${esc(JSON.stringify({ code: p.code, name: p.name, price: p.price, stop: p.stop, target1: p.target1, target2: p.target2, pick_id: p.id }))}'>模拟买入</button></div></div>`;
     }).join('');
     $('#runDetail').innerHTML = panel(`RESULT <small>${r.date} ${SESSION[r.session] || r.session} · ${r.started || ''}</small>`,
       `<div class="row hint mono" style="margin-bottom:10px"><span>扫描 <b class="amber">${r.scanned}</b></span><span>精评 <b class="amber">${r.candidates}</b></span><span>门槛 <b class="amber">${num(m.min_score, 0)}</b></span>
@@ -284,7 +302,7 @@
     $$('#runDetail [data-b]').forEach(b => b.onclick = () => openOrder(JSON.parse(b.dataset.b)));
     const c = await api('picks/candidates?run=' + r.id);
     const names = { breakout: '突破', pullback: '回踩', volume_start: '放量', oversold: '超跌', macd_cross: '金叉', accumulate: '吸筹', tail_strong: '尾强', auction_strong: '竞强' };
-    $('#candT').innerHTML = `<tr><th>#</th><th class="l">股票</th><th>评分</th><th>价格</th><th class="l">信号</th></tr>` + c.map((x, i) => `<tr class="click" data-c="${x.code}"><td class="muted">${i + 1}</td><td class="l">${nameCell(x.name, x.code)}</td><td class="${x.score >= m.min_score ? 'amber' : ''}">${num(x.score, 1)}</td><td>${num(x.price)}</td><td class="l">${x.strategies.map(s => `<span class="chip">${names[s] || s}</span>`).join(' ')}</td></tr>`).join('');
+    $('#candT').innerHTML = `<tr><th>#</th><th class="l">股票</th><th>评分</th><th>价格</th><th class="l">信号</th></tr>` + c.map((x, i) => `<tr class="click" data-c="${x.code}"><td class="muted">${i + 1}</td><td class="l">${star(x.code, x.name)} ${nameCell(x.name, x.code)}</td><td class="${x.score >= m.min_score ? 'amber' : ''}">${num(x.score, 1)}</td><td>${num(x.price)}</td><td class="l">${x.strategies.map(s => `<span class="chip">${names[s] || s}</span>`).join(' ')}</td></tr>`).join('');
     $$('#candT [data-c]').forEach(tr => tr.onclick = () => go('anly', tr.dataset.c));
   }
   async function watchPick() {
@@ -598,7 +616,7 @@
       ${panel('RISK <small>止损止盈参数</small>', `<div class="ticket">${f('rAtr', '止损 = N × ATR', s.risk.stop_atr)}${f('rMax', '最大止损幅度', s.risk.max_stop_pct, '0.08=8%')}
         ${f('rR1', '止盈① 盈亏比', s.risk.rr_1)}${f('rR2', '止盈② 盈亏比', s.risk.rr_2)}${f('rDays', '最长持有(交易日)', s.risk.max_hold_days)}${f('sCash', '模拟初始资金', s.init_cash, '重置账户后生效')}</div>`, { cls: 'c4' })}
       ${panel('LISTS <small>监控列表</small>', `<div class="ticket">
-        <label class="full">自选股（逗号分隔）<textarea class="in" id="lWl">${esc(s.watchlist.join(','))}</textarea></label>
+        <div class="full hint">自选股不在这里改：在「监控」页的自选栏搜索添加，或在任何股票旁点 ☆ / 个股页点「+ 自选」。当前 ${s.watchlist.length} 只。</div>
         <label class="full">指数<input class="in" id="lIdx" value="${esc(s.indices.join(','))}"></label>
         <label class="full">外围<input class="in" id="lOv" value="${esc(s.overseas.join(','))}"></label></div>`, { cls: 'c6' })}
       ${panel('NOTIFY <small>微信推送（可选）</small>', `<div class="ticket">
@@ -620,7 +638,7 @@
       try {
         await api('settings', { pick: { times: [v('sT1'), v('sT2')], min_score: n('sMin'), max_picks: n('sMax'), min_amount_yi: n('sAmt'), position_pct: n('sPos'), auto_trade: $('#sAuto').checked },
           risk: { stop_atr: n('rAtr'), max_stop_pct: n('rMax'), rr_1: n('rR1'), rr_2: n('rR2'), max_hold_days: n('rDays') }, init_cash: n('sCash'),
-          watchlist: list('lWl'), indices: list('lIdx'), overseas: list('lOv'), publish: { remote: v('pRemote'), branch: v('pBranch'), interval_min: n('pInt'), enabled: $('#pOn').checked, push: $('#pPush').checked }, notify: { pushplus_token: v('nPP'), serverchan_key: v('nSC'), enabled: $('#nOn').checked } });
+          indices: list('lIdx'), overseas: list('lOv'), publish: { remote: v('pRemote'), branch: v('pBranch'), interval_min: n('pInt'), enabled: $('#pOn').checked, push: $('#pPush').checked }, notify: { pushplus_token: v('nPP'), serverchan_key: v('nSC'), enabled: $('#nOn').checked } });
         toast('已保存'); S.settings = null; poll();
       } catch (e) { toast(e.message, 1); }
     };
