@@ -94,8 +94,61 @@
     const t = document.createElement('div'); t.className = 'toast' + (err ? ' err' : ''); t.textContent = msg;
     document.body.appendChild(t); setTimeout(() => t.remove(), err ? 5000 : 2600);
   }
-  const panel = (title, body, opts = {}) => `<div class="panel ${opts.cls || ''}" ${opts.id ? `id="${opts.id}"` : ''}>
-    <div class="ph"><h3>${title}</h3><div class="r">${opts.right || ''}</div></div><div class="pb ${opts.np ? 'np' : ''}">${body}</div></div>`;
+  // ---- 可折叠面板：点标题折叠/展开，状态记在本机；不太重要的默认折叠
+  const FOLD_DEFAULT = new Set(['pick:RUNS', 'pick:CANDIDATES', 'learn:HISTORY', 'learn:SCORECARD', 'learn:HOW', 'sim:ORDERS', 'mon:OVERSEAS', 'mon:FEED',
+    'anly:LEARN', 'set:SOURCES', 'set:MOBILE', 'set:PUBLISH', 'set:NOTIFY', 'set:LISTS', 'set:SYSTEM', 'set:EDIT', 'bt:TRADES']);
+  let FOLDS = {}; try { FOLDS = JSON.parse(localStorage.getItem('aq5_folds') || '{}') || {}; } catch { FOLDS = {}; }
+  const foldKey = title => (S.page || 'x') + ':' + String(title).replace(/<[\s\S]*$/, '').trim().split(/\s+/)[0];
+  const isFold = k => (k in FOLDS ? FOLDS[k] : FOLD_DEFAULT.has(k));
+  const panel = (title, body, opts = {}) => { const k = opts.nofold ? '' : foldKey(title);
+    return `<div class="panel ${opts.cls || ''}${k && isFold(k) ? ' fold' : ''}" ${opts.id ? `id="${opts.id}"` : ''}${k ? ` data-fk="${esc(k)}"` : ''}>
+    <div class="ph"><h3${k ? ' class="fold-h" title="点击折叠 / 展开"' : ''}>${title}</h3><div class="r">${opts.right || ''}</div></div><div class="pb ${opts.np ? 'np' : ''}">${body}</div></div>`; };
+  document.addEventListener('click', e => {
+    const h = e.target.closest && e.target.closest('.ph h3.fold-h'); if (!h || h.closest('.modal')) return;
+    const p = h.closest('.panel'), k = p && p.dataset.fk; if (!k) return;
+    const f = !p.classList.contains('fold'); p.classList.toggle('fold', f); FOLDS[k] = f;
+    try { localStorage.setItem('aq5_folds', JSON.stringify(FOLDS)); } catch { }
+  });
+
+  // ---- 外观：皮肤 / 界面风格 / 密度 / 涨跌色（每台设备单独保存）
+  const THEMES = [
+    ['terminal', '琥珀终端', '黑底琥珀，默认', ['#050608', '#ffb000', '#2fd3e6']],
+    ['ocean', '深海蓝', '彭博风深蓝', ['#030a14', '#4da3ff', '#7fe7ff']],
+    ['neon', '赛博霓虹', '紫黑发光', ['#07030f', '#ff3cd8', '#00f0ff']],
+    ['ths', '同花顺经典', '纯黑红格黄字', ['#000000', '#ffd800', '#ff3333']],
+    ['matrix', '矩阵绿', '磷光屏', ['#010501', '#3dff6e', '#c6ff3d']],
+    ['graphite', '石墨灰', '低对比护眼', ['#15171b', '#8ab4f8', '#81c995']],
+    ['sakura', '樱绯', '暗梅樱花粉', ['#120a10', '#ff8fbf', '#b9a6ff']],
+    ['light', '晨光白', '浅色，白天用', ['#eef1f5', '#d9730d', '#0b84c6']]];
+  const UIS = [['term', '直角终端'], ['card', '圆角卡片'], ['glass', '玻璃拟态'], ['flat', '极简扁平']];
+  const DENS = [['compact', '紧凑'], ['normal', '标准'], ['cozy', '宽松']];
+  const UPDN = [['rg', '红涨绿跌'], ['gu', '绿涨红跌']];
+  const LOOK = (() => { try { return JSON.parse(localStorage.getItem('aq5_look') || '{}') || {}; } catch { return {}; } })();
+  function applyLook() {
+    const d = document.documentElement;
+    [['theme', 'terminal'], ['ui', 'term'], ['density', 'normal'], ['updown', 'rg']].forEach(([k, def]) => {
+      if (LOOK[k] && LOOK[k] !== def) d.dataset[k] = LOOK[k]; else delete d.dataset[k]; });
+    try { localStorage.setItem('aq5_look', JSON.stringify(LOOK)); } catch { }
+    const m = document.querySelector('meta[name=theme-color]'); if (m) m.content = getComputedStyle(d).getPropertyValue('--bg').trim() || '#050608';
+    if (window.Charts && Charts.retheme) Charts.retheme();
+  }
+  function lookPanel() {
+    const cur = LOOK.theme || 'terminal', seg = (id, arr, v) => `<div class="seg" id="${id}">${arr.map(([k, t]) => `<button data-v="${k}" class="${k === v ? 'on' : ''}">${t}</button>`).join('')}</div>`;
+    return panel('LOOK <small>外观 · 皮肤和界面风格 · 只保存在这台设备</small>', `<div class="skins" id="lkTheme">${THEMES.map(([k, n, d, c]) => `<button class="skin ${k === cur ? 'on' : ''}" data-v="${k}">
+        <div class="sw" style="background:${c[0]}"><i style="background:${c[1]}"></i><i style="background:${c[2]}"></i><i style="background:${c[1]};opacity:.4"></i></div><b>${n}</b><small>${d}</small></button>`).join('')}</div>
+      <div class="optrow"><span>界面风格</span>${seg('lkUi', UIS, LOOK.ui || 'term')}</div>
+      <div class="optrow"><span>信息密度</span>${seg('lkDen', DENS, LOOK.density || 'normal')}</div>
+      <div class="optrow"><span>涨跌颜色</span>${seg('lkUd', UPDN, LOOK.updown || 'rg')}<span class="sp"></span><button class="btn sm" id="lkUnfold">展开所有折叠的面板</button><button class="btn sm" id="lkReset">恢复默认外观</button></div>
+      <p class="hint">点任意面板的标题可以折叠 / 展开，选股历史、迭代记录这类次要内容默认是折叠的。</p>`, { cls: 'c12', nofold: true });
+  }
+  function bindLook() {
+    const pick = (id, key) => $$('#' + id + ' [data-v]').forEach(b => b.onclick = () => { LOOK[key] = b.dataset.v; applyLook(); renderSet(); });
+    pick('lkTheme', 'theme'); pick('lkUi', 'ui'); pick('lkDen', 'density'); pick('lkUd', 'updown');
+    $('#lkUnfold').onclick = () => { Object.keys(FOLDS).forEach(k => delete FOLDS[k]); FOLD_DEFAULT.forEach(k => FOLDS[k] = false);
+      try { localStorage.setItem('aq5_folds', JSON.stringify(FOLDS)); } catch { } toast('已全部展开'); renderSet(); };
+    $('#lkReset').onclick = () => { Object.keys(LOOK).forEach(k => delete LOOK[k]); applyLook(); renderSet(); };
+  }
+  applyLook();
   function md(t) {
     const lines = esc(t || '').split(/\n/); let html = '', inList = false;
     const inline = s => s.replace(/\*\*(.+?)\*\*/g, '<b class="amber">$1</b>').replace(/`(.+?)`/g, '<code>$1</code>');
@@ -333,10 +386,10 @@
       const mx = Math.max(...b.dist, 1), labels = ['<-7', '-5', '-3', '-1', '<0', '0', '>0', '1', '3', '5', '>7'];
       const rg = ov.regime || {}, rc = rg.code === 'bull' ? 'up' : rg.code === 'bear' ? 'down' : 'amber';
       $('#breadth').className = '';
-      $('#breadth').innerHTML = `<div class="breadth-bar"><div style="width:${w(b.up)};background:var(--up)">${b.up}</div><div style="width:${w(b.flat)};background:#3d4955">${b.flat}</div><div style="width:${w(b.down)};background:var(--down)">${b.down}</div></div>
+      $('#breadth').innerHTML = `<div class="breadth-bar"><div style="width:${w(b.up)};background:var(--up)">${b.up}</div><div style="width:${w(b.flat)};background:var(--dim)">${b.flat}</div><div style="width:${w(b.down)};background:var(--down)">${b.down}</div></div>
         <div class="stat4"><div><div class="l">涨停</div><div class="v up">${b.limit_up}</div></div><div><div class="l">跌停</div><div class="v down">${b.limit_down}</div></div>
         <div><div class="l">成交额</div><div class="v">${b.amount_yi >= 10000 ? (b.amount_yi / 10000).toFixed(2) + '万亿' : b.amount_yi + '亿'}</div></div><div><div class="l">主力净额</div><div class="v ${cls(b.main_net_yi)}">${sgn(b.main_net_yi, 1)}亿</div></div></div>
-        <div class="dist">${b.dist.map((v, i) => `<div style="height:${(v / mx * 100).toFixed(0)}%;background:${i < 5 ? 'var(--down)' : i > 5 ? 'var(--up)' : '#3d4955'}"><span>${v}</span></div>`).join('')}</div>
+        <div class="dist">${b.dist.map((v, i) => `<div style="height:${(v / mx * 100).toFixed(0)}%;background:${i < 5 ? 'var(--down)' : i > 5 ? 'var(--up)' : 'var(--dim)'}"><span>${v}</span></div>`).join('')}</div>
         <div class="distl">${labels.map(l => `<span>${l}</span>`).join('')}</div>
         <div class="regime"><span class="s ${rc}">${esc(rg.state || '--')}</span><span class="hint">${esc(rg.desc || '')}<br>中位涨幅 <b class="${cls(b.median_pct)}">${pct(b.median_pct)}</b></span></div>`;
     } else if (b && b.error) $('#breadth').innerHTML = `<div class="empty">全市场快照获取失败<br><small>${esc(b.error)}</small></div>`;
@@ -450,7 +503,7 @@
     const sm = d.summary, VC = { '符合预期': 'u', '不符合': 'd', '一般': 'a', '跟踪中': '' };
     const grp = (title, arr) => `<table class="t"><tr><th class="l">${title}</th><th>样本</th><th>符合</th><th>不符合</th><th>3日均</th><th>超额</th></tr>${arr.map(x => `<tr><td class="l">${esc(x.key)}</td><td>${x.n}</td><td class="up">${num(x.hit * 100, 0)}%</td><td class="down">${num(x.miss * 100, 0)}%</td><td class="${cls(x.avg3)}">${x.avg3 == null ? '--' : pct(x.avg3)}</td><td class="${cls(x.alpha)}">${x.alpha == null ? '--' : pct(x.alpha)}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">暂无</td></tr>'}</table>`;
     const spark = p => { if (!p || !p.length) return ''; const w = 90, h = 22, mx = Math.max(...p.map(Math.abs), 1); const pts = [0, ...p].map((v, i) => `${(i / p.length * w).toFixed(1)},${(h / 2 - v / mx * (h / 2 - 2)).toFixed(1)}`).join(' ');
-      return `<svg width="${w}" height="${h}"><line x1="0" y1="${h / 2}" x2="${w}" y2="${h / 2}" stroke="#2a333d" stroke-dasharray="2 2"/><polyline points="${pts}" fill="none" stroke="${p[p.length - 1] >= 0 ? 'var(--up)' : 'var(--down)'}" stroke-width="1.5"/></svg>`; };
+      return `<svg width="${w}" height="${h}"><line x1="0" y1="${h / 2}" x2="${w}" y2="${h / 2}" stroke="var(--line2)" stroke-dasharray="2 2"/><polyline points="${pts}" fill="none" stroke="${p[p.length - 1] >= 0 ? 'var(--up)' : 'var(--down)'}" stroke-width="1.5"/></svg>`; };
     box.innerHTML = `<div class="grid">
       ${panel('SUMMARY <small>近20天入选股跟踪</small>', `<div class="stat4"><div><div class="l">入选</div><div class="v">${sm.n}</div></div><div><div class="l">已出结果</div><div class="v">${sm.done}</div></div>
         <div><div class="l">符合预期</div><div class="v up">${sm.hit == null ? '--' : num(sm.hit * 100, 0) + '%'}</div></div><div><div class="l">不符合</div><div class="v down">${sm.miss == null ? '--' : num(sm.miss * 100, 0) + '%'}</div></div></div>
@@ -563,7 +616,7 @@
     try { a = await api('analyze?code=' + code); } catch (e) { $('#p-anly').innerHTML = `<div class="empty">${STATIC ? '' : '分析失败：'}${esc(e.message)}</div>` + (STATIC ? await staticIndex() : ''); return; }
     S.anly = a;
     const q = a.quote, pl = a.plan, mf = a.main_force;
-    const ring = (v, col) => `<div class="ring"><svg width="96" height="96"><circle cx="48" cy="48" r="42" fill="none" stroke="#1c242d" stroke-width="7"/><circle cx="48" cy="48" r="42" fill="none" stroke="${col}" stroke-width="7" stroke-dasharray="${(v / 100 * 264).toFixed(1)} 264" style="filter:drop-shadow(0 0 6px ${col})"/></svg><b style="color:${col}">${num(v, 0)}</b></div>`;
+    const ring = (v, col) => `<div class="ring"><svg width="96" height="96"><circle cx="48" cy="48" r="42" fill="none" stroke="var(--line)" stroke-width="7"/><circle cx="48" cy="48" r="42" fill="none" stroke="${col}" stroke-width="7" stroke-dasharray="${(v / 100 * 264).toFixed(1)} 264" style="filter:drop-shadow(0 0 6px ${col})"/></svg><b style="color:${col}">${num(v, 0)}</b></div>`;
     const tone = { buy: 'var(--up)', watch_buy: 'var(--amber)', hold: 'var(--muted)', reduce: 'var(--down)', avoid: 'var(--down)' }[a.tone];
     const mfc = mf.tone === 'up' ? 'up' : mf.tone === 'down' ? 'down' : 'amber';
     const maxF = Math.max(...a.flows.map(f => Math.abs(f.main)), 1);
@@ -627,10 +680,10 @@
     const st = { p: 'day', main: 'ma', sub: 'macd' };
     let maSel = (lsGet('aq5_ma') || '5,10,20,60').split(',').map(Number);
     $$('#p-anly [data-ma]').forEach(c => { c.checked = maSel.includes(+c.dataset.ma); c.onchange = () => { maSel = $$('#p-anly [data-ma]').filter(x => x.checked).map(x => +x.dataset.ma); lsSet('aq5_ma', maSel.join(',')); if (S.kchart) S.kchart.setMA(maSel); }; });
-    const ov = () => $('#chPlan').checked && st.p === 'day' ? [{ zone: pl.buy_zone, fill: 'rgba(255,176,0,.07)' }, { price: pl.stop, color: '#17d17a', label: '止损' },
-      { price: pl.target1, color: '#ff4d4f', label: '止盈①' }, { price: pl.target2, color: '#ff8a8a', label: '止盈②' }] : [];
+    const ov = () => $('#chPlan').checked && st.p === 'day' ? [{ zone: pl.buy_zone, fill: `rgba(${Charts.C.accRGB},.07)` }, { price: pl.stop, color: Charts.C.down, label: '止损' },
+      { price: pl.target1, color: Charts.C.up, label: '止盈①' }, { price: pl.target2, color: '#ff8a8a', label: '止盈②' }] : [];
     const regLines = () => { const m = a.models; if (!$('#chReg').checked || st.p !== 'day' || !m || !m.reg_line) return [];
-      const k = Math.exp(2 * m.reg.sd); return [{ values: m.reg_line, color: '#e6edf3', dash: [4, 3] }, { values: m.reg_line.map(x => x * k), color: '#ff8a8a', dash: [2, 3] }, { values: m.reg_line.map(x => x / k), color: '#7cfc7c', dash: [2, 3] }]; };
+      const k = Math.exp(2 * m.reg.sd); return [{ values: m.reg_line, color: Charts.C.white, dash: [4, 3] }, { values: m.reg_line.map(x => x * k), color: '#ff8a8a', dash: [2, 3] }, { values: m.reg_line.map(x => x / k), color: '#7cfc7c', dash: [2, 3] }]; };
     let kDay = null;
     const loadChart = async () => {
       const box = $('.chartbox'); box.innerHTML = '<canvas id="chK"></canvas>';
@@ -791,7 +844,7 @@
         <dt>最大回撤</dt><dd class="down">${num(st.max_dd)}%</dd><dt>平均持有</dt><dd>${st.avg_hold ?? '--'} 天</dd><dt>累计手续费</dt><dd>${num(st.fees)}</dd></dl>
         <div class="sep"></div><div class="hint">按下单心态统计（找出让你亏钱的情绪）</div>
         <table class="t"><tr><th>心态</th><th>次数</th><th>胜率</th><th>盈亏</th></tr>${Object.entries(st.by_emotion).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${v.n}</td><td>${num(v.win / v.n * 100, 0)}%</td><td class="${cls(v.pnl)}">${sgn(v.pnl)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">暂无平仓记录</td></tr>'}</table>`, { cls: 'c4' })}
-      ${panel('EQUITY <small>资产曲线（每日收盘记录）</small>', '<div style="height:220px;position:relative"><canvas id="eqC" style="position:absolute;inset:0;width:100%;height:100%"></canvas></div>', { cls: 'c6' })}
+      ${panel('EQUITY <small>资产曲线（每日收盘记录）</small>', '<div style="height:220px;position:relative"><canvas id="eqC" style="position:absolute;inset:0;width:100%;height:100%"></canvas></div>', { cls: 'c6', nofold: true })}
       ${panel('ORDERS <small>委托</small>', `<div class="scroll" style="max-height:240px"><table class="t"><tr><th>时间</th><th class="l">股票</th><th>方向</th><th>数量</th><th>成交价</th><th>状态</th><th></th></tr>
         ${a.orders.map(o => `<tr><td class="muted">${o.created.slice(5, 16)}</td><td class="l">${esc(o.name)}</td><td class="${o.side === 'buy' ? 'up' : 'down'}">${o.side === 'buy' ? '买' : '卖'}${o.kind === 'limit' ? '(限' + num(o.price) + ')' : ''}</td><td>${o.qty}</td><td>${num(o.fill_price)}</td>
           <td>${{ pending: '<span class="amber">挂单</span>', filled: '成交', cancelled: '<span class="muted">已撤</span>', rejected: '<span class="up">废单</span>' }[o.status] || o.status}</td><td>${o.status === 'pending' ? `<button class="btn sm" data-cx="${o.id}">撤</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="7" class="muted">暂无</td></tr>'}</table></div>`, { cls: 'c6', np: true })}
@@ -828,7 +881,7 @@
     };
     $('#simReset').onclick = async () => { if (!confirm(`确定把「${a.name}」重置为初始资金？所有持仓和记录会清空。`)) return; await api('sim/reset', { acct: S.acct }); toast('已重置'); renderSim(); };
     const eq = a.equity_curve;
-    Charts.lines($('#eqC'), eq.map(e => e.date), [{ values: eq.map(e => e.equity), color: '#ffb000', width: 1.6 }], { base: a.init, fmt: v => (v / 1e4).toFixed(2) + '万' });
+    Charts.lines($('#eqC'), eq.map(e => e.date), [{ values: eq.map(e => e.equity), color: Charts.C.amber, width: 1.6 }], { base: a.init, fmt: v => (v / 1e4).toFixed(2) + '万' });
   }
   async function loadHF() {
     const box = $('#hfBox'); if (!box) return;
@@ -891,7 +944,7 @@
         <div class="rw" style="display:flex;flex-direction:column;gap:6px"><button class="btn pri" id="lrRun">▶ 立即学习</button><button class="btn" id="lrBoot">历史冷启动</button></div></div>
         <div class="hint mono" id="bootMsg" style="margin-top:6px">${L.boot.running ? `冷启动中：${esc(L.boot.msg)} ${L.boot.progress}/${L.boot.total}` : `历史回放样本 ${L.history_samples} 个（在历史K线上“回到过去”计算因子，再看之后的真实涨跌，让系统第一天就能学习）`}</div>`, { cls: 'c12' })}
       ${panel(`WEIGHTS <small>当前因子权重 v${L.version}</small>`, Object.keys(L.weights).map(k => { const w = L.weights[k], d = def[k];
-          return `<div class="fbar" style="grid-template-columns:52px 1fr 100px"><span>${L.labels[k]}</span><div class="bar"><i style="width:${w / 0.3 * 100}%;background:var(--amber)"></i><em style="left:${d / 0.3 * 100}%;background:#fff"></em></div><span class="mono">${num(w * 100, 1)}% <small class="${cls(w - d)}">${sgn((w - d) * 100, 1)}</small></span></div>`; }).join('') +
+          return `<div class="fbar" style="grid-template-columns:52px 1fr 100px"><span>${L.labels[k]}</span><div class="bar"><i style="width:${w / 0.3 * 100}%;background:var(--amber)"></i><em style="left:${d / 0.3 * 100}%;background:var(--hi)"></em></div><span class="mono">${num(w * 100, 1)}% <small class="${cls(w - d)}">${sgn((w - d) * 100, 1)}</small></span></div>`; }).join('') +
         '<div class="hint">白线 = 初始权重。IC：因子与未来3日收益的相关性，>0.03 说明有用，<0 说明反向。</div>' +
         `<table class="t" style="margin-top:6px"><tr><th>因子</th><th>最近IC</th><th>IR</th></tr>${Object.keys(L.weights).map(k => `<tr><td>${L.labels[k]}</td><td class="${cls(ic[k])}">${num(ic[k], 3)}</td><td>${num(last ? (last.ic.ir || {})[k] : null, 2)}</td></tr>`).join('')}</table>`, { cls: 'c4' })}
       ${panel('STRATEGIES <small>策略实战表现（3日）</small>', `<table class="t"><tr><th class="l">策略</th><th>样本</th><th>胜率</th><th>均收益</th><th>权重</th></tr>${L.strategies.map(s => { const x = strat[s.id] || {};
@@ -945,10 +998,10 @@
           <div><div class="l">年化</div><div class="v ${cls(r.annual)}">${pct(r.annual)}</div></div><div><div class="l">胜率</div><div class="v amber">${r.win_rate == null ? '--' : num(r.win_rate * 100, 1) + '%'}</div></div>
           <div><div class="l">交易次数</div><div class="v">${r.n}</div></div><div><div class="l">最大回撤</div><div class="v down">${num(r.max_dd)}%</div></div></div>
           <div class="pb"><b class="amber">结论：</b>${esc(r.verdict)} <span class="hint">（${r.start} ~ ${r.end}，${esc(r.strategy_name)}）</span></div></div>
-        ${panel('CURVE <small>策略净值 vs 持股不动</small>', '<div style="height:280px;position:relative"><canvas id="btC" style="position:absolute;inset:0;width:100%;height:100%"></canvas></div><div class="legend"><span style="color:#ffb000">■ 策略</span><span style="color:#5f6d7b">■ 持股不动</span></div>', { cls: 'c7' })}
+        ${panel('CURVE <small>策略净值 vs 持股不动</small>', '<div style="height:280px;position:relative"><canvas id="btC" style="position:absolute;inset:0;width:100%;height:100%"></canvas></div><div class="legend"><span style="color:var(--amber)">■ 策略</span><span style="color:var(--ch-axis)">■ 持股不动</span></div>', { cls: 'c7', nofold: true })}
         ${panel('TRADES <small>逐笔</small>', `<div class="scroll" style="max-height:310px"><table class="t"><tr><th>买入</th><th>卖出</th><th>收益</th><th>天</th><th class="l">离场</th></tr>${r.trades.map(t => `<tr title="${esc(t.why)}"><td>${t.buy_date.slice(2)}<br><small class="muted">${num(t.buy)}</small></td><td>${t.sell_date.slice(2)}<br><small class="muted">${num(t.sell)}</small></td><td class="${cls(t.ret)}">${pct(t.ret)}</td><td>${t.days}</td><td class="l">${esc(t.exit)}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">期间没有触发信号</td></tr>'}</table></div>`, { cls: 'c5', np: true })}
       </div>`;
-      Charts.lines($('#btC'), r.curve.map(c => c.date), [{ values: r.curve.map(c => c.bench), color: '#5f6d7b' }, { values: r.curve.map(c => c.eq), color: '#ffb000', width: 1.8 }], { base: 1 });
+      Charts.lines($('#btC'), r.curve.map(c => c.date), [{ values: r.curve.map(c => c.bench), color: Charts.C.axis }, { values: r.curve.map(c => c.eq), color: Charts.C.amber, width: 1.8 }], { base: 1 });
     } catch (e) { out.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
   }
 
@@ -997,7 +1050,7 @@
   async function renderStaticSet() {
     const s = await api('settings').catch(() => ({})), p = S.priv, prof = (p && p.profile) || {};
     const refresh = +(lsGet('aq5_refresh') || 60), rem = !!lsGet('aq5_pw');
-    $('#p-set').innerHTML = `<div class="grid">
+    $('#p-set').innerHTML = `<div class="grid">${lookPanel()}
       ${panel('PHONE <small>手机设置 · 只保存在这台手机</small>', `<dl class="kv"><dt>个人数据</dt><dd>${p ? '<b class="down">已解锁</b> · 数据时间 ' + esc(p.time.slice(5, 16)) : '<b class="up">未解锁</b>'}</dd>
         <dt>连接电脑</dt><dd>${!p ? '解锁后自动尝试' : p.remote ? '<span class="amber">电脑远程已开启，但现在连不上（电脑可能关机或休眠）</span> <button class="btn sm" id="phRe">重试</button>' : '<span class="muted">电脑端没开「手机远程」</span>'}</dd></dl>
         <div class="ticket"><label>自动刷新<select class="in" id="phRef">${[30, 60, 120, 300].map(x => `<option value="${x}" ${x === refresh ? 'selected' : ''}>${x < 60 ? x + ' 秒' : x / 60 + ' 分钟'}</option>`).join('')}</select></label>
@@ -1013,6 +1066,7 @@
         <dt>AI 模型</dt><dd>${s.ai ? esc(s.ai.provider + ' · ' + (s.ai.model || '默认')) : '--'}</dd></dl>`, { cls: 'c6' })}
     </div>`;
     const pr = $('#phRe'); if (pr) pr.onclick = async () => { if (await connectRemote()) renderSet(); else toast('还是连不上电脑', 1); };
+    bindLook();
     $('#phRef').onchange = e => { lsSet('aq5_refresh', e.target.value); restartPoll(); toast('已保存'); };
     $('#phRem').onchange = e => { if (e.target.value === '0') lsSet('aq5_pw', null); else if (!S.priv) toast('下次解锁时勾选「记住」即可'); toast('已保存'); };
     $('#phLock').onclick = () => { if (S.priv) { S.priv = null; lsSet('aq5_pw', null); location.reload(); } else showUnlock(); };
@@ -1060,7 +1114,7 @@
           <button class="btn" id="bkSaveCfg">保存</button><button class="btn" id="bkLocal">仅本机备份</button><button class="btn pri" id="bkGo">立即备份并推送</button></div>
         <div class="row" style="margin-top:6px"><input class="in" id="rsPw" type="password" placeholder="恢复时输入备份密码（本机已保存可留空）" style="flex:1"><button class="btn sell" id="rsGo">从备份恢复</button></div>
         <div class="sep"></div><div class="row"><span class="hint">本机整库快照（行情缓存、学习样本、AI 笔记全部），每天 15:55 自动一份，保留 7 天${me.backup.db_last ? ' · 上次 ' + esc(me.backup.db_last) : ''}</span><span class="sp"></span><button class="btn sm" id="dbSnap">立即快照</button></div>`, { cls: 'c6' })}` : '';
-    $('#p-set').innerHTML = `<div class="grid">${personal}
+    $('#p-set').innerHTML = `<div class="grid">${lookPanel()}${personal}
       ${panel('AI <small>AI 接口（Key 在密钥保险箱）</small>', `<div class="ticket">
         <label>服务商<select class="in" id="aiProv">${['DeepSeek', 'OpenAI', '通义千问', 'Kimi', 'Claude', '自定义'].map(p => `<option ${s.ai.provider === p ? 'selected' : ''}>${p}</option>`).join('')}</select></label>
         <label>模型<span class="row" style="flex-wrap:nowrap;gap:4px"><input class="in" id="aiModel" value="${esc(s.ai.model)}" placeholder="留空用默认，如 deepseek-chat" style="flex:1;min-width:0"><button class="btn sm" id="aiPull" type="button" title="向服务商拉取可用模型">拉取</button></span>
@@ -1101,6 +1155,7 @@
         <div class="row"><button class="btn" id="pNow">立即发布一次</button><span class="hint mono" id="pState">${S.ov && S.ov.publish ? `上次 ${esc(S.ov.publish.last || '--')} · 推送 ${esc(S.ov.publish.last_push || '--')}${S.ov.publish.error ? ' · <span class="up">' + esc(S.ov.publish.error.slice(0, 120)) + '</span>' : ''}` : ''}</span></div>`, { cls: 'c12' })}
       <div class="c12 row"><span class="sp"></span><button class="btn pri" id="sSave">保存设置</button></div>
     </div>`;
+    bindLook();
     const v = id => $('#' + id).value.trim(), n = id => +v(id), list = id => v(id).split(/[,，\s]+/).filter(Boolean);
     $('#sSave').onclick = async () => {
       try {

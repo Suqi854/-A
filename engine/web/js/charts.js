@@ -3,8 +3,21 @@
   const C = {
     up: '#ff4d4f', down: '#17d17a', grid: '#141b22', axis: '#5f6d7b', text: '#9aa7b4', amber: '#ffb000',
     cyan: '#2fd3e6', white: '#e6edf3', bg: '#0c1014', ma: ['#ffffff', '#ffb000', '#d16cff', '#2fd3e6', '#7cfc7c', '#ff7ab6', '#8fa3ff'],
-    font: '11px "JetBrains Mono", Consolas, monospace'
+    font: '11px "JetBrains Mono", Consolas, monospace',
+    grid2: '#2a333d', onAcc: '#000', upRGB: '255, 77, 79', downRGB: '23, 209, 122', accRGB: '255, 176, 0', cyanRGB: '47, 211, 230'
   };
+  // 皮肤切换后从 CSS 变量重新取色
+  function retheme() {
+    try {
+      const cs = getComputedStyle(document.documentElement), g = (n, d) => (cs.getPropertyValue(n) || '').trim() || d;
+      Object.assign(C, { up: g('--up', C.up), down: g('--down', C.down), upRGB: g('--up-rgb', C.upRGB), downRGB: g('--down-rgb', C.downRGB),
+        grid: g('--ch-grid', C.grid), grid2: g('--ch-grid2', C.grid2), axis: g('--ch-axis', C.axis), text: g('--ch-text', C.text),
+        amber: g('--amber', C.amber), accRGB: g('--acc-rgb', C.accRGB), cyan: g('--cyan', C.cyan), cyanRGB: g('--cyan-rgb', C.cyanRGB),
+        white: g('--ch-white', C.white), bg: g('--ch-bg', C.bg), onAcc: g('--on-acc', C.onAcc) });
+      C.ma[0] = C.white; C.ma[1] = C.amber; C.ma[3] = C.cyan;
+    } catch (e) { /* ignore */ }
+  }
+  retheme();
 
   function setup(canvas) {
     const dpr = window.devicePixelRatio || 1;
@@ -145,14 +158,14 @@
         ctx.beginPath(); ctx.moveTo(0, Math.round(y) + .5); ctx.lineTo(W, Math.round(y) + .5); ctx.stroke();
         ctx.fillText(p.toFixed(niceDigits(p)), W + 4, y);
       }
-      [y1, y2].forEach(y => { ctx.strokeStyle = '#1f2832'; ctx.beginPath(); ctx.moveTo(0, y + .5); ctx.lineTo(w, y + .5); ctx.stroke(); });
+      [y1, y2].forEach(y => { ctx.strokeStyle = C.grid2; ctx.beginPath(); ctx.moveTo(0, y + .5); ctx.lineTo(w, y + .5); ctx.stroke(); });
       // 日期
       ctx.textAlign = 'center'; ctx.fillStyle = C.axis;
       const step = Math.max(1, Math.round(n / (W / 90)));
       for (let i = 0; i < n; i += step) { ctx.fillText(R[i].date.length > 10 ? R[i].date.slice(5) : R[i].date.slice(2), X(i), y3 + 9); ctx.strokeStyle = C.grid; ctx.beginPath(); ctx.moveTo(X(i) + .5, 0); ctx.lineTo(X(i) + .5, y3); ctx.stroke(); }
       // 区间叠加
       for (const o of this.overlays) {
-        if (o.zone) { const a = py(o.zone[1]), b = py(o.zone[0]); ctx.fillStyle = o.fill || 'rgba(255,176,0,.08)'; ctx.fillRect(0, a, W, Math.max(1, b - a)); }
+        if (o.zone) { const a = py(o.zone[1]), b = py(o.zone[0]); ctx.fillStyle = o.fill || `rgba(${C.accRGB},.08)`; ctx.fillRect(0, a, W, Math.max(1, b - a)); }
       }
       // 蜡烛
       for (let i = 0; i < n; i++) {
@@ -160,7 +173,7 @@
         ctx.strokeStyle = col; ctx.fillStyle = col;
         ctx.beginPath(); ctx.moveTo(Math.round(x) + .5, py(r.high)); ctx.lineTo(Math.round(x) + .5, py(r.low)); ctx.stroke();
         const top = py(Math.max(r.open, r.close)), bh = Math.max(1, Math.abs(py(r.open) - py(r.close)));
-        if (up && cw > 3) { ctx.fillStyle = '#0c1014'; ctx.fillRect(x - cw / 2, top, cw, bh); ctx.strokeRect(Math.round(x - cw / 2) + .5, Math.round(top) + .5, Math.round(cw) - 1, Math.max(1, Math.round(bh) - 1)); }
+        if (up && cw > 3) { ctx.fillStyle = C.bg; ctx.fillRect(x - cw / 2, top, cw, bh); ctx.strokeRect(Math.round(x - cw / 2) + .5, Math.round(top) + .5, Math.round(cw) - 1, Math.max(1, Math.round(bh) - 1)); }
         else ctx.fillRect(x - cw / 2, top, cw, bh);
       }
       // 均线 / 布林线
@@ -176,7 +189,7 @@
       for (const o of this.overlays) {
         if (!o.price) continue; const y = py(o.price); if (y < 0 || y > hMain) continue;
         ctx.strokeStyle = o.color; ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
-        ctx.setLineDash([]); ctx.fillStyle = o.color; ctx.fillRect(W, y - 8, padR, 16); ctx.fillStyle = '#000'; ctx.textAlign = 'left';
+        ctx.setLineDash([]); ctx.fillStyle = o.color; ctx.fillRect(W, y - 8, padR, 16); ctx.fillStyle = C.onAcc; ctx.textAlign = 'left';
         ctx.fillText(o.price.toFixed(2), W + 3, y); ctx.textAlign = 'right'; ctx.fillStyle = o.color; ctx.fillText(o.label, W - 4, y - 8); ctx.setLineDash([5, 4]);
       }
       ctx.setLineDash([]);
@@ -188,7 +201,7 @@
       ctx.fillText((X(loI) > W / 2 ? '' : '← ') + R[loI].low.toFixed(2) + (X(loI) > W / 2 ? ' →' : ''), X(loI) + (X(loI) > W / 2 ? -4 : 4), py(R[loI].low) + 8);
       // 成交量
       let vmax = 0; for (const r of R) vmax = Math.max(vmax, r.vol);
-      for (let i = 0; i < n; i++) { const r = R[i]; const hh = r.vol / (vmax || 1) * (hVol - 6); ctx.fillStyle = r.close >= r.open ? 'rgba(255,77,79,.75)' : 'rgba(23,209,122,.75)'; ctx.fillRect(X(i) - cw / 2, y2 - hh, cw, hh); }
+      for (let i = 0; i < n; i++) { const r = R[i]; const hh = r.vol / (vmax || 1) * (hVol - 6); ctx.fillStyle = r.close >= r.open ? `rgba(${C.upRGB},.75)` : `rgba(${C.downRGB},.75)`; ctx.fillRect(X(i) - cw / 2, y2 - hh, cw, hh); }
       ctx.strokeStyle = C.amber; ctx.beginPath(); let st = false;
       for (let i = 0; i < n; i++) { const v = this.vma[s + i]; if (v == null) continue; const y = y2 - v / (vmax || 1) * (hVol - 6); if (!st) { ctx.moveTo(X(i), y); st = true; } else ctx.lineTo(X(i), y); }
       ctx.stroke();
@@ -214,7 +227,7 @@
         else if (this.sub === 'bias') { const m = Math.max(Math.abs(lo2), Math.abs(hi2), 1); lo2 = -m; hi2 = m; marks = [0]; }
         if (!(hi2 > lo2)) { hi2 = lo2 + 1; }
         const sy = v => sub + (hi2 - v) / (hi2 - lo2) * subH;
-        ctx.strokeStyle = '#2a333d'; marks.forEach(v => { ctx.beginPath(); ctx.moveTo(0, sy(v)); ctx.lineTo(W, sy(v)); ctx.stroke(); ctx.fillStyle = C.axis; ctx.fillText(v, W + 4, sy(v)); });
+        ctx.strokeStyle = C.grid2; marks.forEach(v => { ctx.beginPath(); ctx.moveTo(0, sy(v)); ctx.lineTo(W, sy(v)); ctx.stroke(); ctx.fillStyle = C.axis; ctx.fillText(v, W + 4, sy(v)); });
         sets.forEach(([arr, col]) => { ctx.strokeStyle = col; ctx.beginPath(); let f = false;
           for (let i = 0; i < n; i++) { const v = arr[s + i]; if (v == null) continue; f ? ctx.lineTo(X(i), sy(v)) : (ctx.moveTo(X(i), sy(v)), f = true); } ctx.stroke(); });
         ctx.fillStyle = C.axis; ctx.fillText(this.sub.toUpperCase(), W + 4, sub + subH - 6);
@@ -224,7 +237,7 @@
         const ch = this.chips, x0 = W + padR, mx = Math.max(...ch.dist, 1e-9), last = this.rows[this.rows.length - 1].close;
         ctx.fillStyle = 'rgba(255,255,255,.02)'; ctx.fillRect(x0, 0, chipW, hMain);
         ch.dist.forEach((d, i) => { const p0 = ch.lo + i * ch.step, y = py(p0 + ch.step), y2_ = py(p0); if (y2_ < 0 || y > hMain) return;
-          ctx.fillStyle = p0 + ch.step / 2 <= last ? 'rgba(255,77,79,.65)' : 'rgba(47,211,230,.55)';
+          ctx.fillStyle = p0 + ch.step / 2 <= last ? `rgba(${C.upRGB},.65)` : `rgba(${C.cyanRGB},.55)`;
           ctx.fillRect(x0 + 2, y, d / mx * (chipW - 6), Math.max(1, y2_ - y - 0.5)); });
         const ya = py(ch.avg_cost); ctx.strokeStyle = C.amber; ctx.setLineDash([2, 2]); ctx.beginPath(); ctx.moveTo(x0, ya); ctx.lineTo(x0 + chipW, ya); ctx.stroke(); ctx.setLineDash([]);
         ctx.fillStyle = C.amber; ctx.textAlign = 'left'; ctx.fillText('均成本 ' + ch.avg_cost, x0 + 4, Math.max(8, ya - 7));
@@ -234,12 +247,12 @@
       let hi_ = n - 1;
       if (this.hover && this.hover.x < W) {
         hi_ = Math.max(0, Math.min(n - 1, Math.floor(this.hover.x / bw)));
-        ctx.strokeStyle = 'rgba(255,176,0,.6)'; ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = `rgba(${C.accRGB},.6)`; ctx.setLineDash([3, 3]);
         ctx.beginPath(); ctx.moveTo(X(hi_) + .5, 0); ctx.lineTo(X(hi_) + .5, y3); ctx.stroke();
         if (this.hover.y < hMain) { ctx.beginPath(); ctx.moveTo(0, this.hover.y + .5); ctx.lineTo(W, this.hover.y + .5); ctx.stroke();
-          const p = hi - (this.hover.y - 8) / (hMain - 16) * (hi - lo); ctx.setLineDash([]); ctx.fillStyle = C.amber; ctx.fillRect(W, this.hover.y - 8, padR, 16); ctx.fillStyle = '#000'; ctx.textAlign = 'left'; ctx.fillText(p.toFixed(2), W + 3, this.hover.y); }
+          const p = hi - (this.hover.y - 8) / (hMain - 16) * (hi - lo); ctx.setLineDash([]); ctx.fillStyle = C.amber; ctx.fillRect(W, this.hover.y - 8, padR, 16); ctx.fillStyle = C.onAcc; ctx.textAlign = 'left'; ctx.fillText(p.toFixed(2), W + 3, this.hover.y); }
         ctx.setLineDash([]);
-        ctx.fillStyle = C.amber; ctx.textAlign = 'center'; const tx = Math.max(36, Math.min(W - 36, X(hi_))); ctx.fillRect(tx - 36, y3, 72, padB); ctx.fillStyle = '#000'; ctx.fillText(R[hi_].date, tx, y3 + 9);
+        ctx.fillStyle = C.amber; ctx.textAlign = 'center'; const tx = Math.max(36, Math.min(W - 36, X(hi_))); ctx.fillRect(tx - 36, y3, 72, padB); ctx.fillStyle = C.onAcc; ctx.fillText(R[hi_].date, tx, y3 + 9);
       }
       if (this.lg) {
         const r = R[hi_], prev = this.rows[s + hi_ - 1], pc = prev ? (r.close / prev.close - 1) * 100 : 0;
@@ -269,11 +282,11 @@
       for (let k = 0; k <= 4; k++) { const p = prev + m - 2 * m * k / 4, y = py(p); ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + W, y); ctx.stroke();
         ctx.textAlign = 'right'; ctx.fillStyle = p > prev ? C.up : p < prev ? C.down : C.axis; ctx.fillText(p.toFixed(2), padL - 4, y);
         ctx.textAlign = 'left'; ctx.fillText(((p / prev - 1) * 100).toFixed(2) + '%', padL + W + 4, y); }
-      ctx.strokeStyle = '#3a4653'; ctx.setLineDash([4, 4]); ctx.beginPath(); ctx.moveTo(padL, py(prev)); ctx.lineTo(padL + W, py(prev)); ctx.stroke(); ctx.setLineDash([]);
+      ctx.strokeStyle = C.grid2; ctx.setLineDash([4, 4]); ctx.beginPath(); ctx.moveTo(padL, py(prev)); ctx.lineTo(padL + W, py(prev)); ctx.stroke(); ctx.setLineDash([]);
       ctx.fillStyle = C.axis; ctx.textAlign = 'center';
       [['09:30', 0], ['10:30', 60], ['11:30/13:00', 120], ['14:00', 180], ['15:00', 240]].forEach(([t, i]) => ctx.fillText(t, Math.min(Math.max(X(i), padL + 20), padL + W - 20), h - 9));
       const last = pts[pts.length - 1].p, col = last >= prev ? C.up : C.down;
-      const g = ctx.createLinearGradient(0, 0, 0, hP); g.addColorStop(0, last >= prev ? 'rgba(255,77,79,.25)' : 'rgba(23,209,122,.25)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+      const g = ctx.createLinearGradient(0, 0, 0, hP); g.addColorStop(0, last >= prev ? `rgba(${C.upRGB},.25)` : `rgba(${C.downRGB},.25)`); g.addColorStop(1, 'rgba(0,0,0,0)');
       ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(X(i), py(p.p)) : ctx.moveTo(X(i), py(p.p))); ctx.lineTo(X(pts.length - 1), hP); ctx.lineTo(X(0), hP); ctx.fillStyle = g; ctx.fill();
       ctx.strokeStyle = C.white; ctx.lineWidth = 1.2; ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(X(i), py(p.p)) : ctx.moveTo(X(i), py(p.p))); ctx.stroke();
       ctx.strokeStyle = C.amber; ctx.lineWidth = 1; ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(X(i), py(p.avg || p.p)) : ctx.moveTo(X(i), py(p.avg || p.p))); ctx.stroke();
@@ -282,7 +295,7 @@
       ctx.fillStyle = col; ctx.beginPath(); ctx.arc(X(pts.length - 1), py(last), 3, 0, 7); ctx.fill();
       let k = pts.length - 1;
       if (this.hover != null && this.hover > padL) { k = Math.max(0, Math.min(pts.length - 1, Math.round((this.hover - padL) / W * (N - 1))));
-        ctx.strokeStyle = 'rgba(255,176,0,.6)'; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(X(k), 0); ctx.lineTo(X(k), h - padB); ctx.stroke(); ctx.setLineDash([]); }
+        ctx.strokeStyle = `rgba(${C.accRGB},.6)`; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(X(k), 0); ctx.lineTo(X(k), h - padB); ctx.stroke(); ctx.setLineDash([]); }
       if (this.lg) { const p = pts[k], pc = (p.p / prev - 1) * 100;
         this.lg.innerHTML = `<span>${p.t}</span><span>价 <b class="${pc >= 0 ? 'up' : 'down'}">${p.p.toFixed(2)}</b></span><span class="${pc >= 0 ? 'up' : 'down'}">${pc >= 0 ? '+' : ''}${pc.toFixed(2)}%</span><span style="color:${C.amber}">均价 ${(p.avg || p.p).toFixed(2)}</span><span>量 ${fmtV(p.v)}</span>`; }
     }
@@ -294,8 +307,8 @@
     let hi = Math.max(...vals), lo = Math.min(...vals); if (base != null) { hi = Math.max(hi, base); lo = Math.min(lo, base); }
     const py = v => 2 + (hi - v) / ((hi - lo) || 1) * (h - 4), X = i => i / (vals.length - 1) * w;
     const up = vals[vals.length - 1] >= (base != null ? base : vals[0]);
-    if (base != null) { ctx.strokeStyle = '#2a333d'; ctx.setLineDash([2, 3]); ctx.beginPath(); ctx.moveTo(0, py(base)); ctx.lineTo(w, py(base)); ctx.stroke(); ctx.setLineDash([]); }
-    const g = ctx.createLinearGradient(0, 0, 0, h); g.addColorStop(0, up ? 'rgba(255,77,79,.3)' : 'rgba(23,209,122,.3)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+    if (base != null) { ctx.strokeStyle = C.grid2; ctx.setLineDash([2, 3]); ctx.beginPath(); ctx.moveTo(0, py(base)); ctx.lineTo(w, py(base)); ctx.stroke(); ctx.setLineDash([]); }
+    const g = ctx.createLinearGradient(0, 0, 0, h); g.addColorStop(0, up ? `rgba(${C.upRGB},.3)` : `rgba(${C.downRGB},.3)`); g.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.beginPath(); vals.forEach((v, i) => i ? ctx.lineTo(X(i), py(v)) : ctx.moveTo(0, py(v))); ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.fillStyle = g; ctx.fill();
     ctx.strokeStyle = up ? C.up : C.down; ctx.lineWidth = 1.2; ctx.beginPath(); vals.forEach((v, i) => i ? ctx.lineTo(X(i), py(v)) : ctx.moveTo(0, py(v))); ctx.stroke();
   }
@@ -313,8 +326,8 @@
     for (let i = 0; i < labels.length; i += step) ctx.fillText(String(labels[i]).slice(2), X(i), h - 9);
     series.forEach(s => { ctx.strokeStyle = s.color; ctx.lineWidth = s.width || 1.4; ctx.beginPath(); let f = false;
       s.values.forEach((v, i) => { if (v == null) return; f ? ctx.lineTo(X(i), py(v)) : (ctx.moveTo(X(i), py(v)), f = true); }); ctx.stroke(); });
-    if (opts.base != null) { ctx.strokeStyle = '#3a4653'; ctx.setLineDash([4, 4]); ctx.beginPath(); ctx.moveTo(0, py(opts.base)); ctx.lineTo(W, py(opts.base)); ctx.stroke(); ctx.setLineDash([]); }
+    if (opts.base != null) { ctx.strokeStyle = C.grid2; ctx.setLineDash([4, 4]); ctx.beginPath(); ctx.moveTo(0, py(opts.base)); ctx.lineTo(W, py(opts.base)); ctx.stroke(); ctx.setLineDash([]); }
   }
 
-  window.Charts = { KChart, Intraday, spark, lines, fmtV };
+  window.Charts = { KChart, Intraday, spark, lines, fmtV, retheme, C };
 })();

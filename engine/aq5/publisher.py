@@ -237,7 +237,7 @@ def _site(root: Path) -> None:
     """把只读网页复制到发布目录（GitHub Pages 用）。"""
     for sub in ("css", "js"):
         (root / sub).mkdir(parents=True, exist_ok=True)
-    for f in ("index.html", "manifest.json", "icon.svg", "css/app.css", "js/app.js", "js/charts.js", "js/lite.js"):
+    for f in ("index.html", "manifest.json", "icon.svg", "css/app.css", "css/themes.css", "js/app.js", "js/charts.js", "js/lite.js"):
         src = WEB / f
         if src.exists():
             shutil.copyfile(src, root / f)
