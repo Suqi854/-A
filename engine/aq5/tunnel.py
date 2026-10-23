@@ -28,6 +28,7 @@ URLS = {
 STATE = {"running": False, "connected": False, "url": None, "since": None, "error": None, "downloading": False, "progress": 0,
          "installed": False, "log": []}
 _proc: dict = {"p": None}
+_last_push = {"t": 0.0}
 _lock = threading.Lock()
 
 
@@ -85,11 +86,44 @@ def phone_token() -> str:
     return tok
 
 
+def relay_url() -> str | None:
+    return load_settings().get("remote", {}).get("relay_url") or None
+
+
+def push_relay(url: str | None = None) -> bool:
+    """把当前隧道地址告诉固定地址中转（Cloudflare Worker）。"""
+    rel, sec, url = relay_url(), vault.get("relay_secret"), url or STATE["url"]
+    if not (rel and sec and url):
+        return False
+    import json as _json
+    try:
+        req = urllib.request.Request(rel.rstrip("/") + "/__aq5/target", data=_json.dumps({"target": url}).encode(),
+                                     headers={"Content-Type": "application/json", "x-aq5-secret": sec, "User-Agent": "aq5"},
+                                     method="POST")
+        with urllib.request.urlopen(req, timeout=15) as r:
+            ok = r.status == 200
+        STATE["relay_ok"] = now().strftime("%H:%M:%S") if ok else None
+        return ok
+    except Exception as e:  # noqa: BLE001
+        STATE["relay_err"] = str(e)[:160]
+        return False
+
+
+def set_relay(url: str, secret: str) -> dict:
+    if not url.startswith("https://") or len(secret or "") < 20:
+        raise ValueError("地址或密钥不对")
+    save_settings({"remote": {"relay_url": url.rstrip("/")}})
+    vault.set_many({"relay_secret": secret})
+    ok = push_relay()
+    db.event("system", "手机远程固定地址已设置", url)
+    return {"ok": True, "pushed": ok, "url": url}
+
+
 def remote_info() -> dict | None:
-    """写进加密包给手机用；未开启或隧道没起来就返回 None。"""
+    """写进加密包给手机用；未开启或隧道没起来就返回 None。有固定地址时优先给固定地址。"""
     if not load_settings().get("remote", {}).get("enabled") or not STATE["url"] or not auth.has_user():
         return None
-    return {"url": STATE["url"], "token": phone_token(), "since": STATE["since"]}
+    return {"url": relay_url() or STATE["url"], "tunnel": STATE["url"], "token": phone_token(), "since": STATE["since"]}
 
 
 def _reader(p):
@@ -108,6 +142,7 @@ def _reader(p):
         m = pat.search(t)
         if m and m.group(0) != STATE["url"]:
             STATE.update(url=m.group(0), since=now().strftime("%Y-%m-%d %H:%M:%S"), error=None)
+            threading.Thread(target=lambda u=m.group(0): (time.sleep(8), push_relay(u)), daemon=True).start()
             db.event("system", "手机远程地址已更新", m.group(0))
             try:  # 尽快把新地址写进加密包
                 from . import publisher
@@ -208,6 +243,7 @@ def status() -> dict:
     p = _proc["p"]
     STATE["running"] = bool(p and p.poll() is None)
     return {k: v for k, v in STATE.items() if k != "log"} | {"enabled": bool(load_settings().get("remote", {}).get("enabled")),
+                                                            "relay_url": relay_url(),
                                                             "log": STATE["log"][-6:], "exe": str(EXE)}
 
 
@@ -220,6 +256,9 @@ def watchdog() -> None:
                     p = _proc["p"]
                     if not p or p.poll() is not None:
                         start(only_if_enabled=True)
+                    elif STATE.get("connected") and relay_url() and time.time() - _last_push["t"] > 300:
+                        _last_push["t"] = time.time()
+                        push_relay()
             except Exception as e:  # noqa: BLE001
                 STATE["error"] = str(e)[:200]
             time.sleep(30)

@@ -432,12 +432,13 @@ POST = {"/api/picks/run": p_pick_run, "/api/sim/order": p_order, "/api/sim/cance
         "/api/ai/pick": lambda b: ai.pick_review(int(b["id"])),
         "/api/remote/enable": lambda b: tunnel.set_enabled(bool(b.get("on"))),
         "/api/remote/download": lambda b: tunnel.download(),
+        "/api/remote/relay": lambda b: tunnel.set_relay(b.get("url", ""), b.get("secret", "")),
         "/api/remote/restart": lambda b: (tunnel.stop(), tunnel.start())[1],
         "/api/sectors/refresh": lambda b: (sectors.refresh_map_async(force=True), {"started": True})[1]}
 
 
 SENSITIVE = {"/api/me/vault", "/api/me/password", "/api/me/restore", "/api/me/token", "/api/me/revoke",
-             "/api/me/security", "/api/remote/enable", "/api/remote/download"}
+             "/api/me/security", "/api/remote/enable", "/api/remote/download", "/api/remote/relay"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -647,6 +648,7 @@ def main():
     marketstate.init()
     sectors.refresh_map_async()
     tunnel.cleanup_stale()
+    hf.start()
     tunnel.watchdog()
     _migrate_secrets()
     s0 = load_settings()

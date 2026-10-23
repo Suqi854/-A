@@ -98,9 +98,6 @@ def loop() -> None:
                     if time.time() - last_ms > 60:  # 大盘状态每分钟更新，状态切换会触发重新分析
                         last_ms = time.time()
                         threading.Thread(target=lambda: marketstate.state(force=True), daemon=True).start()
-                    if hf.mode() == "high" and time.time() - last_hf > 180:
-                        last_hf = time.time()
-                        threading.Thread(target=hf.step, daemon=True).start()
                     if hm >= 1000:
                         _once("market_morning", marketstate.record_morning)
                     if time.time() - last_t > 120:

@@ -1,0 +1,8 @@
+name = "aq5-relay"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+workers_dev = true
+
+[[kv_namespaces]]
+binding = "KV"
+id = "REPLACE_ME"

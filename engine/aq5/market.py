@@ -44,7 +44,7 @@ class Blocked(RuntimeError):
 _host_lock = threading.Lock()
 _host_state: dict[str, dict] = {}   # host -> {"next": 时间戳, "blocked_until": 时间戳}
 _host_sem: dict[str, threading.Semaphore] = {}
-MIN_INTERVAL = {"web.ifzq.gtimg.cn": 0.35, "push2his.eastmoney.com": 0.4, "push2.eastmoney.com": 0.3,
+MIN_INTERVAL = {"sqt.gtimg.cn": 0.02, "web.ifzq.gtimg.cn": 0.35, "push2his.eastmoney.com": 0.4, "push2.eastmoney.com": 0.3,
                 "qt.gtimg.cn": 0.05, "quotes.sina.cn": 0.4}
 
 
@@ -214,6 +214,48 @@ def quotes(codes: list[str]) -> dict:
             res.update(part)
         return res
     return _cached(key, 2.0, load)
+
+
+def quotes_fast(codes: list[str]) -> dict:
+    """高频专用：走腾讯另一个行情域名 sqt.gtimg.cn，和全市场扫描分开限流，缓存仅 1 秒。"""
+    codes = [norm_code(c) for c in codes if c]
+    if not codes:
+        return {}
+    if MOCK:
+        return mock.quotes(codes)
+    key = "qf:" + ",".join(sorted(codes))
+
+    def load():
+        res = {}
+        for i in range(0, len(codes), 60):
+            try:
+                res.update(_parse_tencent(http_get("https://sqt.gtimg.cn/q=" + ",".join(codes[i:i + 60]), retries=1)
+                                          .decode("gbk", "ignore")))
+            except RuntimeError:
+                res.update(quotes(codes[i:i + 60]))
+        t = time.time()
+        for k, v in res.items():
+            _LAST[k] = (t, v)
+        return res
+    return _cached(key, 1.0, load)
+
+
+_LAST: dict[str, tuple] = {}
+
+
+def quotes_recent(codes: list[str], max_age: float = 3.0) -> dict:
+    """优先用最近 3 秒内高频通道拿到的报价（不发网络请求），缺的再去取。"""
+    t = time.time()
+    out, miss = {}, []
+    for c in codes:
+        x = _LAST.get(c)
+        if x and t - x[0] <= max_age:
+            out[c] = x[1]
+        else:
+            miss.append(c)
+    if miss:
+        out.update(quotes_fast(miss))
+    return out
 
 
 # ----------------------------------------------------------------------------- 东财全市场快照
