@@ -15,7 +15,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import db, market, picker, sim
+from . import db, market, picker, sim, vault
 from .config import DATA, WEB, load_settings, now, today
 
 STATE = {"last": None, "last_push": None, "error": None, "running": False}
@@ -129,10 +129,51 @@ def export(full: bool = True) -> dict:
         old.update({x["code"]: x for x in idx})
         _w(p, sorted(old.values(), key=lambda x: x["time"], reverse=True))
         files += ["runs.json", "ai.json", "learn.json", f"analysis/*.json({len(idx)})"]
+    files += _private_pack(d, full)
     _w(d / "manifest.json", {"schema": SCHEMA, "updated": now().strftime("%Y-%m-%d %H:%M:%S"), "full": full,
                              "phase": market.market_phase(), "files": files,
                              "note": "A量化公开数据：行情、选股、个股分析、AI自动盘、因子迭代。仅供学习研究，不构成投资建议。"})
     return {"dir": str(root), "files": files}
+
+
+_PRIV_CACHE: dict = {"analysis": {}}
+
+
+def _private_pack(d: Path, full: bool) -> list[str]:
+    """自选股 + 我的模拟盘 + 个人资料 → 用「手机查看密码」加密成 private.enc。
+    仓库里只有密文；在 GitHub 网页上输入密码后由浏览器本地解密，服务器和 GitHub 都看不到明文。"""
+    import gzip
+    from .analysis import analyze
+    from .server import clean
+    pw = vault.get("mobile_password")
+    target = d / "private.enc"
+    if not pw:
+        if target.exists():
+            target.unlink()
+        return []
+    from .config import load_settings
+    from . import auth
+    wl = [market.norm_code(c) for c in load_settings()["watchlist"]]
+    if full or not _PRIV_CACHE["analysis"]:
+        for code in wl:
+            try:
+                a = analyze(code)
+                a["kline"] = market.kline_with_live(code, 250)
+                _PRIV_CACHE["analysis"][code] = a
+            except (RuntimeError, ValueError):
+                pass
+    for code in list(_PRIV_CACHE["analysis"]):
+        if code not in wl:
+            _PRIV_CACHE["analysis"].pop(code)
+    qs = market.quotes(wl)
+    me = sim.view("me")
+    u = auth.user() if auth.has_user() else None
+    pack = {"time": now().strftime("%Y-%m-%d %H:%M:%S"), "watchlist": [qs.get(c) or {"code": c} for c in wl],
+            "analysis": _PRIV_CACHE["analysis"], "me": me, "profile": (u or {}).get("profile", {}),
+            "events": db.q("SELECT * FROM events WHERE kind IN ('alert','trade') ORDER BY id DESC LIMIT 80")}
+    raw = gzip.compress(json.dumps(clean(pack), ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    target.write_bytes(vault.seal_web(raw, pw))
+    return [f"private.enc({len(_PRIV_CACHE['analysis'])}只自选,加密)"]
 
 
 def _site(root: Path) -> None:

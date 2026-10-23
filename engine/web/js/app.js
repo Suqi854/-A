@@ -28,20 +28,20 @@
     if (body !== undefined) throw new Error('这是公开只读版：下单、选股、设置等操作请在电脑端进行');
     const [p, qs] = path.split('?'); const q = new URLSearchParams(qs || ''); const code = normCode(q.get('code'));
     switch (p) {
-      case 'overview': return sj('latest.json');
+      case 'overview': { const o = await sj('latest.json'); if (S.priv) { o.watchlist = S.priv.watchlist; const m = S.priv.me; o.accounts = { me: { ...m, positions: m.positions || [] }, ...o.accounts }; } return o; }
       case 'picks/runs': return sj('runs.json');
       case 'picks/candidates': { const r = (await sj('runs.json')).find(x => String(x.id) === q.get('run')); return r ? r.cand_list || [] : []; }
       case 'picks/state': return { running: false };
-      case 'analyze': try { return await sj('analysis/' + code + '.json'); } catch { throw new Error('公开版只包含近7天入选股和AI持仓的分析，这只股票不在其中'); }
-      case 'kline': { const x = await sj('analysis/' + code + '.json'); return { code, rows: x.kline || [] }; }
+      case 'analyze': if (S.priv && S.priv.analysis[code]) return S.priv.analysis[code]; try { return await sj('analysis/' + code + '.json'); } catch { throw new Error('公开版只包含近7天入选股和AI持仓的分析，这只股票不在其中'); }
+      case 'kline': { const x = (S.priv && S.priv.analysis[code]) || await sj('analysis/' + code + '.json'); return { code, rows: x.kline || [] }; }
       case 'intraday': return sj('intraday/' + code + '.json');
-      case 'sim': return sj('ai.json');
+      case 'sim': return (q.get('acct') === 'me' && S.priv) ? S.priv.me : sj('ai.json');
       case 'learn': return sj('learn.json');
-      case 'events': return sj('events.json');
+      case 'events': { const e = await sj('events.json'); return S.priv ? [...S.priv.events, ...e].sort((x, y) => y.time < x.time ? -1 : 1) : e; }
       case 'settings': return sj('settings.json');
       case 'strategies': return sj('strategies.json');
       case 'quotes': return {};
-      case 'search': { const v = (q.get('q') || '').toLowerCase(); const idx = await sj('analysis/index.json').catch(() => []);
+      case 'search': { const v = (q.get('q') || '').toLowerCase(); const idx = [...(S.priv ? Object.values(S.priv.analysis).map(x => ({ code: x.code, name: x.name })) : []), ...await sj('analysis/index.json').catch(() => [])];
         return idx.filter(x => x.code.includes(v) || (x.name || '').toLowerCase().includes(v)).slice(0, 12); }
       default: throw new Error('公开只读版不支持此功能，请在电脑端使用');
     }
@@ -51,6 +51,7 @@
     const opt = body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
     const r = await fetch('/api/' + path, opt);
     const j = await r.json().catch(() => ({ error: '服务无响应' }));
+    if (r.status === 401 && j.need_login) { showLogin(); throw new Error('请先登录'); }
     if (!r.ok || (j && j.error)) throw new Error(j.error || r.statusText);
     return j;
   }
@@ -155,8 +156,8 @@
       ${panel('BREADTH <small>市场温度 · 沪深主板</small>', '<div id="breadth" class="loading">载入</div>', { cls: 'c4' })}
       ${panel('SIGNAL <small>最新选股</small>', '<div id="monPick" class="loading">载入</div>', { cls: 'c4', right: '<button class="btn sm" onclick="location.hash=\'pick\'">全部 ›</button>' })}
       ${panel('ACCOUNT <small>模拟账户</small>', '<div id="monAcct"></div>', { cls: 'c4', right: '<button class="btn sm" onclick="location.hash=\'sim\'">模拟盘 ›</button>' })}
-      ${STATIC ? '' : panel('WATCHLIST <small>自选监控 · 3秒刷新</small>', '<div class="scroll" style="max-height:420px"><table class="t" id="wlT"></table></div>',
-        { cls: 'c8', np: true, right: `<input class="in" id="wlAdd" placeholder="代码 如600519" style="width:130px;height:22px"><button class="btn sm pri" id="wlAddB">+ 自选</button>` })}
+      ${STATIC && !S.priv ? '' : panel('WATCHLIST <small>自选监控 · 3秒刷新</small>', '<div class="scroll" style="max-height:420px"><table class="t" id="wlT"></table></div>',
+        { cls: 'c8', np: true, right: `<input class="in rw" id="wlAdd" placeholder="代码 如600519" style="width:130px;height:22px"><button class="btn sm pri rw" id="wlAddB">+ 自选</button>` })}
       ${panel('OVERSEAS <small>外围市场</small>', '<table class="t" id="ovsT"></table>', { cls: 'c4', np: true })}
       ${panel('TOP <small>涨幅榜</small>', '<div class="scroll" style="max-height:330px"><table class="t" id="topT"></table></div>', { cls: 'c4', np: true })}
       ${panel('INFLOW <small>主力净流入榜</small>', '<div class="scroll" style="max-height:330px"><table class="t" id="inT"></table></div>', { cls: 'c4', np: true })}
@@ -221,7 +222,7 @@
     wl.innerHTML = `<thead><tr><th>股票</th><th>现价</th><th>涨跌幅</th><th>涨跌</th><th class="hide-m">量比</th><th class="hide-m">换手</th><th class="hide-m">振幅</th><th class="hide-m">成交额</th><th class="hide-m">市盈</th><th></th></tr></thead><tbody>` +
       ov.watchlist.map(q => `<tr class="click" data-c="${q.code}" data-p="${q.price || 0}"><td>${nameCell(q.name || '--', q.code)}</td><td class="${cls(q.pct)} ${old[q.code] && q.price !== old[q.code] ? (q.price > old[q.code] ? 'flash-up' : 'flash-down') : ''}">${num(q.price)}</td>
         <td class="${cls(q.pct)}">${pct(q.pct)}</td><td class="${cls(q.chg)}">${sgn(q.chg)}</td><td class="hide-m ${q.vr > 2 ? 'amber' : ''}">${num(q.vr)}</td><td class="hide-m">${num(q.turnover)}%</td><td class="hide-m">${num(q.amp)}%</td>
-        <td class="hide-m">${money(q.amount)}</td><td class="hide-m">${num(q.pe, 1)}</td><td><button class="btn sm" data-rm="${q.code}">×</button></td></tr>`).join('') + '</tbody>';
+        <td class="hide-m">${money(q.amount)}</td><td class="hide-m">${num(q.pe, 1)}</td><td><button class="btn sm rw" data-rm="${q.code}">×</button></td></tr>`).join('') + '</tbody>';
     wl.querySelectorAll('tr[data-c]').forEach(tr => tr.onclick = e => { if (e.target.dataset.rm) return; go('anly', tr.dataset.c); });
     wl.querySelectorAll('[data-rm]').forEach(b => b.onclick = async () => { await api('watchlist', { code: b.dataset.rm, op: 'remove' }); poll(); });
     $('#ovsT').innerHTML = `<tr><th>市场</th><th>点位</th><th>涨跌幅</th></tr>` + ov.overseas.map(q => `<tr><td class="nm">${esc(q.name)}</td><td>${num(q.price)}</td><td class="${cls(q.pct)}">${pct(q.pct)}</td></tr>`).join('');
@@ -422,12 +423,12 @@
 
   // ================================================================== F4 模拟盘
   async function renderSim() {
-    if (STATIC) S.acct = 'ai';
+    if (STATIC && !S.priv) S.acct = 'ai';
     const a = await api('sim?acct=' + S.acct).catch(e => ({ error: e.message }));
     if (a.error) { $('#p-sim').innerHTML = `<div class="empty">${esc(a.error)}</div>`; return; }
     const st = a.stats;
     $('#p-sim').innerHTML = `<div class="grid">
-      <div class="panel c12"><div class="ph"><h3>SIM <small>模拟盘</small></h3><div class="r"><div class="seg rw" id="acctSeg"><button data-a="me" class="${S.acct === 'me' ? 'on' : ''}">我的模拟盘</button><button data-a="ai" class="${S.acct === 'ai' ? 'on' : ''}">AI自动盘</button></div>
+      <div class="panel c12"><div class="ph"><h3>SIM <small>模拟盘</small></h3><div class="r"><div class="seg rw pv" id="acctSeg"><button data-a="me" class="${S.acct === 'me' ? 'on' : ''}">我的模拟盘</button><button data-a="ai" class="${S.acct === 'ai' ? 'on' : ''}">AI自动盘</button></div>
         <span class="rw row"><input class="in" id="simCode" placeholder="代码" style="width:90px;height:22px"><button class="btn sm buy" id="simNew">下单</button><button class="btn sm" id="simReset">重置</button></span></div></div>
         <div class="summary"><div><div class="l">总资产</div><div class="v">${yuan(a.equity)}</div></div><div><div class="l">可用现金</div><div class="v">${yuan(a.cash)}</div></div>
           <div><div class="l">持仓市值</div><div class="v">${yuan(a.market_value)}</div></div><div><div class="l">今日盈亏</div><div class="v ${cls(a.today_pnl)}">${sgn(a.today_pnl)}</div></div>
@@ -552,8 +553,42 @@
   // ================================================================== F8 设置
   async function renderSet() {
     const s = await api('settings'); S.settings = s;
+    const me = await api('me').catch(() => null);
     const f = (id, label, val, hint = '') => `<label>${label}<input class="in" id="${id}" value="${esc(val)}">${hint ? `<small class="hint">${hint}</small>` : ''}</label>`;
-    $('#p-set').innerHTML = `<div class="grid">
+    const prof = (me && me.user && me.user.profile) || {};
+    const vs = (me && me.vault) || {};
+    const keyRow = (k, label) => `<label class="full"><span class="row">${label} ${vs[k] ? `<span class="chip c">${esc(vs[k])}</span>` : '<span class="chip">未设置</span>'}</span>
+        <input class="in vk" data-k="${k}" type="password" autocomplete="new-password" placeholder="${vs[k] ? '留空 = 不修改' : '填写后保存'}"></label>`;
+    const personal = me ? `
+      ${panel(`PROFILE <small>个人资料${me.user ? ' · ' + esc(me.user.username) : ''}</small>`, me.user ? `<div class="ticket">
+        <label>昵称<input class="in" id="pfNick" value="${esc(prof.nickname || '')}"></label>
+        <label>风险偏好<select class="in" id="pfRisk">${['保守', '均衡', '积极'].map(r => `<option ${prof.risk === r ? 'selected' : ''}>${r}</option>`).join('')}</select></label>
+        <label>实盘本金（仅自用参考）<input class="in" id="pfCap" value="${esc(prof.capital || '')}" placeholder="例如 100000"></label>
+        <label>交易风格<select class="in" id="pfStyle">${['短线(1-5天)', '波段(1-4周)', '中线'].map(r => `<option ${prof.style === r ? 'selected' : ''}>${r}</option>`).join('')}</select></label>
+        <label class="full">投资目标 / 给自己的规矩<textarea class="in" id="pfGoal" placeholder="例如：单票亏损超过8%必须止损；不追涨停">${esc(prof.goal || '')}</textarea></label></div>
+        <p class="hint">风险偏好会同步调整：保守＝AI盘单票10%、止损上限6%、选股门槛75；均衡＝20%/8%/72；积极＝25%/10%/70。</p>
+        <div class="row"><span class="sp"></span><button class="btn pri" id="pfSave">保存资料</button></div>`
+        : `<p>还没有账号。创建后，手机访问需要登录，个人数据也可以加密备份。</p><button class="btn pri" id="pfCreate">创建账号</button>`, { cls: 'c6' })}
+      ${panel('SECURITY <small>账号安全</small>', me.user ? `<div class="ticket">
+        <label>原密码<input class="in" id="pwOld" type="password" autocomplete="current-password"></label><label>新密码<input class="in" id="pwNew" type="password" autocomplete="new-password"></label></div>
+        <div class="row" style="margin-top:6px"><label class="hint"><input type="checkbox" id="secLocal" ${me.security.local_no_login !== false ? 'checked' : ''} ${me.local ? '' : 'disabled'}> 本机（这台电脑）免登录</label><span class="sp"></span><button class="btn" id="pwGo">修改密码</button></div>
+        <div class="sep"></div><div class="hint">已登录的设备</div>
+        <table class="t"><tr><th>类型</th><th>设备 / 名称</th><th>登录时间</th><th>到期</th><th></th></tr>${me.sessions.map(x => `<tr><td>${x.kind === 'api' ? 'API' : '网页'}</td><td class="nm" title="${esc(x.ua)}">${esc(x.kind === 'api' ? x.name : (x.ip + ' ' + (x.ua || '').slice(0, 24)))}</td><td>${x.created}</td><td>${x.expires}</td><td><button class="btn sm" data-rv="${x.id}">注销</button></td></tr>`).join('') || '<tr><td colspan="5" class="muted">无</td></tr>'}</table>
+        <div class="row" style="margin-top:8px"><input class="in" id="tkName" placeholder="Token 名称，如：手机Claude插件" style="flex:1"><button class="btn" id="tkGo">生成 API Token</button></div>
+        <div class="hint">API Token 给插件或脚本调用本机引擎用（请求头 Authorization: Bearer …），可随时注销。</div>` : '<p class="hint">创建账号后可用。</p>', { cls: 'c6' })}
+      ${panel('VAULT <small>密钥保险箱 · 只存本机，不进 Git、不会公开发布</small>', `<div class="ticket">
+        ${keyRow('ai_key', 'AI 接口 Key（DeepSeek 等）')}${keyRow('pushplus_token', 'PushPlus token')}${keyRow('serverchan_key', 'Server酱 SendKey')}
+        ${keyRow('backup_password', '备份密码（加密个人数据用，务必自己记住）')}</div>
+        <p class="hint">Windows 下用系统 DPAPI 加密，绑定你的 Windows 账户；拷走文件也解不开。建议把 E:\A量化分析 里的明文密钥文件迁移进来后删除。</p>
+        <div class="row"><span class="sp"></span><button class="btn pri" id="vkSave">保存密钥</button></div>`, { cls: 'c6' })}
+      ${panel('BACKUP <small>个人数据加密备份 → GitHub 私有仓库</small>', `<div class="ticket">
+        <label class="full">私有仓库地址<input class="in" id="bkRemote" value="${esc(me.backup.remote || '')}" placeholder="https://github.com/Suqi854/aq-private.git"></label>
+        <label class="full"><span><input type="checkbox" id="bkOn" ${me.backup.enabled ? 'checked' : ''}> 每天 ${esc(me.backup.time || '15:50')} 自动备份</span></label></div>
+        <p class="hint">备份内容：我的模拟盘、委托、成交、资产曲线、自选、个人资料、参数。先用备份密码加密，仓库里只有密文。<b class="amber">仓库必须设为 Private</b>，密钥不在备份里。</p>
+        <div class="row"><span class="hint mono">${me.backup.last ? '上次备份 ' + esc(me.backup.last) : '还没有备份'}${me.backup.error ? ' · <span class="up">' + esc(me.backup.error) + '</span>' : ''}</span><span class="sp"></span>
+          <button class="btn" id="bkSaveCfg">保存</button><button class="btn" id="bkLocal">仅本机备份</button><button class="btn pri" id="bkGo">立即备份并推送</button></div>
+        <div class="row" style="margin-top:6px"><input class="in" id="rsPw" type="password" placeholder="恢复时输入备份密码（本机已保存可留空）" style="flex:1"><button class="btn sell" id="rsGo">从备份恢复</button></div>`, { cls: 'c6' })}` : '';
+    $('#p-set').innerHTML = `<div class="grid">${personal}
       ${panel('MOBILE <small>手机访问</small>', `<p>手机和电脑连同一个 WiFi，用手机浏览器打开：</p><div class="mono amber" style="font-size:20px;word-break:break-all">${esc(S.ov ? S.ov.lan : '')}</div>
         <p class="hint">打开后点浏览器菜单「添加到主屏幕」，就像 App 一样使用。若打不开，请在 Windows 防火墙允许 Python 访问专用网络。</p>`, { cls: 'c4' })}
       ${panel('PICK <small>自动选股</small>', `<div class="ticket">${f('sT1', '竞价选股时间', s.pick.times[0])}${f('sT2', '尾盘选股时间', s.pick.times[1])}
@@ -589,11 +624,115 @@
         toast('已保存'); S.settings = null; poll();
       } catch (e) { toast(e.message, 1); }
     };
+    if (me) bindPersonal(me);
     $('#pNow').onclick = async () => { try { await api('publish', { full: true }); toast('开始发布，约需 1 分钟，结果见日志'); } catch (e) { toast(e.message, 1); } };
     $('#nTest').onclick = async () => { try { const r = await api('notify/test', {}); toast(r.sent ? '已发送，去微信看看' : r.reason, !r.sent); } catch (e) { toast(e.message, 1); } };
   }
 
-  // ------------------------------------------------------------------ 启动
-  api('settings').then(s => S.settings = s).catch(() => { });
-  poll().then(() => { const [p, a] = location.hash.slice(1).split('/'); show(PAGES.includes(p) ? p : 'mon', a); });
+  function bindPersonal(me) {
+    const on = (id, fn) => { const el = $('#' + id); if (el) el.onclick = async () => { try { await fn(); } catch (e) { toast(e.message, 1); } }; };
+    on('pfCreate', () => showLogin({ has_user: false, local: me.local }));
+    on('pfSave', async () => { await api('me/profile', { nickname: $('#pfNick').value, risk: $('#pfRisk').value, capital: $('#pfCap').value, style: $('#pfStyle').value, goal: $('#pfGoal').value }); toast('已保存，风险参数已同步'); renderSet(); });
+    on('pwGo', async () => { const r = await api('me/password', { old: $('#pwOld').value, new: $('#pwNew').value }); toast(r.message); });
+    const sl = $('#secLocal'); if (sl) sl.onchange = async () => { try { await api('me/security', { local_no_login: sl.checked }); toast(sl.checked ? '本机免登录已开启' : '本机也需要登录了'); } catch (e) { toast(e.message, 1); } };
+    $$('#p-set [data-rv]').forEach(b => b.onclick = async () => { await api('me/revoke', { id: b.dataset.rv }); toast('已注销'); renderSet(); });
+    on('tkGo', async () => { const r = await api('me/token', { name: $('#tkName').value }); prompt('API Token（只显示这一次，请复制保存）', r.token); renderSet(); });
+    on('vkSave', async () => { const v = {}; $$('#p-set .vk').forEach(i => { if (i.value.trim()) v[i.dataset.k] = i.value.trim(); }); if (!Object.keys(v).length) return toast('没有填写新的密钥', 1); await api('me/vault', v); toast('已加密保存到本机'); renderSet(); });
+    const cfg = () => api('me/security', { local_no_login: $('#secLocal') ? $('#secLocal').checked : true, remote: $('#bkRemote').value.trim(), enabled: $('#bkOn').checked });
+    on('bkSaveCfg', async () => { await cfg(); toast('备份设置已保存'); });
+    on('bkLocal', async () => { const r = await api('me/backup', { push: false }); toast('已加密备份到本机 ' + r.bytes + ' 字节'); renderSet(); });
+    on('bkGo', async () => { await cfg(); toast('正在加密并推送…'); const r = await api('me/backup', { push: true }); toast(r.pushed ? '已推送到私有仓库' : '已备份'); renderSet(); });
+    on('rsGo', async () => { if (!confirm('恢复会用备份覆盖「我的模拟盘」当前的持仓和记录，确定吗？')) return; const r = await api('me/restore', { password: $('#rsPw').value }); toast('已恢复（备份时间 ' + r.time + '）'); });
+  }
+
+  // ------------------------------------------------------------------ 公开网页：用密码在浏览器本地解密个人数据
+  async function unlockPrivate(pw) {
+    const r = await fetch('data/private.enc?t=' + Date.now());
+    if (!r.ok) throw new Error('还没有发布加密的个人数据（电脑端「设置 → 密钥保险箱」里设置手机查看密码）');
+    const buf = new Uint8Array(await r.arrayBuffer());
+    if (new TextDecoder().decode(buf.slice(0, 5)) !== 'AQ5w1') throw new Error('文件格式不对');
+    const salt = buf.slice(5, 21), nonce = buf.slice(21, 37), tag = buf.slice(37, 69), ct = buf.slice(69);
+    const cs = crypto.subtle, te = new TextEncoder();
+    const base = await cs.importKey('raw', te.encode(pw), 'PBKDF2', false, ['deriveBits']);
+    const bits = new Uint8Array(await cs.deriveBits({ name: 'PBKDF2', salt, iterations: 200000, hash: 'SHA-256' }, base, 512));
+    const hk = k => cs.importKey('raw', k, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const ek = await hk(bits.slice(0, 32)), mk = await hk(bits.slice(32));
+    const head = te.encode('AQ5w1'), msg = new Uint8Array(head.length + 32 + ct.length);
+    msg.set(head, 0); msg.set(salt, 5); msg.set(nonce, 21); msg.set(ct, 37);
+    const t2 = new Uint8Array(await cs.sign('HMAC', mk, msg));
+    if (t2.some((b, i) => b !== tag[i])) throw new Error('密码不对');
+    const n = Math.ceil(ct.length / 32), ks = new Uint8Array(n * 32);
+    for (let i = 0; i < n; i += 256) {
+      const jobs = [];
+      for (let j = i; j < Math.min(n, i + 256); j++) {
+        const b = new Uint8Array(24); b.set(nonce, 0); new DataView(b.buffer).setBigUint64(16, BigInt(j));
+        jobs.push(cs.sign('HMAC', ek, b).then(x => ks.set(new Uint8Array(x), j * 32)));
+      }
+      await Promise.all(jobs);
+    }
+    const plain = ct.map((b, i) => b ^ ks[i]);
+    const txt = await new Response(new Blob([plain]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+    return JSON.parse(txt);
+  }
+  function lsGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
+  function lsSet(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch { } }
+  async function doUnlock(pw, remember) {
+    S.priv = await unlockPrivate(pw);
+    document.body.classList.add('unlocked');
+    if (remember) lsSet('aq5_pw', pw);
+    const b = $('#unlockBtn'); if (b) b.textContent = '已解锁 ' + (S.priv.profile.nickname || '');
+    toast('个人数据已解锁（数据时间 ' + S.priv.time.slice(5, 16) + '）');
+    await poll(); const [p, a] = location.hash.slice(1).split('/'); show(PAGES.includes(p) ? p : 'mon', a);
+  }
+  function showUnlock() {
+    if (S.priv) { if (confirm('锁定并清除本机记住的密码？')) { S.priv = null; lsSet('aq5_pw', null); location.reload(); } return; }
+    const m = document.createElement('div'); m.className = 'modal';
+    m.innerHTML = `<div class="box" style="max-width:380px">${panel('UNLOCK <small>解锁个人数据</small>', `<p class="hint">输入电脑端设置的「手机查看密码」。自选股、我的模拟盘只在你的浏览器里解密，GitHub 上只有密文。</p>
+      <div class="ticket"><label class="full">密码<input class="in" id="ulP" type="password" autocomplete="current-password"></label>
+      <label class="full"><span><input type="checkbox" id="ulR" checked> 在这台手机上记住（换设备或丢手机请在电脑端改密码）</span></label></div>
+      <div class="row"><span class="sp"></span><button class="btn" id="ulC">取消</button><button class="btn pri" id="ulGo">解锁</button></div>`)}</div>`;
+    document.body.appendChild(m);
+    $('#ulC', m).onclick = () => m.remove();
+    const go = async () => { $('#ulGo', m).textContent = '解密中…'; try { await doUnlock($('#ulP', m).value, $('#ulR', m).checked); m.remove(); } catch (e) { $('#ulGo', m).textContent = '解锁'; toast(e.message, 1); } };
+    $('#ulGo', m).onclick = go; $('#ulP', m).onkeydown = e => { if (e.key === 'Enter') go(); };
+  }
+
+  // ------------------------------------------------------------------ 登录
+  async function showLogin(me) {
+    if ($('#loginBox')) return;
+    me = me || await fetch('/api/auth/me').then(r => r.json()).catch(() => ({}));
+    if (me.authorized || $('#loginBox')) return;
+    const setup = me.has_user === false;
+    const m = document.createElement('div'); m.className = 'modal'; m.id = 'loginBox';
+    m.innerHTML = `<div class="box" style="max-width:380px">${panel(setup ? 'SETUP <small>创建你的账号</small>' : 'LOGIN <small>登录 A量化</small>', setup && !me.local
+      ? '<p>还没有账号。请先在<b class="amber">电脑本机</b>打开 A量化，在「设置 → 账号安全」里创建账号，然后手机再来登录。</p>'
+      : `<div class="ticket"><label class="full">用户名<input class="in" id="lgU" autocomplete="username" value="${setup ? 'me' : ''}"></label>
+         <label class="full">密码<input class="in" id="lgP" type="password" autocomplete="${setup ? 'new-password' : 'current-password'}" placeholder="${setup ? '至少8位，字母+数字' : ''}"></label></div>
+         <p class="hint">${setup ? '账号只保存在你自己的电脑上（密码加盐哈希），用于保护手机访问。' : '登录后 30 天内免登录。'}</p>
+         <div class="row"><span class="sp"></span><button class="btn pri" id="lgGo">${setup ? '创建并登录' : '登录'}</button></div>`)}</div>`;
+    document.body.appendChild(m);
+    const go = async () => {
+      try {
+        await api(setup ? 'auth/setup' : 'auth/login', { username: $('#lgU', m).value, password: $('#lgP', m).value });
+        m.remove(); toast('欢迎回来'); boot();
+      } catch (e) { toast(e.message, 1); }
+    };
+    const b = $('#lgGo', m); if (b) { b.onclick = go; $('#lgP', m).onkeydown = e => { if (e.key === 'Enter') go(); }; }
+  }
+  async function boot() {
+    if (STATIC && !$('#unlockBtn')) {
+      const b = document.createElement('button'); b.className = 'btn sm pri'; b.id = 'unlockBtn'; b.textContent = '解锁个人';
+      b.onclick = showUnlock; $('.status').prepend(b);
+      const pw = lsGet('aq5_pw');
+      if (pw) doUnlock(pw, true).catch(() => lsSet('aq5_pw', null));
+    }
+    if (!STATIC) {
+      const me = await fetch('/api/auth/me').then(r => r.json()).catch(() => ({}));
+      S.auth = me;
+      if (!me.authorized) { showLogin(me); return; }
+    }
+    api('settings').then(s => S.settings = s).catch(() => { });
+    poll().then(() => { const [p, a] = location.hash.slice(1).split('/'); show(PAGES.includes(p) ? p : 'mon', a); });
+  }
+  boot();
 })();

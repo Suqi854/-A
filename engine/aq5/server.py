@@ -11,7 +11,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import analysis, backtest, db, learn, market, notify, picker, publisher, scheduler, sim
+from . import analysis, auth, backtest, backup, db, learn, market, notify, picker, publisher, scheduler, sim, vault
 from .config import DATA, MOCK, WEB, load_settings, now, public_settings, save_settings
 from .strategies import DESC, NAMES
 
@@ -163,7 +163,66 @@ def api_strategies(_q):
     return [{"id": k, "name": NAMES[k], "desc": DESC[k]} for k in NAMES]
 
 
-GET = {"/api/overview": api_overview, "/api/quotes": api_quotes, "/api/kline": api_kline,
+REQ = threading.local()  # 当前请求的 ip / 会话，供个人接口使用
+
+VAULT_KEYS = {"ai_key": "AI 接口 Key", "pushplus_token": "PushPlus token", "serverchan_key": "Server酱 SendKey",
+              "backup_password": "备份密码", "mobile_password": "手机查看密码（GitHub 网页上解锁自选股和个人数据）",
+              "github_token": "GitHub token（可选）"}
+RISK_PRESET = {"保守": {"pick": {"position_pct": 0.1, "min_score": 75}, "risk": {"max_stop_pct": 0.06}},
+               "均衡": {"pick": {"position_pct": 0.2, "min_score": 72}, "risk": {"max_stop_pct": 0.08}},
+               "积极": {"pick": {"position_pct": 0.25, "min_score": 70}, "risk": {"max_stop_pct": 0.10}}}
+
+
+def api_me(_q):
+    s = load_settings()
+    return {"user": auth.user(), "vault": vault.status(), "vault_keys": VAULT_KEYS, "sessions": auth.sessions(),
+            "backup": {**s.get("backup", {}), **backup.STATE}, "security": s.get("security", {}),
+            "local": getattr(REQ, "local", False)}
+
+
+def p_profile(b):
+    prof = auth.save_profile(b)
+    if b.get("risk") in RISK_PRESET:
+        save_settings(RISK_PRESET[b["risk"]])
+    return prof
+
+
+def p_vault(b):
+    vault.set_many({k: v for k, v in b.items() if k in VAULT_KEYS})
+    return vault.status()
+
+
+def p_password(b):
+    auth.change_password(b.get("old", ""), b.get("new", ""))
+    return {"ok": True, "message": "密码已修改，其他设备需要重新登录"}
+
+
+def p_revoke(b):
+    auth.revoke(b["id"])
+    return {"ok": True}
+
+
+def p_api_token(b):
+    tok = auth.create_api_token(b.get("name", "插件"), int(b.get("days", 365)))
+    return {"token": tok, "message": "只显示这一次，请马上复制保存"}
+
+
+def p_backup(b):
+    return backup.backup(push=bool(b.get("push", True)))
+
+
+def p_restore(b):
+    return backup.restore(b.get("password") or None)
+
+
+def p_security(b):
+    if not getattr(REQ, "local", False):
+        raise ValueError("只能在电脑本机修改安全设置")
+    return save_settings({"security": {"local_no_login": bool(b.get("local_no_login", True))},
+                          "backup": {k: b[k] for k in ("enabled", "remote") if k in b}})["security"]
+
+
+GET = {"/api/me": api_me, "/api/overview": api_overview, "/api/quotes": api_quotes, "/api/kline": api_kline,
        "/api/intraday": api_intraday, "/api/analyze": api_analyze, "/api/search": api_search,
        "/api/picks/runs": api_runs, "/api/picks/candidates": api_candidates, "/api/picks/state": api_pick_state,
        "/api/sim": api_sim, "/api/learn": api_learn, "/api/backtest": api_backtest, "/api/settings": api_settings,
@@ -220,6 +279,10 @@ def p_boot(_b):
 def p_settings(b):
     b = dict(b)
     n = b.get("notify")
+    if isinstance(n, dict):  # token 改存本机保险箱
+        vault.set_many({k: n.pop(k) for k in ("pushplus_token", "serverchan_key") if n.get(k) and n.get(k) != "已设置"})
+    b.pop("security", None)
+    n = b.get("notify")
     if isinstance(n, dict):  # 掩码值不覆盖真实 token
         for k in ("pushplus_token", "serverchan_key"):
             if n.get(k) == "已设置":
@@ -260,7 +323,10 @@ def p_events_read(_b):
 
 POST = {"/api/picks/run": p_pick_run, "/api/sim/order": p_order, "/api/sim/cancel": p_cancel,
         "/api/sim/exit": p_exit, "/api/sim/reset": p_reset, "/api/learn/run": p_learn, "/api/learn/bootstrap": p_boot, "/api/settings": p_settings,
-        "/api/watchlist": p_watch, "/api/notify/test": p_notify_test, "/api/events/read": p_events_read, "/api/publish": p_publish}
+        "/api/watchlist": p_watch, "/api/notify/test": p_notify_test, "/api/events/read": p_events_read, "/api/publish": p_publish,
+        "/api/me/profile": p_profile, "/api/me/vault": p_vault, "/api/me/password": p_password,
+        "/api/me/revoke": p_revoke, "/api/me/token": p_api_token, "/api/me/backup": p_backup,
+        "/api/me/restore": p_restore, "/api/me/security": p_security}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -280,8 +346,70 @@ class Handler(BaseHTTPRequestHandler):
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
             pass  # 浏览器提前关闭了连接，忽略
 
-    def _json(self, obj, code=200):
-        self._send(code, json.dumps(clean(obj), ensure_ascii=False).encode("utf-8"))
+    def _json(self, obj, code=200, cookie=None):
+        body = json.dumps(clean(obj), ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        if cookie is not None:
+            self.send_header("Set-Cookie", cookie)
+        try:
+            self.end_headers()
+            self.wfile.write(body)
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            pass
+
+    # ---------------------------------------------------------------- 登录校验
+    def _token(self):
+        h = self.headers.get("Authorization") or ""
+        if h.startswith("Bearer "):
+            return h[7:].strip()
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == "aq5s":
+                return v
+        return None
+
+    def _is_local(self):
+        return self.client_address[0] in auth.LOCAL
+
+    def _authorized(self) -> bool:
+        REQ.local = self._is_local()
+        if REQ.local and load_settings().get("security", {}).get("local_no_login", True):
+            return True
+        if not auth.has_user():
+            return REQ.local
+        return auth.check(self._token()) is not None
+
+    def _auth_route(self, path, body) -> bool:
+        ip, ua = self.client_address[0], self.headers.get("User-Agent") or ""
+        try:
+            if path == "/api/auth/me":
+                sess = auth.check(self._token())
+                self._json({"has_user": auth.has_user(), "local": self._is_local(), "authorized": self._authorized(),
+                            "user": (auth.user() or {}).get("username") if (sess or self._authorized()) else None})
+            elif path == "/api/auth/setup":
+                if not self._is_local():
+                    return self._json({"error": "首次创建账号只能在电脑本机操作"}, 403) or True
+                auth.setup(body.get("username", ""), body.get("password", ""))
+                tok = auth.login(body.get("username", ""), body.get("password", ""), ip, ua)
+                self._json({"ok": True}, cookie=self._cookie(tok))
+            elif path == "/api/auth/login":
+                tok = auth.login(body.get("username", ""), body.get("password", ""), ip, ua)
+                self._json({"ok": True}, cookie=self._cookie(tok))
+            elif path == "/api/auth/logout":
+                auth.logout(self._token())
+                self._json({"ok": True}, cookie="aq5s=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax")
+            else:
+                return False
+        except ValueError as e:
+            self._json({"error": str(e)}, 400)
+        return True
+
+    @staticmethod
+    def _cookie(tok):
+        return f"aq5s={tok}; Path=/; Max-Age={auth.SESSION_DAYS * 86400}; HttpOnly; SameSite=Lax"
 
     def _handle(self, table, arg):
         path = urlparse(self.path).path
@@ -302,6 +430,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         if u.path.startswith("/api/"):
+            if u.path.startswith("/api/auth/") and self._auth_route(u.path, {}):
+                return
+            if not self._authorized():
+                return self._json({"error": "需要登录", "need_login": True}, 401)
             if not self._handle(GET, parse_qs(u.query)):
                 self._json({"error": "not found"}, 404)
             return
@@ -326,6 +458,11 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n) or b"{}")
         except ValueError:
             body = {}
+        path = urlparse(self.path).path
+        if path.startswith("/api/auth/") and self._auth_route(path, body):
+            return
+        if not self._authorized():
+            return self._json({"error": "需要登录", "need_login": True}, 401)
         if not self._handle(POST, body):
             self._json({"error": "not found"}, 404)
 
@@ -343,8 +480,20 @@ def _restart():
     os._exit(0)
 
 
+def _migrate_secrets():
+    """旧版把推送 token 明文写在 settings.json，迁移到本机保险箱。"""
+    s = load_settings()
+    n = s.get("notify", {})
+    moved = {k: n[k] for k in ("pushplus_token", "serverchan_key") if n.get(k)}
+    if moved:
+        vault.set_many(moved)
+        save_settings({"notify": {k: "" for k in moved}})
+
+
 def main():
     db.init()
+    auth.init()
+    _migrate_secrets()
     sim.ensure_accounts()
     market.ensure_universe_mock()
     s = load_settings()

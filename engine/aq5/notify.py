@@ -6,7 +6,7 @@ import threading
 import urllib.parse
 import urllib.request
 
-from . import db
+from . import db, vault
 from .config import MOCK, load_settings
 
 
@@ -19,7 +19,9 @@ def _post(url: str, data: dict, as_json: bool) -> None:
 
 
 def send(title: str, body: str, force: bool = False) -> dict:
-    n = load_settings()["notify"]
+    n = dict(load_settings()["notify"])
+    n["pushplus_token"] = vault.get("pushplus_token") or n.get("pushplus_token", "")
+    n["serverchan_key"] = vault.get("serverchan_key") or n.get("serverchan_key", "")
     if MOCK or not (n.get("enabled") or force):
         return {"sent": False, "reason": "推送未开启"}
     tasks = []

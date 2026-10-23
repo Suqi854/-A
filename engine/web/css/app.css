@@ -275,3 +275,7 @@ ul.why.risk li::marker { color: var(--warn); } ul.why li::marker { color: var(--
 
 /* 公开只读版（GitHub Pages） */
 body.static .rw, body.static #nav a[data-p="bt"], body.static #nav a[data-p="set"] { display: none !important; }
+body.static.unlocked .pv { display: inline-flex !important; }
+#top .cmd { flex: 1 1 0; min-width: 0; }
+#top .status { flex: 0 0 auto; }
+@media (max-width: 900px) { body.static #mockTag { display: none; } #unlockBtn { padding: 0 6px; } }

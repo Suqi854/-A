@@ -57,6 +57,9 @@ DEFAULTS = {
     # “我的模拟盘”、自选股、推送 token 永远不会被导出
     "publish": {"enabled": False, "remote": "https://github.com/Suqi854/-A.git", "branch": "data",
                 "push": True, "interval_min": 10, "repo_dir": ""},
+    # 个人数据加密备份到 GitHub 私有仓库（备份密码在本机保险箱）
+    "backup": {"enabled": False, "remote": "", "time": "15:50"},
+    "security": {"local_no_login": True},
 }
 
 _lock = threading.Lock()
@@ -95,6 +98,11 @@ def save_settings(patch: dict) -> dict:
 def public_settings() -> dict:
     s = load_settings()
     n = s.get("notify", {})
-    s["notify"] = {**n, "pushplus_token": "已设置" if n.get("pushplus_token") else "",
-                   "serverchan_key": "已设置" if n.get("serverchan_key") else ""}
+    try:
+        from . import vault
+        st = vault.status()
+    except Exception:  # noqa: BLE001
+        st = {}
+    s["notify"] = {**n, "pushplus_token": "已设置" if (n.get("pushplus_token") or "pushplus_token" in st) else "",
+                   "serverchan_key": "已设置" if (n.get("serverchan_key") or "serverchan_key" in st) else ""}
     return s
