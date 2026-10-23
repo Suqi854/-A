@@ -330,3 +330,32 @@ code, .fxl { font-family: var(--mono); font-size: 11.5px; color: var(--cyan); ba
 .tier.tC { color: var(--muted); border-color: var(--line2); }
 .chartbar label.hint { display: inline-flex; align-items: center; gap: 2px; white-space: nowrap; }
 .chartbar { flex-wrap: wrap; row-gap: 4px; }
+/* 自选列表 / 今日信号 / 五档 */
+.wlt td, .wlt th { white-space: nowrap; }
+.wlt tr.click:hover td { background: rgba(255,176,0,.05); }
+.sigcard { display: grid; grid-template-columns: 120px 1.2fr 1fr; gap: 14px; align-items: start; }
+.sigact { border: 2px solid; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 14px 6px; text-align: center; }
+.sigact b { font-size: 26px; letter-spacing: 2px; }
+.sigact small { color: var(--muted); margin-top: 4px; font-size: 11px; }
+.siglv { grid-template-columns: repeat(4, 1fr) !important; margin: 8px 0 6px !important; }
+.siglist .sg { border-left: 2px solid var(--line2); padding: 3px 8px; margin-bottom: 6px; }
+.siglist .sg .lab { font-weight: 700; margin-right: 6px; }
+.siglist .sg.fire { border-left-color: var(--amber); background: rgba(255,176,0,.07); animation: fire 1.6s ease-in-out infinite; }
+@keyframes fire { 50% { background: rgba(255,176,0,.16); } }
+table.ob td { padding: 2px 6px; font-family: var(--mono); font-size: 12px; }
+table.ob td.r { text-align: right; }
+table.ob .obbar { width: 38%; position: relative; }
+table.ob .obbar i { display: block; height: 8px; opacity: .55; }
+table.ob tr.obmid td { border-top: 1px solid var(--line2); border-bottom: 1px solid var(--line2); padding: 4px 6px; }
+.obkv { grid-template-columns: auto 1fr auto 1fr !important; margin-top: 8px; font-size: 12px; }
+.iobar { height: 6px; background: var(--down); margin-top: 6px; }
+.iobar i { display: block; height: 100%; background: var(--up); }
+@media (max-width: 900px) {
+  .sigcard { grid-template-columns: 1fr; }
+  .sigact { flex-direction: row; gap: 10px; padding: 8px; }
+  .siglv { grid-template-columns: repeat(3, 1fr) !important; }
+}
+@media (max-width: 900px) {
+  .panel .ph { flex-wrap: wrap; row-gap: 4px; }
+  #wl2Add { min-width: 160px; }
+}

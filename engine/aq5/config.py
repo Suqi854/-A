@@ -37,14 +37,15 @@ DEFAULTS = {
     "watchlist": ["sh600519", "sz000858", "sh601318", "sh600036", "sz000333"],
     "indices": ["sh000001", "sz399001", "sz399006", "sh000300", "sh000016", "sh000688"],
     "overseas": ["hkHSI", "usIXIC", "usDJI", "usINX"],
-    "init_cash": 100000.0,
+    "init_cash": 1000000.0,
     "fees": {"commission": 0.00025, "min_commission": 5.0, "stamp_tax": 0.0005, "transfer": 0.00001},
     "slippage": 0.001,
     "pick": {
         "times": ["09:26", "14:45"],
         "max_picks": 5,
         "top_n": 10,                # 每次选股都输出综合分前 N 只（分 A/B/C 三级）
-        "ai_max_positions": 8,      # AI 自动盘最多同时持有几只
+        "ai_max_positions": 12,     # AI 自动盘最多同时持有几只
+        "ai_position_pct": 0.12,    # AI 自动盘 A 级单票基础仓位（B×0.7，C×0.4，再乘半凯利修正）
         "ai_daily_trade": True,     # AI 自动盘每个交易日至少交易一次（收集迭代数据）
         "min_score": 72.0,          # 综合分门槛：宁缺毋滥
         "min_amount_yi": 1.0,       # 成交额至少 1 亿（尾盘），竞价按比例

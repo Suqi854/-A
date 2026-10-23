@@ -47,6 +47,9 @@
       case 'settings': return sj('settings.json');
       case 'strategies': return sj('strategies.json');
       case 'sectors': return sj('sectors.json');
+      case 'track': return sj('track.json');
+      case 't/stats': return sj('t.json');
+      case 'watch/signals': return [];
       case 'sector': throw new Error('公开版只有板块排行，成分股请在电脑端或局域网完整版查看');
       case 'quotes': return {};
       case 'search': { const v = (q.get('q') || '').toLowerCase(); try { const r = await Lite.search(v); if (r.length) return r; } catch { }
@@ -276,8 +279,8 @@
     } catch (e) { toast(e.message, 1); }
   }
   document.addEventListener('click', e => { const b = e.target.closest('[data-star]'); if (!b) return; e.stopPropagation(); e.preventDefault(); toggleWatch(b.dataset.star, b.dataset.n); }, true);
-  function bindWlSearch() {
-    const inp = $('#wlAdd'), box = $('#wlSug'); let list = [], idx = 0, t;
+  function bindWlSearch(inId = 'wlAdd', boxId = 'wlSug') {
+    const inp = $('#' + inId), box = $('#' + boxId); let list = [], idx = 0, t;
     const draw = () => { if (!list.length) { box.style.display = 'none'; return; }
       box.innerHTML = list.map((s, i) => `<div class="${i === idx ? 'on' : ''}" data-i="${i}"><span>${esc(s.name)} <small class="muted">${short(s.code)}</small></span><span>${inWatch(s.code) ? '已自选' : '+ 加入'}</span></div>`).join('');
       box.style.display = 'block'; };
@@ -359,10 +362,13 @@
     $('#p-pick').innerHTML = `<div class="grid">
       ${panel('AUTO PICK <small>自动选股 · 宁缺毋滥</small>', `<div class="row"><span class="chip a">竞价选股 ${times[0]}</span><span class="chip a">尾盘选股 ${times[1]}</span>
           <span class="hint">交易日自动运行：全主板扫描 → 10 维因子 + 12 种策略（含数学模型）精评 → 取综合分前 ${st ? st.pick.top_n || 10 : 10} 只 → 按门槛 ${st ? st.pick.min_score : 72} 分分为 A 重点 / B 关注 / C 观察 → AI自动盘按级别买入</span>
-          <span class="sp"></span><button class="btn pri rw" id="runPick">▶ 立即选股</button></div><div id="pickProg"></div>`, { cls: 'c12' })}
-      ${panel('RUNS <small>历史</small>', '<div id="runList" class="scroll" style="max-height:70vh"></div>', { cls: 'c3', np: true })}
-      <div class="c9" id="runDetail"><div class="loading">载入</div></div>
+          <span class="sp"></span><button class="btn pri rw" id="runPick">▶ 立即选股</button></div><div id="pickProg"></div>`, { cls: 'c12', right: '<div class="seg" id="pkTab"><button data-t="res" class="on">选股结果</button><button data-t="trk">跟踪复盘</button></div>' })}
+      <div class="c12 grid" id="pkRes" style="padding:0">${panel('RUNS <small>历史</small>', '<div id="runList" class="scroll" style="max-height:70vh"></div>', { cls: 'c3', np: true })}
+      <div class="c9" id="runDetail"><div class="loading">载入</div></div></div>
+      <div class="c12" id="pkTrk" style="display:none"></div>
     </div>`;
+    $$('#pkTab button').forEach(b => b.onclick = () => { $$('#pkTab button').forEach(x => x.classList.toggle('on', x === b)); const t = b.dataset.t === 'trk';
+      $('#pkRes').style.display = t ? 'none' : ''; $('#pkTrk').style.display = t ? '' : 'none'; if (t) renderTrack(); });
     $('#runPick').onclick = async () => { try { await api('picks/run', { session: 'manual' }); toast('开始选股…'); watchPick(); } catch (e) { toast(e.message, 1); } };
     await loadRuns();
     if (!STATIC) watchPick();
@@ -410,6 +416,32 @@
     $('#candT').innerHTML = `<tr><th>#</th><th class="l">股票</th><th>评分</th><th>价格</th><th class="l">信号</th></tr>` + c.map((x, i) => `<tr class="click" data-c="${x.code}"><td class="muted">${i + 1}</td><td class="l">${star(x.code, x.name)} ${nameCell(x.name, x.code)}</td><td class="${x.score >= m.min_score ? 'amber' : ''}">${num(x.score, 1)}</td><td>${num(x.price)}</td><td class="l">${x.strategies.map(s => `<span class="chip">${names[s] || s}</span>`).join(' ')}</td></tr>`).join('');
     $$('#candT [data-c]').forEach(tr => tr.onclick = () => go('anly', tr.dataset.c));
   }
+  // ------------------------------------------------------------------ 选股跟踪复盘
+  async function renderTrack() {
+    const box = $('#pkTrk'); box.innerHTML = '<div class="loading">计算跟踪数据</div>';
+    let d; try { d = await api('track'); } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    const sm = d.summary, VC = { '符合预期': 'u', '不符合': 'd', '一般': 'a', '跟踪中': '' };
+    const grp = (title, arr) => `<table class="t"><tr><th class="l">${title}</th><th>样本</th><th>符合</th><th>不符合</th><th>3日均</th><th>超额</th></tr>${arr.map(x => `<tr><td class="l">${esc(x.key)}</td><td>${x.n}</td><td class="up">${num(x.hit * 100, 0)}%</td><td class="down">${num(x.miss * 100, 0)}%</td><td class="${cls(x.avg3)}">${x.avg3 == null ? '--' : pct(x.avg3)}</td><td class="${cls(x.alpha)}">${x.alpha == null ? '--' : pct(x.alpha)}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">暂无</td></tr>'}</table>`;
+    const spark = p => { if (!p || !p.length) return ''; const w = 90, h = 22, mx = Math.max(...p.map(Math.abs), 1); const pts = [0, ...p].map((v, i) => `${(i / p.length * w).toFixed(1)},${(h / 2 - v / mx * (h / 2 - 2)).toFixed(1)}`).join(' ');
+      return `<svg width="${w}" height="${h}"><line x1="0" y1="${h / 2}" x2="${w}" y2="${h / 2}" stroke="#2a333d" stroke-dasharray="2 2"/><polyline points="${pts}" fill="none" stroke="${p[p.length - 1] >= 0 ? 'var(--up)' : 'var(--down)'}" stroke-width="1.5"/></svg>`; };
+    box.innerHTML = `<div class="grid">
+      ${panel('SUMMARY <small>近20天入选股跟踪</small>', `<div class="stat4"><div><div class="l">入选</div><div class="v">${sm.n}</div></div><div><div class="l">已出结果</div><div class="v">${sm.done}</div></div>
+        <div><div class="l">符合预期</div><div class="v up">${sm.hit == null ? '--' : num(sm.hit * 100, 0) + '%'}</div></div><div><div class="l">不符合</div><div class="v down">${sm.miss == null ? '--' : num(sm.miss * 100, 0) + '%'}</div></div></div>
+        <div class="hint" style="margin-top:6px">判定：先到止盈①、或3日涨≥2%、或3日跑赢大盘≥2% = 符合；先到止损、或3日跌≥2%且跑输大盘 = 不符合；不满3个交易日 = 跟踪中。</div>
+        <div class="sep"></div><div class="hint">改进建议</div><ul class="why">${sm.advice.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
+        ${sm.fail_reasons.length ? `<div class="hint">不符合的常见原因</div><div class="row">${sm.fail_reasons.map(([k, n]) => `<span class="chip d">${esc(k)} ×${n}</span>`).join('')}</div>` : ''}`, { cls: 'c4' })}
+      ${panel('BY TIER / SESSION <small>按级别、场次</small>', grp('级别', sm.by_tier) + '<div style="height:8px"></div>' + grp('场次', sm.by_session.map(x => ({ ...x, key: SESSION[x.key] || x.key }))), { cls: 'c4', np: true })}
+      ${panel('BY STRATEGY <small>按主策略</small>', grp('策略', sm.by_strategy) + (sm.factor_diff.length ? `<div class="hint" style="padding:8px 10px 2px">因子：成功样本 vs 失败样本 选出时的平均分</div><table class="t">${sm.factor_diff.slice(0, 6).map(f => `<tr><td class="l">${f.label}</td><td class="up">${f.win}</td><td class="down">${f.loss}</td><td class="${cls(f.diff)}">${sgn(f.diff, 1)}</td></tr>`).join('')}</table>` : ''), { cls: 'c4', np: true })}
+      ${panel('TRACK <small>逐只跟踪：走势、是否符合预期、为什么</small>', `<div class="scroll" style="max-height:70vh"><table class="t trk"><tr><th>日期</th><th class="l">股票</th><th>级别</th><th class="l">主策略</th><th>选出价</th><th>走势(10日)</th><th>1日</th><th>3日</th><th>超额</th><th>最大涨/跌</th><th>结论</th><th class="l hide-m">为什么</th><th class="rw"></th></tr>
+        ${d.items.map(x => `<tr><td class="muted">${x.date.slice(5)}<br><small>${SESSION[x.session] || x.session}</small></td><td class="l click" data-c="${x.code}">${nameCell(x.name, x.code)}</td><td>${x.tier ? `<span class="tier t${x.tier}">${x.tier}</span>` : ''}</td>
+          <td class="l">${esc(x.strategy || '--')}</td><td>${num(x.price)}</td><td>${spark(x.path)}</td><td class="${cls(x.r1)}">${x.r1 == null ? '--' : pct(x.r1)}</td><td class="${cls(x.r3)}">${x.r3 == null ? '--' : pct(x.r3)}</td>
+          <td class="${cls(x.alpha)}">${x.alpha == null ? '--' : pct(x.alpha)}</td><td><span class="up">${x.max_up == null ? '--' : pct(x.max_up, 1)}</span><br><span class="down">${x.max_dn == null ? '' : pct(x.max_dn, 1)}</span></td>
+          <td><span class="chip ${VC[x.verdict]}">${x.verdict}</span></td><td class="l hide-m why-cell">${x.why.map(w => `<div>· ${esc(w)}</div>`).join('') || '<span class="muted">数据积累中</span>'}</td>
+          <td class="rw">${x.verdict !== '跟踪中' ? `<button class="btn sm" data-pr="${x.id}">AI复盘</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="13" class="empty">还没有入选记录</td></tr>'}</table></div>`, { cls: 'c12', np: true })}
+    </div>`;
+    box.querySelectorAll('[data-c]').forEach(e => e.onclick = () => go('anly', e.dataset.c));
+    box.querySelectorAll('[data-pr]').forEach(b => b.onclick = async () => { b.disabled = true; b.textContent = '复盘中…'; try { mdModal('AI 选股复盘', await api('ai/pick', { id: +b.dataset.pr })); } catch (e) { toast(e.message, 1); } b.disabled = false; b.textContent = 'AI复盘'; });
+  }
   async function watchPick() {
     clearInterval(S.timers.pick);
     const tick = async () => {
@@ -421,8 +453,83 @@
   }
 
   // ================================================================== F3 个股
+  // ================================================================== F3 自选（列表）
+  const ACT_CLS = { up: 'u', down: 'd', amber: 'a', neutral: '' };
+  async function renderWatch() {
+    $('#p-anly').innerHTML = `<div class="grid">${panel('WATCHLIST <small>自选股 · 只用于我的模拟盘和个人分析，AI自动盘不参考</small>', `
+      <div class="row" style="margin-bottom:8px"><span class="rw" style="position:relative;flex:1;max-width:340px"><input class="in" id="wl2Add" placeholder="搜索名称 / 代码 / 拼音首字母，回车加入自选" autocomplete="off" style="width:100%"><div class="suggest" id="wl2Sug" style="top:30px;left:0;right:auto;min-width:240px"></div></span>
+        <span class="sp"></span><span class="hint mono" id="wlTime"></span><button class="btn sm rw" id="wlRun">全部重新分析</button></div>
+      <div class="scroll"><table class="t wlt" id="wlTable"><tr><td class="loading">载入</td></tr></table></div>
+      <p class="hint">每个交易日自动分析三次：盘前 9:05、盘中每 30 分钟、盘后 15:10；盘中每 2 分钟检查做T信号。点任意一行看个股行情和当日信号。</p>`, { cls: 'c12' })}</div>`;
+    if (!STATIC) bindWlSearch('wl2Add', 'wl2Sug');
+    const rb = $('#wlRun'); if (rb) rb.onclick = async () => { rb.disabled = true; rb.textContent = '分析中…'; try { const r = await api('watch/run', {}); toast(`已分析 ${r.ok} 只`); await loadWatchSig(); } catch (e) { toast(e.message, 1); } rb.disabled = false; rb.textContent = '全部重新分析'; };
+    await loadWatchSig();
+    clearInterval(S.timers.wl); S.timers.wl = setInterval(() => { if (S.page !== 'anly' || S.anlyCode) return clearInterval(S.timers.wl); drawWatch(); }, 3000);
+    clearInterval(S.timers.wls); S.timers.wls = setInterval(() => { if (S.page === 'anly' && !S.anlyCode) loadWatchSig(); else clearInterval(S.timers.wls); }, 60000);
+  }
+  async function loadWatchSig() { try { S.wsig = Object.fromEntries((await api('watch/signals')).map(x => [x.code, x])); } catch { S.wsig = {}; } drawWatch(); }
+  function drawWatch() {
+    const t = $('#wlTable'); if (!t || !S.ov) return;
+    const mine = {}; ((S.ov.accounts.me || {}).positions || []).forEach(p => mine[p.code] = p);
+    const PH = { pre: '盘前', intra: '盘中', post: '盘后' };
+    const old = {}; t.querySelectorAll('tr[data-c]').forEach(tr => old[tr.dataset.c] = +tr.dataset.p);
+    t.innerHTML = `<tr><th>#</th><th class="l">名称 / 代码</th><th>现价</th><th>涨幅</th><th class="hide-m">涨跌</th><th class="hide-m">量比</th><th class="hide-m">换手</th><th class="hide-m">成交额</th><th class="l">今日信号</th><th class="hide-m">评分</th><th class="hide-m">我的持仓</th><th class="rw"></th></tr>` +
+      (S.ov.watchlist.length ? S.ov.watchlist.map((q, i) => { const g = (S.wsig || {})[q.code], m = mine[q.code];
+        return `<tr class="click" data-c="${q.code}" data-p="${q.price || 0}"><td class="muted">${i + 1}</td><td class="l">${nameCell(q.name || '--', q.code)}</td>
+        <td class="${cls(q.pct)} ${old[q.code] && q.price !== old[q.code] ? (q.price > old[q.code] ? 'flash-up' : 'flash-down') : ''}">${num(q.price)}</td><td class="${cls(q.pct)}"><b>${pct(q.pct)}</b></td><td class="hide-m ${cls(q.chg)}">${sgn(q.chg)}</td>
+        <td class="hide-m ${q.vr > 2 ? 'amber' : ''}">${num(q.vr)}</td><td class="hide-m">${num(q.turnover)}%</td><td class="hide-m">${money(q.amount)}</td>
+        <td class="l">${g ? `<span class="chip ${ACT_CLS[g.tone] || ''}">${esc(g.action)}</span> <small class="muted">${PH[g.phase] || ''} ${esc((g.time || '').slice(11, 16))}</small>` : '<span class="muted">--</span>'}</td>
+        <td class="hide-m amber">${g ? num(g.score, 0) : '--'}</td><td class="hide-m">${m ? `${m.qty}股 <span class="${cls(m.pnl_pct)}">${pct(m.pnl_pct)}</span>` : '<span class="muted">-</span>'}</td>
+        <td class="rw"><button class="btn sm" data-up="${q.code}" title="置顶">↑</button> <button class="btn sm" data-rm="${q.code}" title="移出">×</button></td></tr>`; }).join('')
+        : '<tr><td colspan="12" class="empty">还没有自选股，在上面搜索添加</td></tr>');
+    t.querySelectorAll('tr[data-c]').forEach(tr => tr.onclick = e => { if (e.target.closest('button')) return; go('anly', tr.dataset.c); });
+    t.querySelectorAll('[data-up]').forEach(b => b.onclick = async () => { await api('watchlist', { code: b.dataset.up, op: 'move', dir: 'top' }); await poll(); drawWatch(); });
+    t.querySelectorAll('[data-rm]').forEach(b => b.onclick = async () => { await api('watchlist', { code: b.dataset.rm, op: 'remove' }); await poll(); drawWatch(); });
+    const tm = $('#wlTime'); if (tm) tm.textContent = '行情 ' + (S.ov.time || '').slice(11, 19);
+  }
+
+  // ------------------------------------------------------------------ 个股：今日信号卡 / 五档
+  async function loadSig(code, phase) {
+    const box = $('#sigBox'); if (!box) return;
+    let r = null;
+    try { r = await api('watch/signal?code=' + code); } catch { }
+    let d = r && (phase ? r.phases[phase] : r.latest);
+    if ((!d || d.code !== code) && !STATIC) { try { d = await api('watch/plan', { code }); r = { latest: d, phases: { [d.phase]: d } }; } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; } }
+    if (!d) { box.innerHTML = '<div class="empty">公开版暂无这只股票的当日信号（电脑连上后可用）</div>'; return; }
+    const PH = { pre: '盘前计划', intra: '盘中', post: '盘后总结' };
+    $('#sigPh').innerHTML = Object.keys(PH).filter(k => r.phases && r.phases[k]).map(k => `<button data-ph="${k}" class="${k === d.phase ? 'on' : ''}">${PH[k]}</button>`).join('');
+    $$('#sigPh button').forEach(b => b.onclick = () => loadSig(code, b.dataset.ph));
+    const L = d.levels || {}, tone = { up: 'var(--up)', down: 'var(--down)', amber: 'var(--amber)', neutral: 'var(--muted)' };
+    const lv = (k, v, c) => `<div><div class="l">${k}</div><div class="v ${c || ''}">${v == null ? '--' : Array.isArray(v) ? v.map(x => num(x)).join('~') : num(v)}</div></div>`;
+    box.className = '';
+    box.innerHTML = `<div class="sigcard"><div class="sigact" style="border-color:${tone[d.tone]};color:${tone[d.tone]}"><b>${esc(d.action)}</b><small>${esc(PH[d.phase] || '')} ${esc((d.time || '').slice(11, 16))}</small></div>
+      <div class="sigmain"><p style="margin:0 0 6px">${esc(d.summary)}</p>
+        ${d.position ? `<div class="hint mono">我的持仓 ${d.position.qty} 股（可卖 ${d.position.avail}）· 成本 ${d.position.cost} · 浮盈 <b class="${cls(d.position.pnl_pct)}">${pct(d.position.pnl_pct)}</b></div>` : '<div class="hint">未持有（「我的模拟盘」）</div>'}
+        <div class="plan siglv">${lv('买入区', L.buy_zone)}${lv('做T低吸', L.t_low, 'up')}${lv('做T高抛', L.t_high, 'down')}${lv('止损', L.stop, 'down')}${lv('止盈①', L.target1, 'up')}${lv('止盈②', L.target2, 'up')}${lv('枢轴 P', L.pivot)}${lv('VWAP 均价', L.vwap)}</div>
+        <div class="hint mono">R1 ${num(L.r1)} · S1 ${num(L.s1)} · R2 ${num(L.r2)} · S2 ${num(L.s2)} · VWAP ${num(L.vwap)} · 5分RSI ${num(L.rsi5, 0)} · ATR ${num(L.atr, 3)}</div></div>
+      <div class="siglist">${d.signals.map(x => `<div class="sg ${x.kind === 't_fire' ? 'fire' : ''}"><span class="lab" style="color:${tone[x.tone] || 'var(--text)'}">${esc(x.label)}</span><b class="mono">${x.price == null ? '' : num(x.price)}</b><div class="hint">${esc(x.why)}</div></div>`).join('')}
+        <div class="hint" style="margin-top:4px">${esc(d.t_note || '')}</div></div></div>`;
+  }
+  function drawOB(q) {
+    const el = $('#obBox'); if (!el) return;
+    if (!q || !q.bids || !q.asks || !q.bids.length) { el.innerHTML = '<div class="empty">暂无五档数据</div>'; return; }
+    const sb = q.bids.reduce((s, x) => s + (x[1] || 0), 0), sa = q.asks.reduce((s, x) => s + (x[1] || 0), 0);
+    const mx = Math.max(1, ...q.bids.map(x => x[1] || 0), ...q.asks.map(x => x[1] || 0));
+    const wb = sb + sa ? (sb - sa) / (sb + sa) * 100 : 0, io = (q.outer || 0) + (q.inner || 0), strength = io ? q.outer / io * 100 : null;
+    const row = (lab, x, side) => `<tr><td class="l muted">${lab}</td><td class="${cls((x[0] || 0) - (q.prev || 0))}">${x[0] ? num(x[0]) : '--'}</td><td class="r">${x[1] || ''}</td><td class="obbar"><i style="width:${(x[1] || 0) / mx * 100}%;background:${side === 'b' ? 'var(--up)' : 'var(--down)'}"></i></td></tr>`;
+    el.innerHTML = `<table class="t ob">${[...q.asks].slice(0, 5).reverse().map((x, i) => row('卖' + (5 - i), x, 's')).join('')}
+      <tr class="obmid"><td class="l">现价</td><td class="${cls(q.pct)}"><b>${num(q.price)}</b></td><td colspan="2" class="${cls(q.pct)}">${pct(q.pct)}</td></tr>
+      ${q.bids.slice(0, 5).map((x, i) => row('买' + (i + 1), x, 'b')).join('')}</table>
+      <dl class="kv obkv"><dt>委比</dt><dd class="${cls(wb)}">${sgn(wb)}%</dd><dt>委差</dt><dd class="${cls(sb - sa)}">${sb - sa} 手</dd>
+        <dt>外盘（主动买）</dt><dd class="up">${money((q.outer || 0) * 100)}股</dd><dt>内盘（主动卖）</dt><dd class="down">${money((q.inner || 0) * 100)}股</dd>
+        <dt>买卖强度</dt><dd class="${strength == null ? '' : strength >= 50 ? 'up' : 'down'}">${strength == null ? '--' : num(strength, 1) + '% 买方'}</dd><dt>量比</dt><dd>${num(q.vr)}</dd>
+        <dt>换手</dt><dd>${num(q.turnover)}%</dd><dt>振幅</dt><dd>${num(q.amp)}%</dd><dt>均价</dt><dd>${num(q.avg)}</dd><dt>成交额</dt><dd>${money(q.amount)}</dd></dl>
+      ${strength != null ? `<div class="iobar"><i style="width:${strength}%"></i></div><div class="hint mono" style="display:flex;justify-content:space-between"><span>外盘 ${num(strength, 0)}%</span><span>内盘 ${num(100 - strength, 0)}%</span></div>` : ''}`;
+  }
+
   async function renderAnly(code) {
-    code = code || S.lastCode || (S.ov && S.ov.watchlist[0] && S.ov.watchlist[0].code) || 'sh600519';
+    S.anlyCode = code || null;
+    if (!code) return renderWatch();
     S.lastCode = code;
     $('#p-anly').innerHTML = `<div class="loading">分析 ${short(code)} 中</div>`;
     let a;
@@ -435,13 +542,14 @@
     const maxF = Math.max(...a.flows.map(f => Math.abs(f.main)), 1);
     const inWl = S.ov && S.ov.watchlist.some(w => w.code === a.code);
     $('#p-anly').innerHTML = `<div class="grid">
-      <div class="panel c12"><div class="qhead"><span class="nm">${esc(a.name)}</span><span class="mono muted">${a.code.toUpperCase()}</span>
+      <div class="panel c12"><div class="qhead"><button class="btn sm" onclick="location.hash='anly'" title="返回自选列表">‹ 自选</button><span class="nm">${esc(a.name)}</span><span class="mono muted">${a.code.toUpperCase()}</span>
         <span class="px ${cls(q.pct)}" id="aPx">${num(q.price)}</span><span class="ch ${cls(q.pct)}" id="aCh">${sgn(q.chg)} ${pct(q.pct)}</span><span class="sp"></span>
         <button class="btn rw" id="aWl">${inWl ? '已自选' : '+ 自选'}</button><button class="btn buy rw" id="aBuy">模拟买入</button><button class="btn sell rw" id="aSell">模拟卖出</button><button class="btn rw" id="aBt">回测</button></div>
         <div class="qgrid"><div><span>今开</span>${num(q.open)}</div><div><span>最高</span><b class="up">${num(q.high)}</b></div><div><span>最低</span><b class="down">${num(q.low)}</b></div><div><span>昨收</span>${num(q.prev)}</div>
           <div><span>量比</span>${num(q.vr)}</div><div><span>换手</span>${num(q.turnover)}%</div><div><span>成交额</span>${money(q.amount)}</div><div><span>主力净额</span><b class="${cls(q.main_net)}">${money(q.main_net)}</b></div>
           <div><span>市盈</span>${num(q.pe, 1)}</div><div><span>市净</span>${num(q.pb)}</div><div><span>总市值</span>${num(q.mcap, 0)}亿</div><div><span>流通</span>${num(q.fmcap, 0)}亿</div>
           <div><span>涨停</span>${num(q.up_limit)}</div><div><span>跌停</span>${num(q.dn_limit)}</div><div><span>大盘</span>${esc(a.regime.state)}</div><div class="${a.sector ? 'click' : ''}" id="aSec"><span>行业</span>${a.sector ? `${esc(a.sector.name)} <b style="color:${secCol(a.sector.score)}">${num(a.sector.score, 0)}</b><small class="muted"> ${a.sector.rank}/${a.sector.total}</small>` : '--'}</div></div></div>
+      ${panel('SIGNAL <small>今日信号 · 进出场 / 做T / 止盈止损 / 加减仓</small>', '<div id="sigBox" class="loading">载入</div>', { cls: 'c12', right: '<div class="seg" id="sigPh"></div><button class="btn sm rw" id="sigRe">重新分析</button>' })}
       <div class="panel c8"><div class="chartbar"><div class="seg" id="chPer">${[['i', '分时'], ['day', '日K'], ['week', '周K'], ['month', '月K'], ['m60', '60分'], ['m30', '30分'], ['m15', '15分'], ['m5', '5分']].map(([k, t]) => `<button data-p="${k}" class="${k === 'day' ? 'on' : ''}">${t}</button>`).join('')}</div>
           <div class="seg" id="chMain"><button data-m="ma" class="on">均线</button><button data-m="boll">BOLL</button></div>
           <div class="seg" id="chSub">${['macd', 'kdj', 'rsi', 'obv', 'wr', 'cci', 'bias'].map(k => `<button data-s="${k}" class="${k === 'macd' ? 'on' : ''}">${k.toUpperCase()}</button>`).join('')}</div></div>
@@ -450,6 +558,7 @@
         <div class="legend" id="chLg" style="padding:4px 10px;min-height:22px"></div><div class="chartbox"><canvas id="chK"></canvas></div>
         <div class="hint mono" id="chSrc" style="padding:3px 10px 6px"></div></div>
       <div class="c4" style="display:flex;flex-direction:column;gap:10px">
+        ${panel('ORDER BOOK <small>五档 · 内外盘 · 委比</small>', '<div id="obBox"></div>', { np: false })}
         ${panel('VERDICT <small>综合结论</small>', `<div class="big-score">${ring(a.score, tone)}<div><div class="rating" style="color:${tone}">${esc(a.rating)}</div>
           <div class="hint mono" style="margin-top:6px">因子 ${num(a.fscore, 0)} · 策略 ${num(a.sscore, 0)}</div><div class="hint mono">${a.prob_src === 'model' ? '模型' : '经验'}估计3日上涨概率 <b class="amber">${num(a.prob * 100, 0)}%</b></div></div></div>
           <p style="margin:10px 0 0">${esc(a.advice)}</p>${a.prob_src !== 'model' ? '<p class="hint" style="margin:4px 0 0">※ 样本积累到200个后会自动训练概率模型，届时概率经过历史检验。</p>' : ''}`)}
@@ -486,6 +595,8 @@
       ${panel('LEARN <small>学习要点 · 这只股票教会你什么</small>', a.lessons.map(x => `<div class="lesson">${esc(x)}</div>`).join(''), { cls: 'c12' })}
     </div>`;
     if (!STATIC) loadAiStock(a);
+    drawOB(q); loadSig(a.code);
+    const sr = $('#sigRe'); if (sr) sr.onclick = async () => { sr.disabled = true; try { await api('watch/plan', { code: a.code }); await loadSig(a.code); toast('已重新分析'); } catch (e) { toast(e.message, 1); } sr.disabled = false; };
     const st = { p: 'day', main: 'ma', sub: 'macd' };
     let maSel = (lsGet('aq5_ma') || '5,10,20,60').split(',').map(Number);
     $$('#p-anly [data-ma]').forEach(c => { c.checked = maSel.includes(+c.dataset.ma); c.onchange = () => { maSel = $$('#p-anly [data-ma]').filter(x => x.checked).map(x => +x.dataset.ma); lsSet('aq5_ma', maSel.join(',')); if (S.kchart) S.kchart.setMA(maSel); }; });
@@ -520,7 +631,7 @@
     clearInterval(S.timers.anly);
     S.timers.anly = setInterval(async () => {
       if (S.page !== 'anly' || S.anly !== a) return clearInterval(S.timers.anly);
-      try { const r = await api('quotes?codes=' + a.code); const x = r[a.code]; if (!x) return;
+      try { const r = await api('quotes?codes=' + a.code); const x = r[a.code]; if (!x) return; drawOB(x);
         $('#aPx').textContent = num(x.price); $('#aPx').className = 'px ' + cls(x.pct); $('#aCh').textContent = `${sgn(x.chg)} ${pct(x.pct)}`; $('#aCh').className = 'ch ' + cls(x.pct);
         if (S.ichart && S.ov && S.ov.phase === 'trading') S.ichart.setData(await api('intraday?code=' + a.code));
       } catch { }
@@ -707,6 +818,11 @@
   // ================================================================== F5 自我迭代
   async function renderLearn() {
     const L = await api('learn');
+    setTimeout(async () => { const el = $('#tStats'); if (!el) return; try { const t = await api('t/stats');
+      el.className = ''; el.innerHTML = `<table class="t"><tr><th class="l">做T策略</th><th>方向</th><th>样本</th><th>胜率</th><th>均收益</th><th>权重</th></tr>${t.stats.map(x => `<tr title="${esc(x.desc)}"><td class="l">${esc(x.name)}</td><td class="${x.side === 'buy' ? 'up' : 'down'}">${x.side === 'buy' ? '低吸' : '高抛'}</td><td>${x.n}</td><td>${x.win == null ? '--' : num(x.win * 100, 0) + '%'}</td><td class="${cls(x.avg)}">${x.avg == null ? '--' : pct(x.avg)}</td><td class="amber">${num(x.weight, 2)}</td></tr>`).join('')}</table>
+        <div class="hint" style="padding:6px 10px">自选股和 AI 自动盘持仓盘中每 2 分钟检查一次；收盘后评估：低吸后日内最高 ≥+0.8% 或收盘 ≥+0.3% 算成功（高抛反之）。最近触发 ${t.recent.length} 次。</div>
+        <details class="fx" style="padding:0 10px 8px"><summary>查看做T公式</summary>${t.stats.map(x => `<div><b>${esc(x.name)}</b>：<code>${esc(x.desc)}</code></div>`).join('')}<div><code>枢轴 P=(H+L+C)/3；R1=2P−L；S1=2P−H；低吸价=VWAP−0.45·ATR14（S1在区间内取S1）；高抛价=VWAP+0.45·ATR14（R1在区间内取R1）</code></div></details>`;
+    } catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; } }, 50);
     const hist = L.history, pk = L.picks;
     const def = { momentum: 0.13, trend: 0.16, volume: 0.10, capital: 0.14, strength: 0.12, volatility: 0.06, value: 0.08, position: 0.11, liquidity: 0.10 };
     const last = hist[0];
@@ -732,6 +848,12 @@
           <div><b>权重迭代</b>：<code>目标权重ᵢ = 默认权重ᵢ·clip(1 + 4·ICᵢ, 0.3, 2)；新权重 = 0.7·旧 + 0.3·目标，限制 2%~30% 后归一化；ICᵢ = Spearman(因子ᵢ, 3日收益)</code></div>
           <div><b>策略权重</b>：<code>w = clip(0.5 + 胜率 + 平均收益/5, 0.5, 1.5)</code></div>
           <div><b>概率模型</b>：<code>P(3日上涨) = σ(β₀ + Σβᵢ·因子ᵢ + Σγⱼ·策略ⱼ)，按时间切分检验 AUC ≥ 0.55 才启用</code></div></details>`, { cls: 'c4' })}
+      ${panel('SESSIONS <small>分场次策略迭代 · 早盘 / 尾盘 / 手动</small>', (() => { const bs = (strat && strat._by_session) || {}; const names = Object.fromEntries(L.strategies.map(x => [x.id, x.name]));
+          const sess = [['auction', '竞价选股'], ['close', '尾盘选股'], ['manual', '手动']];
+          const rows = L.strategies.map(st => `<tr><td class="l">${esc(st.name)}</td>${sess.map(([k]) => { const x = (bs[k] || {})[st.id]; return x ? `<td>${x.n}</td><td class="${x.win >= 0.5 ? 'up' : 'down'}">${num(x.win * 100, 0)}%</td><td class="amber">${num(x.weight, 2)}</td>` : '<td class="muted">0</td><td>--</td><td class="muted">1.00</td>'; }).join('')}</tr>`).join('');
+          return `<div class="scroll"><table class="t"><tr><th class="l" rowspan="2">策略</th>${sess.map(([, n]) => `<th colspan="3">${n}</th>`).join('')}</tr><tr>${sess.map(() => '<th>样本</th><th>胜率</th><th>权重</th>').join('')}</tr>${rows}</table></div>
+            <div class="hint" style="padding:6px 10px">同一个策略在早盘和尾盘的表现往往不同：每个场次单独统计 3 日胜率和收益，样本 ≥10 后该场次用自己的权重（0.5~1.5）。</div>`; })(), { cls: 'c8', np: true })}
+      ${panel('T STRATEGIES <small>盘中做T策略 · 自动统计胜率</small>', '<div id="tStats" class="loading">载入</div>', { cls: 'c4', np: true })}
       ${panel('SCORECARD <small>选股成绩单</small>', `<dl class="kv"><dt>次日胜率</dt><dd>${st(pk.d1)}</dd><dt>3日胜率</dt><dd>${st(pk.d3)}</dd><dt>5日胜率</dt><dd>${st(pk.d5)}</dd></dl><div class="sep"></div>
           <dl class="kv">${Object.entries(pk.outcomes).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl><div class="sep"></div>
           <div class="hint">概率模型</div>${md ? `<dl class="kv"><dt>训练时间</dt><dd>${L.model.created}</dd><dt>样本</dt><dd>${md.n}</dd><dt>基准成功率</dt><dd>${num(md.base_rate * 100, 1)}%</dd>

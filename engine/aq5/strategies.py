@@ -104,6 +104,63 @@ def s_auction_strong(rows, ind, live, session):
     return None
 
 
+def s_auction_gap_hold(rows, ind, live, session):
+    """竞价站上昨高：高开且开盘价高于昨日最高，量比放大。"""
+    if session != "auction" or not live or len(rows) < 3:
+        return None
+    o, pv = live.get("open") or live.get("price"), live.get("prev")
+    yh = rows[-2]["high"]
+    if not (o and pv):
+        return None
+    gap = (o / pv - 1) * 100
+    vr = ind["extra"]["vr"]
+    if 0.5 <= gap <= 4 and o > yh and vr >= 2:
+        return 0.55 + min(0.25, (vr - 2) * 0.04), f"竞价高开 {gap:.1f}% 且开盘价 {o:.2f} 站上昨日最高 {yh:.2f}，量比 {vr:.1f}：跳空强势"
+    return None
+
+
+def s_auction_flat_volume(rows, ind, live, session):
+    """竞价平开但量能异常放大，且在20日线上方：资金悄悄介入。"""
+    if session != "auction" or not live:
+        return None
+    o, pv = live.get("open") or live.get("price"), live.get("prev")
+    m20 = _g(ind["ma20"])
+    if not (o and pv and m20):
+        return None
+    gap = (o / pv - 1) * 100
+    vr = ind["extra"]["vr"]
+    if abs(gap) < 1 and vr >= 5 and pv >= m20:
+        return 0.5 + min(0.3, (vr - 5) * 0.03), f"竞价平开（{gap:+.1f}%）但竞价量比高达 {vr:.1f}，昨收在20日线上：有资金提前介入"
+    return None
+
+
+def s_close_new_high(rows, ind, live, session):
+    """尾盘创日内新高 + 放量 + 站上均价。"""
+    if session != "close" or not live:
+        return None
+    e = ind["extra"]
+    avg, price = live.get("avg"), live.get("price")
+    if avg and price and e["pos_day"] > 0.95 and 2 <= e["pct"] <= 6 and e["vr"] >= 1.5 and price > avg:
+        return 0.6, f"尾盘收在日内最高附近（日内位置 {e['pos_day']:.2f}），涨 {e['pct']:.1f}%、量比 {e['vr']:.1f}，站上均价 {avg:.2f}"
+    return None
+
+
+def s_close_vwap(rows, ind, live, session):
+    """尾盘回踩均价线企稳：温和上涨、贴着均价线、短均线多头。"""
+    if session != "close" or not live:
+        return None
+    e = ind["extra"]
+    avg, price = live.get("avg"), live.get("price")
+    m5, m10 = _g(ind["ma5"]), _g(ind["ma10"])
+    if avg and price and m5 and m10 and 0 <= e["pct"] <= 3 and avg <= price <= avg * 1.005 and 0.4 <= e["pos_day"] <= 0.8 and m5 > m10:
+        return 0.5, f"尾盘回到均价线 {avg:.2f} 上方企稳，涨幅温和 {e['pct']:.1f}%，MA5>MA10：低风险的尾盘买点"
+    return None
+
+
+SESSION_OF = {"auction_strong": "auction", "auction_gap_hold": "auction", "auction_flat_volume": "auction",
+              "tail_strong": "close", "close_new_high": "close", "close_vwap": "close"}
+
+
 def _m(rows, ind):
     if "models" not in ind:
         from .models import compute
@@ -167,6 +224,10 @@ STRATEGIES = [
     ("accumulate", "主力吸筹", s_accumulate, "主力资金持续净流入但股价没怎么涨，可能在建仓"),
     ("tail_strong", "尾盘强势", s_tail_strong, "14:45 仍站稳均价线且收在高位，次日惯性上冲概率较高"),
     ("auction_strong", "竞价抢筹", s_auction_strong, "集合竞价高开且竞价量大，说明有资金提前抢筹"),
+    ("auction_gap_hold", "竞价站上昨高", s_auction_gap_hold, "早盘策略：高开且开盘就站上昨日最高价，强势跳空"),
+    ("auction_flat_volume", "竞价平开放量", s_auction_flat_volume, "早盘策略：平开但竞价量异常放大，资金提前埋伏"),
+    ("close_new_high", "尾盘创新高", s_close_new_high, "尾盘策略：收盘前创出日内新高并放量，次日惯性较强"),
+    ("close_vwap", "尾盘回踩均价", s_close_vwap, "尾盘策略：温和上涨、尾盘回踩均价线企稳，风险较小"),
     ("reg_lower", "回归通道低吸", s_reg_lower, "上升的对数回归通道里，价格跌到下沿（统计意义上的超跌），等待回归中轨"),
     ("mean_revert", "均值回归", s_mean_revert, "价格偏离20日均值超过2个标准差，且该股属于均值回归型（Hurst<0.5）"),
     ("squeeze_break", "收敛突破", s_squeeze_break, "布林带长期收窄后放量突破上轨，波动率扩张往往伴随趋势行情"),
@@ -181,6 +242,10 @@ FORMULAS = {
     "accumulate": "近5日主力净流入占比均值 > 3% 且 |20日涨幅| < 8% 且 ATR% < 5%",
     "tail_strong": "14:45 时 价格 > 1.005·均价线 且 3% ≤ 涨幅 ≤ 7% 且 日内位置 > 0.8 且 量比 ≥ 1.5",
     "auction_strong": "1% ≤ 竞价高开 ≤ 5% 且 竞价量比 ≥ 3 且 昨收 ≥ MA20",
+    "auction_gap_hold": "0.5% ≤ 竞价高开 ≤ 4% 且 开盘价 > 昨日最高 且 竞价量比 ≥ 2",
+    "auction_flat_volume": "|竞价涨幅| < 1% 且 竞价量比 ≥ 5 且 昨收 ≥ MA20",
+    "close_new_high": "14:45 时 日内位置 > 0.95 且 2% ≤ 涨幅 ≤ 6% 且 量比 ≥ 1.5 且 价格 > 均价",
+    "close_vwap": "14:45 时 0 ≤ 涨幅 ≤ 3% 且 均价 ≤ 价格 ≤ 1.005·均价 且 0.4 ≤ 日内位置 ≤ 0.8 且 MA5 > MA10",
     "reg_lower": "ln P = a + b·t（60日）；年化斜率 > 15% 且 R² > 0.5 且 通道 z < −1.3",
     "mean_revert": "Z20 = (C − MA20)/σ20 < −2 且 Hurst < 0.5 且 半衰期 = −ln2/β < 20 天",
     "squeeze_break": "BBW = (上轨−下轨)/中轨 在前5日内曾处于近120日 ≤20% 分位 且 C ≥ 0.995·上轨 且 量比 ≥ 1.3",
@@ -190,12 +255,16 @@ NAMES = {s[0]: s[1] for s in STRATEGIES}
 DESC = {s[0]: s[3] for s in STRATEGIES}
 
 
-def strategy_weights() -> dict:
-    """来自最近一次学习结果的策略权重（默认 1.0）。"""
+def strategy_weights(session: str | None = None) -> dict:
+    """来自最近一次学习结果的策略权重（默认 1.0）；指定场次且该场次样本≥10时用场次专属权重。"""
     r = db.q1("SELECT strat FROM weights ORDER BY version DESC LIMIT 1")
     w = db.loads(r["strat"], {}) if r else {}
-    return {k: float((w.get(k) or {}).get("weight", 1.0)) if isinstance(w.get(k), dict) else 1.0
-            for k, *_ in STRATEGIES}
+    by = ((w.get("_by_session") or {}).get(session) or {}) if session else {}
+    out = {}
+    for k, *_ in STRATEGIES:
+        x = by.get(k) if isinstance(by.get(k), dict) and (by[k].get("n") or 0) >= 10 else w.get(k)
+        out[k] = float(x.get("weight", 1.0)) if isinstance(x, dict) else 1.0
+    return out
 
 
 def detect(rows, ind, live, session="intraday", sw: dict | None = None) -> list[dict]:

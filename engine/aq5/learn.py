@@ -150,6 +150,20 @@ def iterate(force: bool = False) -> dict:
             win, avg, w = None, None, 1.0
         strat[key] = {"name": name, "n": len(hit), "win": None if win is None else round(win, 3),
                       "avg": None if avg is None else round(avg, 3), "weight": round(w, 3)}
+    # 分场次（竞价 / 尾盘 / 手动）各自统计策略表现：早盘和尾盘的策略分开迭代
+    by_session = {}
+    for sess in ("auction", "close", "manual"):
+        rs = [r for r in rows if r["session"] == sess]
+        d = {}
+        for key, name, *_ in STRATEGIES:
+            hit = [r["ret_3d"] for r in rs if key in (db.loads(r["strategies"], []) or [])]
+            if hit:
+                win = sum(1 for x in hit if x > 0) / len(hit)
+                avg = sum(hit) / len(hit)
+                d[key] = {"n": len(hit), "win": round(win, 3), "avg": round(avg, 3),
+                          "weight": round(max(0.5, min(1.5, 0.5 + win + avg / 5)), 3) if len(hit) >= 10 else 1.0}
+        by_session[sess] = d
+    strat["_by_session"] = by_session
     moved = sorted(KEYS, key=lambda k: -abs(new[k] - old[k]))[:3]
     note = "；".join(f"{k} {old[k]:.3f}→{new[k]:.3f}（IC {ic_mean[k]:+.3f}）" for k in moved)
     with db.tx() as c:

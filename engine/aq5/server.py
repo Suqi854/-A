@@ -11,7 +11,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import ai, analysis, auth, backtest, backup, db, learn, market, notify, picker, publisher, scheduler, sim, vault, sectors, tunnel
+from . import ai, analysis, auth, backtest, backup, db, learn, market, notify, picker, publisher, scheduler, sim, vault, sectors, tunnel, signals, tracking
 from .config import DATA, MOCK, WEB, load_settings, now, public_settings, save_settings
 from .strategies import DESC, NAMES
 
@@ -296,6 +296,10 @@ GET = {"/api/ai/status": api_ai_status, "/api/ai/comment": api_ai_comment, "/api
        "/api/sectors": lambda q: sectors.view(), "/api/sector": api_sector, "/api/ai/models": api_ai_models,
        "/api/ai/notes": api_ai_notes, "/api/ai/run": api_ai_run, "/api/ai/trade": api_ai_trade,
        "/api/remote/status": lambda q: tunnel.status(),
+       "/api/watch/signals": lambda q: signals.latest(),
+       "/api/watch/signal": lambda q: {"latest": signals.latest(q["code"][0]), "phases": signals.phases(q["code"][0])},
+       "/api/track": lambda q: tracking.track(int((q.get("days") or [20])[0])),
+       "/api/t/stats": lambda q: {"stats": signals.t_stats(), "recent": db.q("SELECT * FROM t_signals ORDER BY id DESC LIMIT 60")},
        "/api/diag/sources": lambda q: {"stats": market.SRC_STATS, "blocked": market.host_status(), "snap": market.SNAP_INFO},
        "/api/diag/net": lambda q: {"probes": market.probe(q.get("raw", ["0"])[0] == "1",
                                                      {"1": True, "0": False}.get(q.get("direct", [""])[0]),
@@ -417,6 +421,9 @@ POST = {"/api/picks/run": p_pick_run, "/api/sim/order": p_order, "/api/sim/cance
         "/api/ai/run": lambda b: ai.explain_run(int(b["id"]), force=True),
         "/api/ai/trade": lambda b: ai.trade_review(int(b["id"]), force=bool(b.get("force"))),
         "/api/me/dbsnap": lambda b: backup.db_snapshot(),
+        "/api/watch/run": lambda b: signals.run_watch(b.get("phase")),
+        "/api/watch/plan": lambda b: signals.plan(b["code"]),
+        "/api/ai/pick": lambda b: ai.pick_review(int(b["id"])),
         "/api/remote/enable": lambda b: tunnel.set_enabled(bool(b.get("on"))),
         "/api/remote/download": lambda b: tunnel.download(),
         "/api/remote/restart": lambda b: (tunnel.stop(), tunnel.start())[1],
@@ -630,11 +637,18 @@ def main():
     auth.init()
     ai.init()
     sectors.init()
+    signals.init()
     sectors.refresh_map_async()
     tunnel.cleanup_stale()
     tunnel.watchdog()
     _migrate_secrets()
+    s0 = load_settings()
+    if s0.get("settings_rev", 0) < 2:  # 一次性：模拟资金提到 100 万、AI 自动盘更积极
+        save_settings({"settings_rev": 2, "init_cash": max(float(s0.get("init_cash", 0)), 1000000.0),
+                       "pick": {"ai_max_positions": max(int(s0["pick"].get("ai_max_positions", 0)), 12),
+                                "ai_position_pct": 0.12}})
     sim.ensure_accounts()
+    sim.migrate_capital()
     market.ensure_universe_mock()
     s = load_settings()
     port = int(sys.argv[1]) if len(sys.argv) > 1 else s["port"]

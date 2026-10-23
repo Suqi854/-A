@@ -613,3 +613,30 @@ def notes(kinds=("brief", "review", "run", "holdings"), limit: int = 30) -> list
     for r in rows:
         r["meta"] = db.loads(r["meta"], {})
     return rows
+
+
+# ----------------------------------------------------------------------------- 选股跟踪归因
+def pick_review(pick_id: int, force: bool = False) -> dict:
+    if not force:
+        r = latest("pickreview", str(pick_id))
+        if r:
+            return r
+    from . import tracking
+    it = next((x for x in tracking.track(30)["items"] if x["id"] == pick_id), None)
+    if not it:
+        raise ValueError("找不到这只入选股的跟踪数据")
+    data = {k: it.get(k) for k in ("date", "session", "name", "code", "tier", "rank", "score", "price", "stop", "target1",
+                                    "strategy", "industry", "verdict", "path", "max_up", "max_dn", "alpha", "bench", "first", "why")}
+    data["选出时因子分"] = {LABELS_CN.get(k, k): v for k, v in (it.get("parts") or {}).items()}
+    prompt = ("下面是一只被系统选出的股票之后的真实走势和初步归因。请做一次复盘（Markdown，200~350 字）：\n"
+              f"{json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+              "结构：\n### 结论（符合预期吗）\n### 为什么（结合大盘、行业、量能、买点位置、因子）\n### 对策略的改进建议（具体到因子/门槛/买点）")
+    text, tok = chat([{"role": "user", "content": prompt}], max_tokens=900)
+    _save("pickreview", str(pick_id), text, {"verdict": it["verdict"]}, tok)
+    return latest("pickreview", str(pick_id))
+
+
+try:
+    from .factors import LABELS as LABELS_CN
+except Exception:  # noqa: BLE001
+    LABELS_CN = {}

@@ -24,6 +24,24 @@ def ensure_accounts() -> None:
                       (k, v, init, init, today(), init))
 
 
+def migrate_capital() -> None:
+    """把模拟资金提到设置里的 init_cash（默认 100 万）：没交易过的账户直接重置，有交易的只补资金、保留记录。"""
+    target = float(load_settings()["init_cash"])
+    for a in db.q("SELECT * FROM accounts"):
+        if a["init_cash"] >= target:
+            continue
+        n = (db.q1("SELECT COUNT(*) AS n FROM orders WHERE account=?", (a["id"],)) or {}).get("n", 0)
+        if not n:
+            reset(a["id"])
+            continue
+        delta = target - a["init_cash"]
+        with db.tx() as c:
+            c.execute("UPDATE accounts SET cash=cash+?, init_cash=?, peak=COALESCE(peak,0)+? WHERE id=?",
+                      (delta, target, delta, a["id"]))
+            c.execute("UPDATE equity SET equity=equity+? WHERE account=?", (delta, a["id"]))
+        db.event("trade", f"{ACCOUNTS[a['id']]} 资金已提升到 {target / 1e4:.0f} 万", f"补入 {delta:.0f} 元，原有持仓和记录保留")
+
+
 def fees(side: str, amount: float) -> float:
     f = load_settings()["fees"]
     fee = max(amount * f["commission"], f["min_commission"]) + amount * f["transfer"]
@@ -225,7 +243,7 @@ def tick() -> None:
                     c.execute("UPDATE positions SET stage=1 WHERE account=? AND code=?", (p["account"], p["code"]))
 
 
-TIER_SIZE = {"A": 1.0, "B": 0.6, "C": 0.3}
+TIER_SIZE = {"A": 1.0, "B": 0.7, "C": 0.4}
 
 
 def _traded_today(acct: str) -> int:
@@ -241,8 +259,8 @@ def auto_follow(picks: list[dict], session: str) -> None:
     from .models import kelly
     ensure_accounts()
     cfg = load_settings()["pick"]
-    base = cfg["position_pct"]
-    max_pos = int(cfg.get("ai_max_positions", 8))
+    base = float(cfg.get("ai_position_pct", 0.12))
+    max_pos = int(cfg.get("ai_max_positions", 12))
     v = view("ai", light=True)
     held = {p["code"] for p in v["positions"]}
     pend = {o["code"] for o in db.q("SELECT code FROM orders WHERE account='ai' AND status='pending'")}
@@ -252,7 +270,7 @@ def auto_follow(picks: list[dict], session: str) -> None:
     def buy(p, size_k, why):
         nonlocal bought
         k = kelly(p.get("prob") or 0.5, (p["plan"].get("rr") or 1.5))
-        kf = min(1.0, max(0.3, (k["half"] / 100) / base)) if k["half"] > 0 else 0.3
+        kf = min(1.2, max(0.5, (k["half"] / 100) / base)) if k["half"] > 0 else 0.5
         budget = min(v["equity"] * base * size_k * kf, v["cash"] * 0.98)
         qty = int(budget / (p["price"] * 1.003) / 100) * 100
         if qty < 100:
@@ -271,8 +289,26 @@ def auto_follow(picks: list[dict], session: str) -> None:
         bought += 1
         return True
 
+    # 收盘场先做调仓：持有≥2天且评分转弱（<50）的卖出，腾出仓位
+    if session == "close":
+        from .analysis import analyze
+        for pos in v["positions"]:
+            if pos["avail"] <= 0 or pos.get("hold_days", 0) < 2:
+                continue
+            try:
+                sc = analyze(pos["code"])["score"]
+            except (RuntimeError, ValueError):
+                continue
+            if sc < 50:
+                try:
+                    place("ai", pos["code"], "sell", pos["avail"], reason=f"量化调仓：持仓评分降到 {sc:.0f}（<50），换入更强的股票",
+                          emotion="跟随系统")
+                    v["cash"] += pos["avail"] * (pos["price"] or pos["cost"]) * 0.998
+                    held.discard(pos["code"])
+                except ValueError:
+                    pass
     for p in picks:
-        if p.get("tier", "A") not in ("A", "B") or p["code"] in held or p["code"] in pend:
+        if p["code"] in held or p["code"] in pend:
             continue
         if len(held) >= max_pos:
             break

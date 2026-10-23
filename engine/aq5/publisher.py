@@ -110,6 +110,13 @@ def export(full: bool = True) -> dict:
         _w(d / "learn.json", api_learn({}))
         _w(d / "strategies.json", api_strategies({}))
         try:
+            from . import signals, tracking
+            _w(d / "track.json", tracking.track())
+            _w(d / "t.json", {"stats": signals.t_stats(), "recent": db.q("SELECT * FROM t_signals WHERE account='ai' ORDER BY id DESC LIMIT 60")})
+            files += ["track.json", "t.json"]
+        except Exception as e:  # noqa: BLE001
+            db.event("publish", "导出跟踪数据失败", str(e)[:150], "warn")
+        try:
             from . import sectors
             _w(d / "sectors.json", sectors.view())
             files.append("sectors.json")

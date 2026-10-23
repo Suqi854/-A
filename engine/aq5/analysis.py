@@ -191,7 +191,7 @@ def analyze(code: str) -> dict:
         "板块效应：A股资金常按行业和题材轮动，同一行业的股票往往同涨同跌。选股先看行业强不强，再挑行业里的龙头或补涨股，胜率更高。",
     ]
     return {"code": code, "name": live.get("name"), "quote": {k: live.get(k) for k in (
-                "price", "pct", "chg", "open", "high", "low", "prev", "vol", "amount", "turnover", "vr", "pe", "pb",
+                "price", "pct", "chg", "open", "high", "low", "prev", "vol", "amount", "turnover", "vr", "pe", "pb", "outer", "inner", "avg", "amp",
                 "mcap", "fmcap", "main_net", "main_pct", "up_limit", "dn_limit", "time", "bids", "asks")},
             "score": ev["score"], "fscore": ev["fscore"], "sscore": ev["sscore"], "prob": ev["prob"],
             "prob_src": ev["prob_src"], "rating": lab, "tone": tone, "advice": advice, "factors": factors,

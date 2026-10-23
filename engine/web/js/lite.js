@@ -56,7 +56,8 @@
     const ret = k => (last / c[n - 1 - k] - 1) * 100;
     const r5 = ret(5), r20 = ret(20);
     const q = qt ? { name: qt[1], price: +qt[3], prev: +qt[4], open: +qt[5], chg: +qt[31], pct: +qt[32], high: +qt[33], low: +qt[34], amount: (+qt[37] || 0) * 1e4,
-      turnover: +qt[38], pe: +qt[39], vr: +qt[49] || null, mcap: +qt[45], fmcap: +qt[44], pb: +qt[46], up_limit: +qt[47], dn_limit: +qt[48] } : { price: last };
+      turnover: +qt[38], pe: +qt[39], vr: +qt[49] || null, mcap: +qt[45], fmcap: +qt[44], pb: +qt[46], up_limit: +qt[47], dn_limit: +qt[48],
+      outer: +qt[7], inner: +qt[8], amp: +qt[43], vol: +qt[6] * 100, bids: [9, 11, 13, 15, 17].map(i => [+qt[i], +qt[i + 1]]), asks: [19, 21, 23, 25, 27].map(i => [+qt[i], +qt[i + 1]]) } : { price: last };
     const price = q.price || last;
     const h60 = Math.max(...rows.slice(-60).map(r => r.high));
     const vr = q.vr || (v[n - 1] / (vma5[n - 2] || v[n - 1]));

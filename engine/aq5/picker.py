@@ -87,10 +87,10 @@ def _run(session: str, top_n: int) -> dict:
     cand = pool[:top_n]
     wl = {market.norm_code(c) for c in s["watchlist"]}
     have = {r["code"] for r in cand}
-    cand += [r for r in snap if r["code"] in wl and r["code"] not in have]
+    # 自选股只服务“我的模拟盘”和个人分析，自动选股 / AI 自动盘不参考自选
     STATE.update(stage=f"精评 {len(cand)} 只候选", total=len(cand))
     ver, w = current_weights()
-    sw = strategy_weights()
+    sw = strategy_weights(session)
 
     def load(r):
         try:
