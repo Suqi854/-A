@@ -14,9 +14,10 @@
   const PHASE = { closed: ['休市', 'muted'], before: ['盘前', 'muted'], auction: ['集合竞价', 'amber'], pre: ['竞价结束', 'amber'],
     trading: ['交易中', 'up'], noon: ['午间休市', 'muted'], close_auction: ['收盘竞价', 'amber'], after: ['已收盘', 'muted'] };
   const SESSION = { auction: '竞价选股', close: '尾盘选股', manual: '手动选股' };
+  const TIER = { A: 'A 重点：达到门槛且有可靠买点', B: 'B 关注：接近门槛，小仓位试错', C: 'C 观察：综合分进前10但条件不足' };
   const S = { page: null, ov: null, settings: null, anly: null, kchart: null, ichart: null, acct: 'me', run: null, timers: {}, seen: new Set() };
 
-  const STATIC = !!window.AQ_STATIC;
+  let STATIC = !!window.AQ_STATIC;
   if (STATIC) document.body.classList.add('static');
   const normCode = c => { c = String(c || '').trim().toLowerCase(); return /^\d{6}$/.test(c) ? (/^[65]/.test(c) ? 'sh' : 'sz') + c : c; };
   async function sj(file) {
@@ -32,9 +33,14 @@
       case 'picks/runs': return sj('runs.json');
       case 'picks/candidates': { const r = (await sj('runs.json')).find(x => String(x.id) === q.get('run')); return r ? r.cand_list || [] : []; }
       case 'picks/state': return { running: false };
-      case 'analyze': if (S.priv && S.priv.analysis[code]) return S.priv.analysis[code]; try { return await sj('analysis/' + code + '.json'); } catch { throw new Error('公开版只包含近7天入选股和AI持仓的分析，这只股票不在其中'); }
-      case 'kline': { const x = (S.priv && S.priv.analysis[code]) || await sj('analysis/' + code + '.json'); return { code, rows: x.kline || [] }; }
-      case 'intraday': return sj('intraday/' + code + '.json');
+      case 'analyze': if (S.priv && S.priv.analysis[code]) return S.priv.analysis[code];
+        try { return await sj('analysis/' + code + '.json'); } catch { const k = await Lite.klines(code, 'day', 320); S.liteCache = { code, rows: k.rows }; return Lite.analyze(code, k.rows, k.qt); }
+      case 'kline': { const per = q.get('period') || 'day';
+        if (per !== 'day') { if (/^m/.test(per)) throw new Error('公开版暂不支持分钟K，电脑连上后可用'); const k = await Lite.klines(code, per, 320); return { code, rows: k.rows, source: k.source }; }
+        const x = (S.priv && S.priv.analysis[code]) || await sj('analysis/' + code + '.json').catch(() => null);
+        if (x && x.kline) return { code, rows: x.kline }; if (S.liteCache && S.liteCache.code === code) return { code, rows: S.liteCache.rows, source: '腾讯（浏览器直连）' };
+        const k = await Lite.klines(code, 'day', 320); return { code, rows: k.rows, source: k.source }; }
+      case 'intraday': return sj('intraday/' + code + '.json').catch(() => Lite.intraday(code));
       case 'sim': return (q.get('acct') === 'me' && S.priv) ? S.priv.me : sj('ai.json');
       case 'learn': return sj('learn.json');
       case 'events': { const e = await sj('events.json'); return S.priv ? [...S.priv.events, ...e].sort((x, y) => y.time < x.time ? -1 : 1) : e; }
@@ -43,12 +49,35 @@
       case 'sectors': return sj('sectors.json');
       case 'sector': throw new Error('公开版只有板块排行，成分股请在电脑端或局域网完整版查看');
       case 'quotes': return {};
-      case 'search': { const v = (q.get('q') || '').toLowerCase(); const idx = [...(S.priv ? Object.values(S.priv.analysis).map(x => ({ code: x.code, name: x.name })) : []), ...await sj('analysis/index.json').catch(() => [])];
+      case 'search': { const v = (q.get('q') || '').toLowerCase(); try { const r = await Lite.search(v); if (r.length) return r; } catch { }
+        const idx = [...(S.priv ? Object.values(S.priv.analysis).map(x => ({ code: x.code, name: x.name })) : []), ...await sj('analysis/index.json').catch(() => [])];
         return idx.filter(x => x.code.includes(v) || (x.name || '').toLowerCase().includes(v)).slice(0, 12); }
       default: throw new Error('公开只读版不支持此功能，请在电脑端使用');
     }
   }
+  async function remoteApi(path, body) {
+    const opt = { headers: { Authorization: 'Bearer ' + S.remote.token } };
+    if (body !== undefined) { opt.method = 'POST'; opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
+    let r;
+    try { r = await fetch(S.remote.url + '/api/' + path, opt); }
+    catch (e) { S.remote = null; STATIC = true; document.body.classList.add('static'); setRemoteBadge(); toast('和电脑的连接断开了，已切回只读版', 1); return staticApi(path, body); }
+    const j = await r.json().catch(() => ({ error: '电脑引擎没有响应' }));
+    if (!r.ok || (j && j.error)) throw new Error(j.error || r.statusText);
+    return j;
+  }
+  function setRemoteBadge() { const b = $('#unlockBtn'); if (!b) return; b.textContent = S.remote ? '已连电脑' : S.priv ? '已解锁' : '解锁个人'; b.classList.toggle('pri', !S.remote); }
+  async function connectRemote() {
+    const r = S.priv && S.priv.remote; if (!r || !r.url) return false;
+    try {
+      const ctl = new AbortController(); setTimeout(() => ctl.abort(), 7000);
+      const m = await fetch(r.url + '/api/auth/me', { headers: { Authorization: 'Bearer ' + r.token }, signal: ctl.signal }).then(x => x.json());
+      if (!m.authorized) return false;
+      S.remote = { url: r.url, token: r.token }; STATIC = false; document.body.classList.remove('static'); document.body.classList.add('remote');
+      setRemoteBadge(); restartPoll(); initAssistant(); toast('已连上你的电脑：现在是完整版，可以下单、改设置、用 AI'); return true;
+    } catch { return false; }
+  }
   async function api(path, body) {
+    if (S.remote) return remoteApi(path, body);
     if (STATIC) return staticApi(path, body);
     const opt = body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
     const r = await fetch('/api/' + path, opt);
@@ -297,7 +326,7 @@
     const lr = ov.last_run, mp = $('#monPick'); mp.className = '';
     if (!lr) mp.innerHTML = `<div class="empty">还没有选股记录<br><br>交易日 09:26 / 14:45 自动运行<br><br><button class="btn pri" onclick="location.hash='pick'">去手动选股</button></div>`;
     else mp.innerHTML = `<div class="row"><span class="chip a">${SESSION[lr.session] || lr.session}</span><span class="mono muted">${lr.date} ${lr.finished || ''}</span><span class="sp"></span><span class="mono muted">扫描${lr.scanned}·精评${lr.candidates}</span></div>
-        ${lr.items.length ? `<table class="t" style="margin-top:6px"><tr><th>股票</th><th>评分</th><th>买入价</th><th>止损</th><th>目标</th></tr>${lr.items.map(p => `<tr class="click" data-c="${p.code}"><td>${nameCell(p.name, p.code)}</td><td class="amber">${num(p.score, 1)}</td><td>${num(p.price)}</td><td class="down">${num(p.stop)}</td><td class="up">${num(p.target1)}</td></tr>`).join('')}</table>`
+        ${lr.items.length ? `<table class="t" style="margin-top:6px"><tr><th>股票</th><th>评分</th><th>买入价</th><th>止损</th><th>目标</th></tr>${lr.items.map(p => `<tr class="click" data-c="${p.code}"><td>${p.tier ? `<span class="tier t${p.tier}">${p.tier}</span>` : ''}${nameCell(p.name, p.code)}</td><td class="amber">${num(p.score, 1)}</td><td>${num(p.price)}</td><td class="down">${num(p.stop)}</td><td class="up">${num(p.target1)}</td></tr>`).join('')}</table>`
         : `<div class="nopick" style="margin-top:8px"><b>宁缺毋滥</b><span class="hint">本次没有达到门槛的机会，今天先观望</span></div>`}`;
     mp.querySelectorAll('[data-c]').forEach(tr => tr.onclick = () => go('anly', tr.dataset.c));
     // 账户
@@ -329,7 +358,7 @@
     const times = st ? st.pick.times : ['09:26', '14:45'];
     $('#p-pick').innerHTML = `<div class="grid">
       ${panel('AUTO PICK <small>自动选股 · 宁缺毋滥</small>', `<div class="row"><span class="chip a">竞价选股 ${times[0]}</span><span class="chip a">尾盘选股 ${times[1]}</span>
-          <span class="hint">交易日自动运行：全主板扫描 → 多因子 + 8 种策略精评 → 门槛 ${st ? st.pick.min_score : 72} 分（随大盘状态自动收紧）→ 最多 ${st ? st.pick.max_picks : 5} 只</span>
+          <span class="hint">交易日自动运行：全主板扫描 → 10 维因子 + 12 种策略（含数学模型）精评 → 取综合分前 ${st ? st.pick.top_n || 10 : 10} 只 → 按门槛 ${st ? st.pick.min_score : 72} 分分为 A 重点 / B 关注 / C 观察 → AI自动盘按级别买入</span>
           <span class="sp"></span><button class="btn pri rw" id="runPick">▶ 立即选股</button></div><div id="pickProg"></div>`, { cls: 'c12' })}
       ${panel('RUNS <small>历史</small>', '<div id="runList" class="scroll" style="max-height:70vh"></div>', { cls: 'c3', np: true })}
       <div class="c9" id="runDetail"><div class="loading">载入</div></div>
@@ -352,9 +381,9 @@
     const m = r.market || {}, br = m.breadth || {}, rg = m.regime || {};
     const cards = r.items.map(p => {
       const pl = { stop: p.stop, target1: p.target1, target2: p.target2 };
-      return `<div class="pick"><div class="hd"><span class="nm">${esc(p.name)}</span><span class="cd">${short(p.code)}</span>${p.industry ? `<span class="chip" style="margin-left:auto">${esc(p.industry)}</span>` : ''}</div>
+      return `<div class="pick"><div class="hd">${p.tier ? `<span class="tier t${p.tier}" title="${TIER[p.tier]}">${p.tier}</span><span class="muted mono" style="margin-right:6px">#${p.rank}</span>` : ''}<span class="nm">${esc(p.name)}</span><span class="cd">${short(p.code)}</span></div>
         <div class="score"><b>${num(p.score, 1)}</b><small>综合评分 · 估计胜率 ${num(p.prob * 100, 0)}%</small></div>
-        <div class="row" style="margin-top:6px">${p.strategies.slice(0, 3).map(s => `<span class="chip a">${esc(s.name)}</span>`).join('')}</div>
+        <div class="row" style="margin-top:6px">${p.industry ? `<span class="chip c">${esc(p.industry)}</span>` : ''}${p.strategies.slice(0, 3).map(s => `<span class="chip a">${esc(s.name)}</span>`).join('')}</div>
         <div class="plan"><div><div class="l">选出价</div><div class="v">${num(p.price)}</div></div>
           <div><div class="l">止损</div><div class="v down">${num(pl.stop)}</div><div class="p down">${pct((pl.stop / p.price - 1) * 100, 1)}</div></div>
           <div><div class="l">止盈①</div><div class="v up">${num(pl.target1)}</div><div class="p up">${pct((pl.target1 / p.price - 1) * 100, 1)}</div></div>
@@ -367,6 +396,7 @@
     $('#runDetail').innerHTML = panel(`RESULT <small>${r.date} ${SESSION[r.session] || r.session} · ${r.started || ''}</small>`,
       `<div class="row hint mono" style="margin-bottom:10px"><span>扫描 <b class="amber">${r.scanned}</b></span><span>精评 <b class="amber">${r.candidates}</b></span><span>门槛 <b class="amber">${num(m.min_score, 0)}</b></span>
         <span>大盘 <b>${esc(rg.state || '--')}</b></span><span>上涨 <b class="up">${br.up ?? '--'}</b> / 下跌 <b class="down">${br.down ?? '--'}</b></span><span>涨停 <b class="up">${br.limit_up ?? '--'}</b></span></div>
+       ${r.items.length && r.items[0].tier ? `<div class="row hint" style="margin-bottom:8px"><span class="tier tA">A</span>重点 ${r.items.filter(p => p.tier === 'A').length} 只<span class="tier tB" style="margin-left:10px">B</span>关注 ${r.items.filter(p => p.tier === 'B').length} 只<span class="tier tC" style="margin-left:10px">C</span>观察 ${r.items.filter(p => p.tier === 'C').length} 只 · 每次都取综合分前 10，按门槛分级</div>` : ''}
        ${r.items.length ? `<div class="picks">${cards}</div>` : `<div class="nopick"><b>宁缺毋滥 · 本次无机会</b><span class="hint">扫描 ${r.scanned} 只、精评 ${r.candidates} 只，没有股票同时满足：综合分≥${num(m.min_score, 0)}、至少一个策略信号、盈亏比≥1.4、不过热。<br>空仓也是一种仓位。</span></div>`}`, {}) +
       `<div style="height:10px"></div>` + panel('AI <small>AI 解读这次选股</small>', '<div id="runAi"><div class="loading">载入</div></div>', { right: '<button class="btn sm rw" id="runAiGo">生成解读</button>' }) +
       `<div style="height:10px"></div>` + panel('CANDIDATES <small>候选前30（参考，不是推荐）</small>', '<div class="scroll" style="max-height:420px"><table class="t" id="candT"><tr><td class="loading">载入</td></tr></table></div>', { np: true });
@@ -412,10 +442,13 @@
           <div><span>量比</span>${num(q.vr)}</div><div><span>换手</span>${num(q.turnover)}%</div><div><span>成交额</span>${money(q.amount)}</div><div><span>主力净额</span><b class="${cls(q.main_net)}">${money(q.main_net)}</b></div>
           <div><span>市盈</span>${num(q.pe, 1)}</div><div><span>市净</span>${num(q.pb)}</div><div><span>总市值</span>${num(q.mcap, 0)}亿</div><div><span>流通</span>${num(q.fmcap, 0)}亿</div>
           <div><span>涨停</span>${num(q.up_limit)}</div><div><span>跌停</span>${num(q.dn_limit)}</div><div><span>大盘</span>${esc(a.regime.state)}</div><div class="${a.sector ? 'click' : ''}" id="aSec"><span>行业</span>${a.sector ? `${esc(a.sector.name)} <b style="color:${secCol(a.sector.score)}">${num(a.sector.score, 0)}</b><small class="muted"> ${a.sector.rank}/${a.sector.total}</small>` : '--'}</div></div></div>
-      <div class="panel c8"><div class="chartbar"><div class="seg" id="chMode"><button data-m="k" class="on">日K</button><button data-m="i">分时</button></div>
-          <div class="seg" id="chSub"><button data-s="macd" class="on">MACD</button><button data-s="rsi">RSI</button></div>
-          <label class="hint"><input type="checkbox" id="chPlan" checked> 叠加交易计划</label><span class="sp"></span><span class="hint hide-m">拖动平移 · 滚轮/双指缩放 · ←→键</span></div>
-        <div class="legend" id="chLg" style="padding:4px 10px;min-height:22px"></div><div class="chartbox"><canvas id="chK"></canvas></div></div>
+      <div class="panel c8"><div class="chartbar"><div class="seg" id="chPer">${[['i', '分时'], ['day', '日K'], ['week', '周K'], ['month', '月K'], ['m60', '60分'], ['m30', '30分'], ['m15', '15分'], ['m5', '5分']].map(([k, t]) => `<button data-p="${k}" class="${k === 'day' ? 'on' : ''}">${t}</button>`).join('')}</div>
+          <div class="seg" id="chMain"><button data-m="ma" class="on">均线</button><button data-m="boll">BOLL</button></div>
+          <div class="seg" id="chSub">${['macd', 'kdj', 'rsi', 'obv', 'wr', 'cci', 'bias'].map(k => `<button data-s="${k}" class="${k === 'macd' ? 'on' : ''}">${k.toUpperCase()}</button>`).join('')}</div></div>
+        <div class="chartbar" style="border-top:0;padding-top:0"><span class="hint">均线</span>${[5, 10, 20, 30, 60, 120, 250].map(k => `<label class="hint"><input type="checkbox" data-ma="${k}"> ${k}</label>`).join('')}
+          <span class="sp"></span><label class="hint"><input type="checkbox" id="chPlan" checked> 交易计划</label><label class="hint"><input type="checkbox" id="chReg"> 回归通道</label><label class="hint"><input type="checkbox" id="chChips" checked> 筹码</label></div>
+        <div class="legend" id="chLg" style="padding:4px 10px;min-height:22px"></div><div class="chartbox"><canvas id="chK"></canvas></div>
+        <div class="hint mono" id="chSrc" style="padding:3px 10px 6px"></div></div>
       <div class="c4" style="display:flex;flex-direction:column;gap:10px">
         ${panel('VERDICT <small>综合结论</small>', `<div class="big-score">${ring(a.score, tone)}<div><div class="rating" style="color:${tone}">${esc(a.rating)}</div>
           <div class="hint mono" style="margin-top:6px">因子 ${num(a.fscore, 0)} · 策略 ${num(a.sscore, 0)}</div><div class="hint mono">${a.prob_src === 'model' ? '模型' : '经验'}估计3日上涨概率 <b class="amber">${num(a.prob * 100, 0)}%</b></div></div></div>
@@ -428,37 +461,57 @@
           <div class="row hint mono" style="margin-top:4px"><span>支撑 <b class="down">${pl.supports.map(x => num(x)).join(' / ') || '--'}</b></span><span>压力 <b class="up">${pl.resistances.map(x => num(x)).join(' / ') || '--'}</b></span></div>
           <ul class="why">${pl.rules.map(x => `<li>${esc(x)}</li>`).join('')}</ul>`)}
       </div>
-      ${panel('SMART MONEY <small>主力行为</small>', `<div class="mf"><div class="row"><span class="lab ${mfc}">${esc(mf.label)}</span><span class="sp"></span><span class="mono hint">5日 <b class="${cls(mf.main5_yi)}">${sgn(mf.main5_yi)}亿</b> · 10日 <b class="${cls(mf.main10_yi)}">${sgn(mf.main10_yi)}亿</b></span></div>
-          <p style="margin:6px 0">${esc(mf.desc)}</p><ul class="why">${mf.evidence.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>
-          <div class="flowbars">${a.flows.map(f => `<div title="${f.date} ${money(f.main)}"><i style="${f.main >= 0 ? `bottom:50%;height:${(f.main / maxF * 50).toFixed(1)}%;background:var(--up)` : `top:50%;height:${(-f.main / maxF * 50).toFixed(1)}%;background:var(--down)`}"></i></div>`).join('')}</div>
-          <div class="hint mono" style="display:flex;justify-content:space-between"><span>${a.flows[0] ? a.flows[0].date.slice(5) : ''}</span><span>近20日主力净额</span><span>${a.flows.length ? a.flows[a.flows.length - 1].date.slice(5) : ''}</span></div>`, { cls: 'c4' })}
-      ${panel('FACTORS <small>多维度因子</small>', a.factors.map(f => `<div class="fbar" title="${esc(f.explain)}"><span>${f.label}</span><div class="bar"><em></em><i style="width:${f.score}%;background:${f.score >= 60 ? 'var(--up)' : f.score < 40 ? 'var(--down)' : 'var(--amber)'}"></i></div><span class="mono">${num(f.score, 0)}</span></div>`).join('') +
-        `<div class="hint" style="margin-top:6px">每根条 = 0~100 分，中线 = 50。权重 v${a.weights_ver}，会随实战结果自动迭代（见「迭代」页）。悬停查看含义。</div>`, { cls: 'c4' })}
-      ${panel('SIGNALS <small>策略信号</small>', (a.signals.length ? a.signals.map(s => `<div style="margin-bottom:8px"><div class="row"><span class="chip a">${esc(s.name)}</span><span class="mono hint">置信度 ${num(s.conf * 100, 0)}% · 权重 ${num(s.weight, 2)}</span></div><div style="margin-top:3px">${esc(s.why)}</div><div class="hint">${esc(a.strategy_desc[s.id])}</div></div>`).join('')
+      ${panel('SMART MONEY <small>主力行为 · ' + (mf.has_flow ? '资金流+量价' : '仅量价') + '</small>', `<div class="mf"><div class="row"><span class="lab ${mfc}">${esc(mf.label)}</span><span class="sp"></span>${mf.main5_yi != null ? `<span class="mono hint">5日 <b class="${cls(mf.main5_yi)}">${sgn(mf.main5_yi)}亿</b> · 10日 <b class="${cls(mf.main10_yi)}">${sgn(mf.main10_yi)}亿</b> · 20日 <b class="${cls(mf.main20_yi)}">${sgn(mf.main20_yi)}亿</b></span>` : ''}</div>
+          <p style="margin:6px 0">${esc(mf.desc)}</p>
+          ${mf.phases ? `<div class="phases">${mf.phases.map(ph => `<span class="${ph === mf.phase ? 'on' : ''}">${ph}</span>`).join('<i>›</i>')}</div>` : ''}
+          ${(mf.tags || []).map(t => `<div class="fbar" title="${esc(t.why)}"><span style="width:auto">${esc(t.label)}</span><div class="bar"><i style="width:${t.score}%;background:${t.tone === 'up' ? 'var(--up)' : t.tone === 'down' ? 'var(--down)' : 'var(--amber)'}"></i></div><span class="mono">${t.score}</span></div><div class="hint" style="margin:-3px 0 4px">${esc(t.why)}</div>`).join('')}
+          <ul class="why">${mf.evidence.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>
+          ${a.flows.length ? `<div class="flowbars">${a.flows.map(f => `<div title="${f.date} ${money(f.main)}"><i style="${f.main >= 0 ? `bottom:50%;height:${(f.main / maxF * 50).toFixed(1)}%;background:var(--up)` : `top:50%;height:${(-f.main / maxF * 50).toFixed(1)}%;background:var(--down)`}"></i></div>`).join('')}</div>
+          <div class="hint mono" style="display:flex;justify-content:space-between"><span>${a.flows[0].date.slice(5)}</span><span>近20日主力净额</span><span>${a.flows[a.flows.length - 1].date.slice(5)}</span></div>` : ''}`, { cls: 'c4' })}
+      ${panel('FACTORS <small>多维度因子</small>', a.factors.map(f => `<div class="fbar" title="${esc(f.explain + '\n公式：' + (f.formula || ''))}"><span>${f.label}</span><div class="bar"><em></em><i style="width:${f.score}%;background:${f.score >= 60 ? 'var(--up)' : f.score < 40 ? 'var(--down)' : 'var(--amber)'}"></i></div><span class="mono">${num(f.score, 0)}</span></div>`).join('') +
+        `<div class="hint" style="margin-top:6px">每根条 = 0~100 分，中线 = 50。权重 v${a.weights_ver}，会随实战结果自动迭代（见「迭代」页）。</div>
+          <details class="fx"><summary>查看全部公式</summary>${a.factors.map(f => `<div><b>${f.label}</b>（权重 ${num(f.weight * 100, 1)}%）：<code>${esc(f.formula || '')}</code></div>`).join('')}<div><b>综合</b>：<code>${esc(a.composite || '')}</code></div></details>`, { cls: 'c4' })}
+      ${panel('SIGNALS <small>策略信号</small>', (a.signals.length ? a.signals.map(s => `<div style="margin-bottom:8px"><div class="row"><span class="chip a">${esc(s.name)}</span><span class="mono hint">置信度 ${num(s.conf * 100, 0)}% · 权重 ${num(s.weight, 2)}</span></div><div style="margin-top:3px">${esc(s.why)}</div><div class="hint">${esc(a.strategy_desc[s.id])}</div>${a.strategy_formula && a.strategy_formula[s.id] ? `<code class="fxl">${esc(a.strategy_formula[s.id])}</code>` : ''}</div>`).join('')
         : '<div class="empty" style="padding:12px">当前没有触发任何买点策略</div>') +
         `<div class="sep"></div><div class="hint">看多理由</div><ul class="why">${a.reasons.map(x => `<li>${esc(x)}</li>`).join('') || '<li>暂无明显优势</li>'}</ul>
          <div class="hint">风险提示</div><ul class="why risk">${a.risks.map(x => `<li>${esc(x)}</li>`).join('') || '<li>暂无明显风险项</li>'}</ul>`, { cls: 'c4' })}
+      ${a.models ? panel('MODELS <small>数学模型 · 回归 / 均值回归 / Hurst / 波动率 / 凯利</small>', `<ul class="why">${a.models.summary.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
+          <div class="stat4" style="margin-top:8px"><div><div class="l">期望值 EV</div><div class="v ${cls(a.models.kelly.ev)}">${sgn(a.models.kelly.ev)}R</div></div><div><div class="l">凯利仓位</div><div class="v">${num(a.models.kelly.full, 0)}%</div></div>
+            <div><div class="l">半凯利（建议）</div><div class="v amber">${num(a.models.kelly.half, 0)}%</div></div><div><div class="l">估计胜率</div><div class="v">${num(a.prob * 100, 0)}%</div></div></div>
+          ${a.chips ? `<div class="sep"></div><div class="row hint mono"><span>筹码：获利盘 <b class="amber">${a.chips.profit_ratio}%</b></span><span>平均成本 <b>${a.chips.avg_cost}</b></span><span>筹码峰 ${a.chips.peak}</span><span>90%集中度 ${a.chips.c90}%（${a.chips.range90.join('~')}）</span>${a.chips.estimated ? '<span>（流通股本未知，换手按估算）</span>' : ''}</div>` : ''}
+          <details class="fx"><summary>查看模型公式</summary>${Object.entries(a.models.formulas).map(([k, v]) => `<div><code>${esc(v)}</code></div>`).join('')}</details>`, { cls: 'c8' }) : ''}
       ${STATIC ? (S.priv && S.priv.ai && S.priv.ai.comments[a.code] ? panel('AI <small>AI 点评 · 电脑端生成</small>', md(S.priv.ai.comments[a.code].content) + `<div class="hint mono">${esc(S.priv.ai.comments[a.code].created)}</div>`, { cls: 'c12' }) : '') : panel('AI <small>AI 点评 · ' + esc((S.aiStatus && S.aiStatus.cfg.model) || '未配置') + '</small>', '<div id="aiCmt" class="hint">载入中…</div>', { cls: 'c8', right: '<button class="btn sm" id="aiCmtGo">生成 / 刷新</button>' })}
       ${STATIC ? '' : panel('NEWS <small>公告与新闻</small>', '<div id="aiNews" class="scroll" style="max-height:330px"><div class="loading">抓取中</div></div>', { cls: 'c4', np: true })}
       ${STATIC ? '' : panel('ASK <small>问 AI 关于这只股票</small>', `<div class="row"><input class="in" id="aiQ" style="flex:1" placeholder="例如：现在缩量回调，适合低吸吗？止损为什么设在这里？"><button class="btn pri" id="aiQGo">提问</button></div><div id="aiA" style="margin-top:8px"></div>`, { cls: 'c12' })}
       ${panel('LEARN <small>学习要点 · 这只股票教会你什么</small>', a.lessons.map(x => `<div class="lesson">${esc(x)}</div>`).join(''), { cls: 'c12' })}
     </div>`;
     if (!STATIC) loadAiStock(a);
-    const cv = $('#chK');
-    S.kchart = new Charts.KChart(cv, $('#chLg'));
-    const k = await api(`kline?code=${a.code}&n=400`);
-    S.kchart.setData(k.rows);
-    const ov = () => $('#chPlan').checked ? [{ zone: pl.buy_zone, fill: 'rgba(255,176,0,.07)' }, { price: pl.stop, color: '#17d17a', label: '止损' },
+    const st = { p: 'day', main: 'ma', sub: 'macd' };
+    let maSel = (lsGet('aq5_ma') || '5,10,20,60').split(',').map(Number);
+    $$('#p-anly [data-ma]').forEach(c => { c.checked = maSel.includes(+c.dataset.ma); c.onchange = () => { maSel = $$('#p-anly [data-ma]').filter(x => x.checked).map(x => +x.dataset.ma); lsSet('aq5_ma', maSel.join(',')); if (S.kchart) S.kchart.setMA(maSel); }; });
+    const ov = () => $('#chPlan').checked && st.p === 'day' ? [{ zone: pl.buy_zone, fill: 'rgba(255,176,0,.07)' }, { price: pl.stop, color: '#17d17a', label: '止损' },
       { price: pl.target1, color: '#ff4d4f', label: '止盈①' }, { price: pl.target2, color: '#ff8a8a', label: '止盈②' }] : [];
-    S.kchart.setOverlays(ov());
-    $('#chPlan').onchange = () => S.kchart.setOverlays(ov());
-    $$('#chSub button').forEach(b => b.onclick = () => { $$('#chSub button').forEach(x => x.classList.toggle('on', x === b)); S.kchart.setSub(b.dataset.s); });
-    $$('#chMode button').forEach(b => b.onclick = async () => {
-      $$('#chMode button').forEach(x => x.classList.toggle('on', x === b));
+    const regLines = () => { const m = a.models; if (!$('#chReg').checked || st.p !== 'day' || !m || !m.reg_line) return [];
+      const k = Math.exp(2 * m.reg.sd); return [{ values: m.reg_line, color: '#e6edf3', dash: [4, 3] }, { values: m.reg_line.map(x => x * k), color: '#ff8a8a', dash: [2, 3] }, { values: m.reg_line.map(x => x / k), color: '#7cfc7c', dash: [2, 3] }]; };
+    let kDay = null;
+    const loadChart = async () => {
       const box = $('.chartbox'); box.innerHTML = '<canvas id="chK"></canvas>';
-      if (b.dataset.m === 'i') { S.ichart = new Charts.Intraday($('#chK'), $('#chLg')); S.ichart.setData(await api('intraday?code=' + a.code)); S.kchart = null; }
-      else { S.kchart = new Charts.KChart($('#chK'), $('#chLg')); S.kchart.setData(k.rows); S.kchart.setOverlays(ov()); S.ichart = null; }
-    });
+      try {
+        if (st.p === 'i') { S.kchart = null; S.ichart = new Charts.Intraday($('#chK'), $('#chLg')); const d = await api('intraday?code=' + a.code); S.ichart.setData(d); $('#chSrc').textContent = d.source ? '数据源：' + d.source : ''; return; }
+        S.ichart = null; S.kchart = new Charts.KChart($('#chK'), $('#chLg')); S.kchart.maN = maSel; S.kchart.main = st.main; S.kchart.sub = st.sub;
+        const k = st.p === 'day' ? (kDay = kDay || await api(`kline?code=${a.code}&n=400`)) : await api(`kline?code=${a.code}&n=${st.p === 'month' ? 200 : 320}&period=${st.p}`);
+        S.kchart.chips = st.p === 'day' ? a.chips : null; S.kchart.showChips = $('#chChips').checked;
+        S.kchart.setData(k.rows); S.kchart.setOverlays(ov()); S.kchart.setLines(regLines());
+        $('#chSrc').textContent = '数据源：' + (k.source || '本地缓存（腾讯/同花顺/东财/新浪 自动切换）') + (a.cross_check && a.cross_check.note ? ' · 校验：' + a.cross_check.note : '');
+      } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+    };
+    await loadChart();
+    $('#chPlan').onchange = () => S.kchart && S.kchart.setOverlays(ov());
+    $('#chReg').onchange = () => S.kchart && S.kchart.setLines(regLines());
+    $('#chChips').onchange = () => { if (S.kchart) { S.kchart.showChips = $('#chChips').checked; S.kchart.draw(); } };
+    $$('#chPer button').forEach(b => b.onclick = () => { st.p = b.dataset.p; $$('#chPer button').forEach(x => x.classList.toggle('on', x === b)); loadChart(); });
+    $$('#chMain button').forEach(b => b.onclick = () => { st.main = b.dataset.m; $$('#chMain button').forEach(x => x.classList.toggle('on', x === b)); if (S.kchart) S.kchart.setMain(st.main); });
+    $$('#chSub button').forEach(b => b.onclick = () => { st.sub = b.dataset.s; $$('#chSub button').forEach(x => x.classList.toggle('on', x === b)); if (S.kchart) S.kchart.setSub(st.sub); });
     $('#aBuy').onclick = () => openOrder({ code: a.code, name: a.name, price: q.price, stop: pl.stop, target1: pl.target1, target2: pl.target2 });
     $('#aSell').onclick = () => openOrder({ code: a.code, name: a.name, price: q.price, side: 'sell' });
     $('#aBt').onclick = () => { S.btCode = a.code; go('bt'); };
@@ -674,7 +727,11 @@
         `<table class="t" style="margin-top:6px"><tr><th>因子</th><th>最近IC</th><th>IR</th></tr>${Object.keys(L.weights).map(k => `<tr><td>${L.labels[k]}</td><td class="${cls(ic[k])}">${num(ic[k], 3)}</td><td>${num(last ? (last.ic.ir || {})[k] : null, 2)}</td></tr>`).join('')}</table>`, { cls: 'c4' })}
       ${panel('STRATEGIES <small>策略实战表现（3日）</small>', `<table class="t"><tr><th class="l">策略</th><th>样本</th><th>胜率</th><th>均收益</th><th>权重</th></tr>${L.strategies.map(s => { const x = strat[s.id] || {};
           return `<tr title="${esc(s.desc)}"><td class="l">${esc(s.name)}</td><td>${x.n ?? 0}</td><td>${x.win == null ? '--' : num(x.win * 100, 0) + '%'}</td><td class="${cls(x.avg)}">${x.avg == null ? '--' : pct(x.avg)}</td><td class="amber">${num(x.weight ?? 1, 2)}</td></tr>`; }).join('')}</table>
-          <div class="hint" style="margin-top:6px">某策略样本≥10后才调整权重：胜率高、收益好→权重升（最高1.5），反之降（最低0.5）。</div>`, { cls: 'c4' })}
+          <div class="hint" style="margin-top:6px">某策略样本≥10后才调整权重：胜率高、收益好→权重升（最高1.5），反之降（最低0.5）。</div>
+          <details class="fx"><summary>查看每个策略的数学条件</summary>${L.strategies.map(s => `<div><b>${esc(s.name)}</b>：<code>${esc(s.formula || '')}</code></div>`).join('')}
+          <div><b>权重迭代</b>：<code>目标权重ᵢ = 默认权重ᵢ·clip(1 + 4·ICᵢ, 0.3, 2)；新权重 = 0.7·旧 + 0.3·目标，限制 2%~30% 后归一化；ICᵢ = Spearman(因子ᵢ, 3日收益)</code></div>
+          <div><b>策略权重</b>：<code>w = clip(0.5 + 胜率 + 平均收益/5, 0.5, 1.5)</code></div>
+          <div><b>概率模型</b>：<code>P(3日上涨) = σ(β₀ + Σβᵢ·因子ᵢ + Σγⱼ·策略ⱼ)，按时间切分检验 AUC ≥ 0.55 才启用</code></div></details>`, { cls: 'c4' })}
       ${panel('SCORECARD <small>选股成绩单</small>', `<dl class="kv"><dt>次日胜率</dt><dd>${st(pk.d1)}</dd><dt>3日胜率</dt><dd>${st(pk.d3)}</dd><dt>5日胜率</dt><dd>${st(pk.d5)}</dd></dl><div class="sep"></div>
           <dl class="kv">${Object.entries(pk.outcomes).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl><div class="sep"></div>
           <div class="hint">概率模型</div>${md ? `<dl class="kv"><dt>训练时间</dt><dd>${L.model.created}</dd><dt>样本</dt><dd>${md.n}</dd><dt>基准成功率</dt><dd>${num(md.base_rate * 100, 1)}%</dd>
@@ -726,11 +783,45 @@
   }
 
   // ================================================================== F8 设置
+  async function loadRemote() {
+    const box = $('#rmBox'); if (!box) return;
+    let st; try { st = await api('remote/status'); } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    box.className = '';
+    box.innerHTML = `<p>开启后，电脑会通过 Cloudflare 免费隧道得到一个 https 地址。手机在 GitHub 网页上「解锁个人」后会<b class="amber">自动连上电脑</b>，变成完整版：下单、改设置、AI、任意个股完整分析都能用，不在同一个 WiFi 也可以。</p>
+      ${!st.installed ? `<div class="row"><span class="hint">需要先下载 cloudflared（Cloudflare 官方工具，约 60MB，来自 github.com/cloudflare/cloudflared，存到 data\\tools）</span><span class="sp"></span>
+        <button class="btn pri" id="rmDl" ${st.downloading ? 'disabled' : ''}>${st.downloading ? '下载中 ' + st.progress + '%' : '下载 cloudflared'}</button></div>` : ''}
+      <div class="row" style="margin-top:6px"><label class="hint"><input type="checkbox" id="rmOn" ${st.enabled ? 'checked' : ''} ${st.installed ? '' : 'disabled'}> 开启手机远程</label><span class="sp"></span>
+        ${st.installed ? '<button class="btn sm" id="rmRe">重启隧道</button>' : ''}</div>
+      <dl class="kv" style="margin-top:6px"><dt>状态</dt><dd>${st.running ? (st.url ? '<b class="down">已连通</b>' : '<span class="amber">连接中…</span>') : '<span class="muted">未运行</span>'}</dd>
+        <dt>远程地址</dt><dd class="mono" style="word-break:break-all">${st.url ? `<a href="${esc(st.url)}" target="_blank" rel="noopener">${esc(st.url)}</a>` : '--'}</dd>
+        ${st.since ? `<dt>建立时间</dt><dd>${esc(st.since)}</dd>` : ''}</dl>
+      ${st.error ? `<p class="up">${esc(st.error)}</p>` : ''}
+      <p class="hint">安全：经过隧道的访问一律要登录或带手机专用 Token；改密钥、改密码、恢复备份只能在电脑本机做。地址每次重启会变，新地址会自动加密发布给手机。也可以直接用手机浏览器打开上面的地址并登录。</p>`;
+    const dl = $('#rmDl'); if (dl) dl.onclick = async () => { await api('remote/download', {}); toast('开始下载 cloudflared'); pollRm(); };
+    const on = $('#rmOn'); if (on) on.onchange = async () => { await api('remote/enable', { on: on.checked }); toast(on.checked ? '已开启，正在建立隧道（约10秒）' : '已关闭手机远程'); pollRm(); };
+    const re = $('#rmRe'); if (re) re.onclick = async () => { await api('remote/restart', {}); toast('隧道重启中'); pollRm(); };
+    if (st.downloading || (st.enabled && st.running && !st.url)) pollRm();
+  }
+  function pollRm() { clearTimeout(S.timers.rm); S.timers.rm = setTimeout(() => S.page === 'set' && loadRemote(), 2500); }
+  async function loadSources(probe) {
+    const box = $('#srcBox'); if (!box) return;
+    try {
+      const d = await api('diag/sources'); box.className = '';
+      const rows = Object.entries(d.stats || {});
+      box.innerHTML = `<table class="t"><tr><th class="l">数据源</th><th>成功</th><th>失败</th><th>最近成功</th><th class="l">最近错误</th></tr>${rows.map(([k, v]) => `<tr><td class="l">${esc(k)}</td><td class="down">${v.ok}</td><td class="${v.fail ? 'up' : 'muted'}">${v.fail}</td><td class="muted">${esc(v.last_ok || '--')}</td><td class="l nm hint" title="${esc(v.last_err || '')}">${esc((v.last_err || '').slice(0, 40))}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">本次启动后还没有请求</td></tr>'}</table>
+        <div class="hint" style="margin-top:6px">全市场快照：${esc((d.snap || {}).source || '--')} ${esc((d.snap || {}).time || '')}${Object.keys(d.blocked || {}).length ? ' · 暂停中：' + Object.entries(d.blocked).map(([h, t]) => `${h}（${Math.round(t / 60)}分钟）`).join('、') : ''}</div>
+        <div class="hint">K线：腾讯 → 同花顺 → 东财 → 新浪；周/月K：腾讯 → 同花顺；分钟K：腾讯 → 新浪；分时：腾讯 → 同花顺；主力资金：东财 → 新浪。个股页会用腾讯和同花顺交叉校验收盘价。</div>
+        <div id="srcProbeR"></div>`;
+      if (probe) { $('#srcProbeR').innerHTML = '<div class="loading">逐个测试中</div>'; const r = await api('diag/net');
+        $('#srcProbeR').innerHTML = `<table class="t" style="margin-top:6px"><tr><th class="l">接口</th><th>结果</th><th>耗时</th></tr>${r.probes.map(x => `<tr><td class="l">${esc(x.name)}</td><td class="${x.ok ? 'down' : 'up'}">${x.ok ? '正常' : '失败'}</td><td>${x.ms}ms</td></tr>`).join('')}</table>`; }
+    } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  }
   async function renderStaticSet() {
     const s = await api('settings').catch(() => ({})), p = S.priv, prof = (p && p.profile) || {};
     const refresh = +(lsGet('aq5_refresh') || 60), rem = !!lsGet('aq5_pw');
     $('#p-set').innerHTML = `<div class="grid">
-      ${panel('PHONE <small>手机设置 · 只保存在这台手机</small>', `<dl class="kv"><dt>个人数据</dt><dd>${p ? '<b class="down">已解锁</b> · 数据时间 ' + esc(p.time.slice(5, 16)) : '<b class="up">未解锁</b>'}</dd></dl>
+      ${panel('PHONE <small>手机设置 · 只保存在这台手机</small>', `<dl class="kv"><dt>个人数据</dt><dd>${p ? '<b class="down">已解锁</b> · 数据时间 ' + esc(p.time.slice(5, 16)) : '<b class="up">未解锁</b>'}</dd>
+        <dt>连接电脑</dt><dd>${!p ? '解锁后自动尝试' : p.remote ? '<span class="amber">电脑远程已开启，但现在连不上（电脑可能关机或休眠）</span> <button class="btn sm" id="phRe">重试</button>' : '<span class="muted">电脑端没开「手机远程」</span>'}</dd></dl>
         <div class="ticket"><label>自动刷新<select class="in" id="phRef">${[30, 60, 120, 300].map(x => `<option value="${x}" ${x === refresh ? 'selected' : ''}>${x < 60 ? x + ' 秒' : x / 60 + ' 分钟'}</option>`).join('')}</select></label>
           <label>解锁密码<select class="in" id="phRem"><option value="1" ${rem ? 'selected' : ''}>记住（自动解锁）</option><option value="0" ${rem ? '' : 'selected'}>不记住</option></select></label></div>
         <div class="row" style="margin-top:8px"><button class="btn ${p ? '' : 'pri'}" id="phLock">${p ? '锁定并清除密码' : '解锁个人数据'}</button><span class="sp"></span><button class="btn" id="phClear">清除本机缓存</button></div>
@@ -743,6 +834,7 @@
         <dt>每次最多</dt><dd>${s.pick ? s.pick.max_picks + ' 只' : '--'}</dd><dt>止损</dt><dd>${s.risk ? s.risk.stop_atr + ' × ATR，最多 ' + num(s.risk.max_stop_pct * 100, 0) + '%' : '--'}</dd>
         <dt>AI 模型</dt><dd>${s.ai ? esc(s.ai.provider + ' · ' + (s.ai.model || '默认')) : '--'}</dd></dl>`, { cls: 'c6' })}
     </div>`;
+    const pr = $('#phRe'); if (pr) pr.onclick = async () => { if (await connectRemote()) renderSet(); else toast('还是连不上电脑', 1); };
     $('#phRef').onchange = e => { lsSet('aq5_refresh', e.target.value); restartPoll(); toast('已保存'); };
     $('#phRem').onchange = e => { if (e.target.value === '0') lsSet('aq5_pw', null); else if (!S.priv) toast('下次解锁时勾选「记住」即可'); toast('已保存'); };
     $('#phLock').onclick = () => { if (S.priv) { S.priv = null; lsSet('aq5_pw', null); location.reload(); } else showUnlock(); };
@@ -804,8 +896,10 @@
         <div class="row"><span class="hint mono" id="aiTestR"></span><span class="sp"></span><button class="btn" id="aiSave">保存</button><button class="btn pri" id="aiTest">测试连接</button></div>`, { cls: 'c6' })}
       ${panel('MOBILE <small>手机访问</small>', `<p>手机和电脑连同一个 WiFi，用手机浏览器打开：</p><div class="mono amber" style="font-size:20px;word-break:break-all">${esc(S.ov ? S.ov.lan : '')}</div>
         <p class="hint">打开后点浏览器菜单「添加到主屏幕」，就像 App 一样使用。若打不开，请在 Windows 防火墙允许 Python 访问专用网络。</p>`, { cls: 'c4' })}
+      ${panel('REMOTE <small>手机远程连电脑 · 外网也能下单/改设置</small>', '<div id="rmBox" class="loading">载入</div>', { cls: 'c6' })}
+      ${panel('SOURCES <small>数据源 · 腾讯 / 同花顺 / 新浪 / 东财 自动切换</small>', '<div id="srcBox" class="loading">载入</div>', { cls: 'c6', right: '<button class="btn sm" id="srcProbe">全面体检</button>' })}
       ${panel('PICK <small>自动选股</small>', `<div class="ticket">${f('sT1', '竞价选股时间', s.pick.times[0])}${f('sT2', '尾盘选股时间', s.pick.times[1])}
-        ${f('sMin', '入选最低分', s.pick.min_score, '越高越严格')}${f('sMax', '每次最多', s.pick.max_picks)}
+        ${f('sMin', 'A级门槛（分）', s.pick.min_score, '≥门槛且有可靠信号为A级，差8分内为B级')}${f('sMax', '每次取前 N 名', s.pick.top_n || 10)}
         ${f('sAmt', '最低成交额(亿)', s.pick.min_amount_yi)}${f('sPos', 'AI盘单票仓位', s.pick.position_pct, '0.2=20%')}
         <label class="full"><span><input type="checkbox" id="sAuto" ${s.pick.auto_trade ? 'checked' : ''}> AI自动盘跟随选股模拟买入</span></label></div>`, { cls: 'c4' })}
       ${panel('RISK <small>止损止盈参数</small>', `<div class="ticket">${f('rAtr', '止损 = N × ATR', s.risk.stop_atr)}${f('rMax', '最大止损幅度', s.risk.max_stop_pct, '0.08=8%')}
@@ -831,7 +925,7 @@
     const v = id => $('#' + id).value.trim(), n = id => +v(id), list = id => v(id).split(/[,，\s]+/).filter(Boolean);
     $('#sSave').onclick = async () => {
       try {
-        await api('settings', { pick: { times: [v('sT1'), v('sT2')], min_score: n('sMin'), max_picks: n('sMax'), min_amount_yi: n('sAmt'), position_pct: n('sPos'), auto_trade: $('#sAuto').checked },
+        await api('settings', { pick: { times: [v('sT1'), v('sT2')], min_score: n('sMin'), top_n: n('sMax'), min_amount_yi: n('sAmt'), position_pct: n('sPos'), auto_trade: $('#sAuto').checked },
           risk: { stop_atr: n('rAtr'), max_stop_pct: n('rMax'), rr_1: n('rR1'), rr_2: n('rR2'), max_hold_days: n('rDays') }, init_cash: n('sCash'),
           indices: list('lIdx'), overseas: list('lOv'), publish: { remote: v('pRemote'), branch: v('pBranch'), interval_min: n('pInt'), enabled: $('#pOn').checked, push: $('#pPush').checked }, notify: { pushplus_token: v('nPP'), serverchan_key: v('nSC'), enabled: $('#nOn').checked } });
         toast('已保存'); S.settings = null; poll();
@@ -839,6 +933,8 @@
     };
     if (me) bindPersonal(me);
     const aiCfg = () => api('ai/config', { provider: $('#aiProv').value, model: $('#aiModel').value.trim(), base_url: $('#aiBase').value.trim(), format: $('#aiFmt').value, daily_limit: +$('#aiLimit').value || 300, auto_review: $('#aiAutoRev').checked, auto_sentiment: $('#aiAutoSen').checked, auto_explain: $('#aiAutoExp').checked, auto_brief: $('#aiAutoBrief').checked });
+    loadRemote(); loadSources();
+    $('#srcProbe').onclick = () => loadSources(true);
     $('#aiProv').onchange = () => { const p = ((S.aiStatus && S.aiStatus.presets) || {})[$('#aiProv').value]; if (p) { $('#aiModel').value = p.model; $('#aiBase').value = ''; $('#aiFmt').value = ''; } $('#aiModelSel').style.display = 'none'; };
     $('#aiPull').onclick = async () => {
       const b = $('#aiPull'); b.disabled = true; b.textContent = '…';
@@ -913,7 +1009,8 @@
     document.body.classList.add('unlocked');
     if (remember) lsSet('aq5_pw', pw);
     const b = $('#unlockBtn'); if (b) b.textContent = '已解锁 ' + (S.priv.profile.nickname || '');
-    toast('个人数据已解锁（数据时间 ' + S.priv.time.slice(5, 16) + '）');
+    toast('个人数据已解锁（数据时间 ' + S.priv.time.slice(5, 16) + '）' + (S.priv.remote ? '，正在连接电脑…' : ''));
+    await connectRemote();
     await poll(); const [p, a] = location.hash.slice(1).split('/'); show(PAGES.includes(p) ? p : 'mon', a);
   }
   function showUnlock() {

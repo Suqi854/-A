@@ -62,9 +62,16 @@ def conn() -> sqlite3.Connection:
     return c
 
 
+MIGRATIONS = [("picks", "tier", "TEXT"), ("picks", "rank", "INTEGER"), ("picks", "industry", "TEXT")]
+
+
 def init() -> None:
     with tx() as c:
         c.executescript(SCHEMA)
+        for table, col, typ in MIGRATIONS:
+            cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})").fetchall()}
+            if col not in cols:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
 
 
 @contextmanager

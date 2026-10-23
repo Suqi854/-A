@@ -160,14 +160,16 @@ def _run(session: str, top_n: int) -> dict:
     except Exception:  # noqa: BLE001
         pass
 
-    # 门槛：随大盘状态收紧
-    min_score, max_picks = cfg["min_score"], cfg["max_picks"]
+    # 每次都取综合分前 N（默认10）只，再按“门槛”分级：A 重点 / B 关注 / C 观察（宁缺毋滥体现在分级上）
+    min_score = cfg["min_score"]
     if reg["code"] == "bear":
-        min_score, max_picks = min_score + 5, min(2, max_picks)
+        min_score += 5
     elif reg["code"] == "range":
-        min_score, max_picks = min_score + 2, min(3, max_picks)
+        min_score += 2
     if br["total"] and br["up"] / br["total"] < 0.2:
         min_score += 3
+    top_n = int(cfg.get("top_n", 10))
+    max_picks = top_n
     picks = []
     try:
         from . import sectors
@@ -176,21 +178,30 @@ def _run(session: str, top_n: int) -> dict:
         sec_data = {"stock": {}, "by_code": {}}
     per_ind: dict[str, int] = {}
     for ev in evaluated:
-        if len(picks) >= max_picks:
+        if len(picks) >= top_n:
             break
         if ev["code"] in wl and ev["row"] not in pool:
             continue
-        sig = ev["signals"]
-        if ev["score"] < min_score or not sig or sig[0]["conf"] < 0.5 or (ev["plan"]["rr"] or 0) < 1.4:
+        r = ev["row"]
+        if "ST" in (r.get("name") or "") or not r.get("price"):
             continue
-        if ev["ind"]["extra"]["rsi6"] > 88:
+        lim = market.limit_pct(ev["code"], r.get("name"))
+        if r.get("prev") and r["price"] >= round(r["prev"] * (1 + lim) - 0.005, 2):  # 涨停买不进，跳过
             continue
         ic = sec_data["stock"].get(ev["code"])
-        if ic and per_ind.get(ic, 0) >= 2:  # 同一行业最多 2 只，分散风险
+        if ic and per_ind.get(ic, 0) >= 3:  # 同一行业最多 3 只，分散风险
             continue
         if ic:
             per_ind[ic] = per_ind.get(ic, 0) + 1
         ev["sector"] = sec_data["by_code"].get(ic) if ic else None
+        sig = ev["signals"]
+        strong = bool(sig) and sig[0]["conf"] >= 0.5 and (ev["plan"]["rr"] or 0) >= 1.4 and ev["ind"]["extra"]["rsi6"] <= 88
+        if ev["score"] >= min_score and strong:
+            ev["tier"] = "A"
+        elif ev["score"] >= min_score - 8 and sig:
+            ev["tier"] = "B"
+        else:
+            ev["tier"] = "C"
         picks.append(ev)
 
     with db.tx() as c:
@@ -227,30 +238,40 @@ def _run(session: str, top_n: int) -> dict:
             if reg["code"] != "bull":
                 risks.append(f"大盘处于{reg['state']}，仓位要比平时轻")
             pl = e["plan"]
+            if e["tier"] == "C":
+                risks.insert(0, f"仅为观察级：综合分 {e['score']:.0f} 低于门槛 {min_score:.0f} 或缺少可靠买点信号，不建议重仓")
+            elif e["tier"] == "B":
+                risks.insert(0, f"关注级：离门槛 {min_score:.0f} 分还差一点，适合小仓位试错")
             cur = c.execute("INSERT INTO picks(run_id, date, session, code, name, score, prob, price, stop, target1, "
-                            "target2, factors, strategies, reasons, risks) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            "target2, factors, strategies, reasons, risks, tier, rank, industry) "
+                            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                             (run_id, today(), session, e["code"], r.get("name"), e["score"], e["prob"], r["price"],
                              pl["stop"], pl["target1"], pl["target2"], db.dumps(e["parts"]),
-                             db.dumps(e["signals"]), db.dumps(reasons), db.dumps(risks)))
+                             db.dumps(e["signals"]), db.dumps(reasons), db.dumps(risks), e["tier"],
+                             len(out) + 1, sc["name"] if sc else None))
             out.append({"id": cur.lastrowid, "code": e["code"], "name": r.get("name"), "score": e["score"],
-                        "industry": sc["name"] if sc else None,
+                        "industry": sc["name"] if sc else None, "tier": e["tier"], "rank": len(out) + 1,
                         "prob": e["prob"], "price": r["price"], "pct": r.get("pct"), "plan": pl,
                         "signals": e["signals"], "reasons": reasons, "risks": risks})
         c.execute("UPDATE pick_runs SET finished=? WHERE id=?", (now().strftime("%H:%M:%S"), run_id))
     label = {"auction": "竞价选股", "close": "尾盘选股", "manual": "手动选股"}.get(session, session)
     if out:
-        body = "\n".join(f"{p['name']}({p['code'][2:]}) 评分{p['score']} 现价{p['price']} 止损{p['plan']['stop']} "
-                         f"目标{p['plan']['target1']}｜{p['signals'][0]['name']}" for p in out)
-        db.event("pick", f"{label}：发现 {len(out)} 个机会", body, "good")
+        na = sum(1 for p in out if p["tier"] == "A")
+        body = "\n".join(f"[{p['tier']}] {p['name']}({p['code'][2:]}) 评分{p['score']} 现价{p['price']} 止损{p['plan']['stop']} "
+                         f"目标{p['plan']['target1']}" + (f"｜{p['signals'][0]['name']}" if p["signals"] else "") for p in out)
+        db.event("pick", f"{label}：前 {len(out)} 名（A级 {na} 只）", body, "good" if na else "info")
     else:
         body = f"扫描 {len(snap)} 只、精评 {len(evaluated)} 只，没有达到门槛（{min_score:.0f}分）的机会。宁缺毋滥，今天先观望。"
         db.event("pick", f"{label}：无符合条件的机会", body)
     notify.send(f"A量化 · {label}", body)
     STATE["last"] = {"run_id": run_id, "picks": len(out), "time": now().strftime("%H:%M:%S"),
                      "secs": round(time.time() - t0, 1)}
-    if out and cfg.get("auto_trade") and session in ("auction", "close"):
+    if out and cfg.get("auto_trade", True) and session in ("auction", "close"):
         from . import sim
-        sim.auto_follow(out, session)
+        try:
+            sim.auto_follow(out, session)
+        except Exception as e:  # noqa: BLE001
+            db.event("system", "AI自动盘跟单失败", str(e)[:200], "warn")
     explaining = False
     try:
         from . import ai

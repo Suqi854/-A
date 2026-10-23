@@ -383,17 +383,180 @@ def _kline_eastmoney(code: str, n: int) -> list[dict]:
     return out
 
 
-def _fetch_kline(code: str, n: int) -> list[dict]:
-    """前复权日K：腾讯为主，东财备用（被限流时自动切换）。"""
+# ----------------------------------------------------------------------------- 多数据源：同花顺 / 新浪 / 腾讯 / 东财
+SRC_STATS: dict[str, dict] = {}
+
+
+def _stat(src: str, ok: bool, err: str = "") -> None:
+    st = SRC_STATS.setdefault(src, {"ok": 0, "fail": 0, "last_ok": None, "last_err": None})
+    if ok:
+        st["ok"] += 1
+        st["last_ok"] = now().strftime("%H:%M:%S")
+    else:
+        st["fail"] += 1
+        st["last_err"] = (now().strftime("%H:%M:%S") + " " + err)[:160]
+
+
+def _jsonp(raw: bytes) -> dict:
+    t = raw.decode("utf-8", "ignore")
+    return json.loads(t[t.index("(") + 1: t.rindex(")")])
+
+
+THS_TYPE = {"day": "01", "week": "11", "month": "21"}
+
+
+def ths_code(code: str) -> str:
+    """同花顺代码：个股 600519；上证指数 1A0001；其他上证指数 1B0300；深证指数 399001。"""
+    if code == "sh000001":
+        return "1A0001"
+    if code.startswith("sh000"):
+        return "1B" + code[4:]
+    return code[2:]
+
+
+def _kline_ths(code: str, n: int, period: str = "day") -> list[dict]:
+    """同花顺 d.10jqka.com.cn：前复权日/周/月K（last.js 约最近 140 根，不够再取往年文件）。"""
+    t = THS_TYPE[period]
+    base = f"https://d.10jqka.com.cn/v6/line/hs_{ths_code(code)}/{t}/"
+    ref = "https://stockpage.10jqka.com.cn/"
+    d = _jsonp(http_get(base + "last.js", ref, retries=1))
+    chunks = [d.get("data") or ""]
+    have = chunks[0].count(";") + 1 if chunks[0] else 0
+    if period == "day" and have < n:
+        y = now().year
+        first_year = min((int(k) for k in (d.get("year") or {}) if str(k).isdigit()), default=y)
+        while have < n and y >= first_year and y > now().year - 3:
+            try:
+                yd = _jsonp(http_get(base + f"{y}.js", ref, retries=1))
+                chunks.insert(0, yd.get("data") or "")
+                have += (yd.get("data") or "").count(";") + 1
+            except (RuntimeError, ValueError):
+                break
+            y -= 1
+    rows = {}
+    for chunk in chunks:
+        for item in chunk.split(";"):
+            p = item.split(",")
+            if len(p) < 6 or not p[1]:
+                continue
+            dt = f"{p[0][:4]}-{p[0][4:6]}-{p[0][6:8]}"
+            rows[dt] = {"date": dt, "open": float(p[1]), "high": float(p[2]), "low": float(p[3]),
+                        "close": float(p[4]), "vol": float(p[5])}
+    return [rows[k] for k in sorted(rows)][-n:]
+
+
+def _kline_tencent_p(code: str, n: int, period: str) -> list[dict]:
+    d = json.loads(http_get(f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={code},{period},,,{n},qfq"))
+    node = (d.get("data") or {}).get(code) or {}
+    arr = node.get("qfq" + period) or node.get(period) or []
+    return [{"date": a[0], "open": float(a[1]), "close": float(a[2]), "high": float(a[3]), "low": float(a[4]),
+             "vol": float(a[5]) * 100} for a in arr if len(a) >= 6]
+
+
+def _kline_sina(code: str, n: int, scale: int = 240) -> list[dict]:
+    """新浪：分钟K（5/15/30/60）与日K（240，不复权，仅作最后备用）。"""
+    url = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
+           f"?symbol={code}&scale={scale}&ma=no&datalen={n}")
+    arr = json.loads(http_get(url, "https://finance.sina.com.cn/", retries=1) or b"[]") or []
+    return [{"date": a["day"], "open": float(a["open"]), "close": float(a["close"]), "high": float(a["high"]),
+             "low": float(a["low"]), "vol": float(a["volume"])} for a in arr]
+
+
+def _kline_tencent_m(code: str, n: int, m: int) -> list[dict]:
+    d = json.loads(http_get(f"https://web.ifzq.gtimg.cn/appstock/app/kline/mkline?param={code},m{m},,{n}"))
+    arr = ((d.get("data") or {}).get(code) or {}).get(f"m{m}") or []
+    out = []
+    for a in arr:
+        t = str(a[0])
+        out.append({"date": f"{t[:4]}-{t[4:6]}-{t[6:8]} {t[8:10]}:{t[10:12]}", "open": float(a[1]),
+                    "close": float(a[2]), "high": float(a[3]), "low": float(a[4]), "vol": float(a[5]) * 100})
+    return out
+
+
+def _try_sources(label: str, fns: list) -> tuple[list[dict], str]:
     last = None
-    for fn in (_kline_tencent, _kline_eastmoney):
+    for name, fn in fns:
         try:
-            rows = fn(code, n)
+            rows = fn()
             if rows:
-                return rows
-        except (RuntimeError, ValueError, KeyError) as e:
+                _stat(name, True)
+                return rows, name
+            _stat(name, False, "空数据")
+        except (RuntimeError, ValueError, KeyError, IndexError, TypeError) as e:
+            _stat(name, False, str(e))
             last = e
-    raise RuntimeError(f"日K获取失败 {code}: {last}")
+    raise RuntimeError(f"{label} 所有数据源都失败：{last}")
+
+
+def _fetch_kline(code: str, n: int) -> list[dict]:
+    """前复权日K：腾讯 → 同花顺 → 东财 → 新浪（不复权）依次尝试。"""
+    rows, _ = _try_sources("日K " + code, [("腾讯", lambda: _kline_tencent(code, n)),
+                                          ("同花顺", lambda: _kline_ths(code, n, "day")),
+                                          ("东财", lambda: _kline_eastmoney(code, n)),
+                                          ("新浪", lambda: _kline_sina(code, n, 240))])
+    return rows
+
+
+PERIODS = {"day": "日K", "week": "周K", "month": "月K", "m60": "60分", "m30": "30分", "m15": "15分", "m5": "5分"}
+
+
+def kline_period(code: str, period: str = "day", n: int = 320) -> dict:
+    """任意周期 K 线。日K走本地缓存；周/月K 腾讯→同花顺；分钟K 腾讯→新浪。"""
+    code = norm_code(code)
+    if period == "day":
+        return {"code": code, "period": period, "rows": kline_with_live(code, n), "source": "本地缓存"}
+    if MOCK:
+        rows = mock.kline(code, n * (5 if period == "week" else 21 if period == "month" else 1))
+        if period in ("week", "month"):
+            agg, key = {}, (lambda d: d[:7]) if period == "month" else (lambda d: datetime.strptime(d, "%Y-%m-%d").strftime("%G-%V"))
+            for r in rows:
+                k = key(r["date"])
+                a = agg.get(k)
+                if not a:
+                    agg[k] = dict(r)
+                else:
+                    a.update(date=r["date"], close=r["close"], high=max(a["high"], r["high"]),
+                             low=min(a["low"], r["low"]), vol=a["vol"] + r["vol"])
+            rows = list(agg.values())[-n:]
+        return {"code": code, "period": period, "rows": rows, "source": "模拟"}
+
+    def load():
+        if period in ("week", "month"):
+            rows, src = _try_sources(PERIODS[period], [("腾讯", lambda: _kline_tencent_p(code, n, period)),
+                                                         ("同花顺", lambda: _kline_ths(code, n, period))])
+        else:
+            m = int(period[1:])
+            rows, src = _try_sources(PERIODS[period], [("腾讯", lambda: _kline_tencent_m(code, n, m)),
+                                                         ("新浪", lambda: _kline_sina(code, n, m))])
+        return {"code": code, "period": period, "rows": rows, "source": src}
+    ttl = 60 if period.startswith("m") else 600
+    return _cached(f"kp:{code}:{period}:{n}", ttl, load)
+
+
+def cross_check(code: str) -> dict:
+    """多源校验：腾讯 vs 同花顺 最近 5 根日K收盘价是否一致（缓存 1 小时）。"""
+    code = norm_code(code)
+    if MOCK:
+        return {"ok": True, "sources": ["模拟"], "max_diff_pct": 0.0, "note": "模拟数据"}
+
+    def load():
+        got = {}
+        for name, fn in (("腾讯", lambda: _kline_tencent(code, 8)), ("同花顺", lambda: _kline_ths(code, 8, "day"))):
+            try:
+                got[name] = {r["date"]: r["close"] for r in fn()[-6:]}
+                _stat(name, True)
+            except (RuntimeError, ValueError, KeyError, IndexError) as e:
+                _stat(name, False, str(e))
+        if len(got) < 2:
+            return {"ok": None, "sources": list(got), "max_diff_pct": None, "note": "只有一个数据源可用，无法交叉校验"}
+        a, b = got["腾讯"], got["同花顺"]
+        common = sorted(set(a) & set(b))[-5:]
+        if not common:
+            return {"ok": None, "sources": list(got), "max_diff_pct": None, "note": "两个数据源日期对不上"}
+        diff = max(abs(a[d] / b[d] - 1) * 100 for d in common)
+        return {"ok": diff < 0.3, "sources": list(got), "max_diff_pct": round(diff, 3), "days": len(common),
+                "note": f"腾讯与同花顺最近 {len(common)} 日收盘价最大偏差 {diff:.3f}%" + ("，一致" if diff < 0.3 else "，存在差异（可能是复权口径不同）")}
+    return _cached("xc:" + code, 3600, load)
 
 
 def _last_close_stamp() -> str:
@@ -475,6 +638,8 @@ def intraday(code: str) -> dict:
         if qt and len(qt) > 4:
             prev = _f(qt[4])
         pts, last_v = [], 0.0
+        if not arr:
+            return {}
         for s in arr:
             p = s.split(" ")
             if len(p) < 3:
@@ -484,8 +649,25 @@ def intraday(code: str) -> dict:
             pts.append({"t": p[0][:2] + ":" + p[0][2:], "p": float(p[1]), "v": max(v - last_v, 0),
                         "avg": (a / v) if v else float(p[1])})
             last_v = v
-        return {"code": code, "prev": prev, "points": pts, "date": (node.get("data") or {}).get("date")}
-    return _cached("m:" + code, 20.0, load)
+        return {"code": code, "prev": prev, "points": pts, "date": (node.get("data") or {}).get("date"), "source": "腾讯"}
+
+    def load_ths():
+        tc = ths_code(code)
+        d = _jsonp(http_get(f"https://d.10jqka.com.cn/v6/time/hs_{tc}/last.js", "https://stockpage.10jqka.com.cn/",
+                            retries=1))
+        node = d.get(f"hs_{tc}") or {}
+        pts = []
+        for item in (node.get("data") or "").split(";"):
+            p = item.split(",")
+            if len(p) < 5:
+                continue
+            pts.append({"t": p[0][:2] + ":" + p[0][2:], "p": float(p[1]), "v": float(p[4]), "avg": float(p[3])})
+        return {"code": code, "prev": _f(node.get("pre")), "points": pts, "date": node.get("date"), "source": "同花顺"}
+
+    def both():
+        rows, _ = _try_sources("分时 " + code, [("腾讯", load), ("同花顺", load_ths)])
+        return rows
+    return _cached("m:" + code, 20.0, both)
 
 
 # ----------------------------------------------------------------------------- 主力资金（日）
@@ -498,15 +680,33 @@ def fundflow(code: str, n: int = 60) -> list[dict]:
         secid = ("1." if code.startswith("sh") else "0.") + code[2:]
         url = ("https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?lmt=%d&klt=101&secid=%s"
                "&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57" % (n, secid))
-        try:
-            d = json.loads(http_get(url, "https://data.eastmoney.com/"))
-        except RuntimeError:
-            return db.q("SELECT * FROM fundflow WHERE code=? ORDER BY date DESC LIMIT ?", (code, n))[::-1]
         rows = []
-        for s in ((d.get("data") or {}).get("klines") or []):
-            p = s.split(",")
-            rows.append({"code": code, "date": p[0], "main": _f(p[1], 0), "small": _f(p[2], 0),
-                         "mid": _f(p[3], 0), "large": _f(p[4], 0), "xlarge": _f(p[5], 0), "main_pct": _f(p[6], 0)})
+        if time.time() > _em_state.get("ff_bad_until", 0):
+            try:
+                d = json.loads(http_get(url, "https://data.eastmoney.com/", retries=1))
+                for s in ((d.get("data") or {}).get("klines") or []):
+                    p = s.split(",")
+                    rows.append({"code": code, "date": p[0], "main": _f(p[1], 0), "small": _f(p[2], 0),
+                                 "mid": _f(p[3], 0), "large": _f(p[4], 0), "xlarge": _f(p[5], 0), "main_pct": _f(p[6], 0)})
+                _stat("东财", True)
+            except RuntimeError as e:
+                _stat("东财", False, str(e))
+                _em_state["ff_bad_until"] = time.time() + 600
+        if not rows:  # 新浪资金流向（历史，按日）
+            try:
+                u2 = ("https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_qsfx_zjlrqs"
+                      f"?page=1&num={n}&sort=opendate&asc=0&daima={code}")
+                arr = json.loads(http_get(u2, "https://vip.stock.finance.sina.com.cn/", retries=1) or b"[]") or []
+                for a in arr:
+                    main, xl = _f(a.get("netamount"), 0) or 0, _f(a.get("r0_net"), 0) or 0
+                    rows.append({"code": code, "date": a["opendate"], "main": main, "small": None, "mid": None,
+                                 "large": main - xl, "xlarge": xl, "main_pct": round((_f(a.get("ratioamount"), 0) or 0) * 100, 2)})
+                rows.sort(key=lambda r: r["date"])
+                _stat("新浪", True)
+            except (RuntimeError, ValueError, KeyError) as e:
+                _stat("新浪", False, str(e))
+        if not rows:
+            return db.q("SELECT * FROM fundflow WHERE code=? ORDER BY date DESC LIMIT ?", (code, n))[::-1]
         if rows:
             with db.tx() as c:
                 c.executemany("INSERT OR REPLACE INTO fundflow VALUES(?,?,?,?,?,?,?,?)",
@@ -713,7 +913,7 @@ PROBES = {
 }
 
 
-def probe(raw: bool = False, direct: bool | None = None, urls: list | None = None) -> list[dict]:
+def probe(raw: bool = False, direct: bool | None = None, urls: list | None = None, n: int = 600) -> list[dict]:
     """逐个测试数据源能否连通（不走限速；每个最多 6 秒）。direct=True 绕过系统代理。"""
     out = []
     op = _DIRECT if direct else (_PROXY if direct is False else _opener_for)
@@ -730,7 +930,7 @@ def probe(raw: bool = False, direct: bool | None = None, urls: list | None = Non
                 b = r.read()
                 if r.headers.get("Content-Encoding") == "gzip":
                     b = gzip.decompress(b)
-            txt = b[:600].decode("gbk" if "sina" in url or "gtimg" in url else "utf-8", "ignore")
+            txt = (b[:n] if n > 0 else b[n:]).decode("gbk" if "sina" in url or "gtimg" in url else "utf-8", "ignore")
             out.append({"name": name, "ok": True, "ms": int((time.time() - t0) * 1000), "bytes": len(b),
                         "head": txt if raw else txt[:80]})
         except Exception as e:  # noqa: BLE001

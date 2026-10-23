@@ -2,7 +2,7 @@
 (function () {
   const C = {
     up: '#ff4d4f', down: '#17d17a', grid: '#141b22', axis: '#5f6d7b', text: '#9aa7b4', amber: '#ffb000',
-    cyan: '#2fd3e6', white: '#e6edf3', bg: '#0c1014', ma: ['#ffffff', '#ffb000', '#d16cff', '#2fd3e6'],
+    cyan: '#2fd3e6', white: '#e6edf3', bg: '#0c1014', ma: ['#ffffff', '#ffb000', '#d16cff', '#2fd3e6', '#7cfc7c', '#ff7ab6', '#8fa3ff'],
     font: '11px "JetBrains Mono", Consolas, monospace'
   };
 
@@ -38,8 +38,25 @@
     }
     setData(rows, keepView) {
       this.rows = rows || [];
-      const c = this.rows.map(r => r.close), v = this.rows.map(r => r.vol);
-      this.ma = [sma(c, 5), sma(c, 10), sma(c, 20), sma(c, 60)];
+      const c = this.rows.map(r => r.close), v = this.rows.map(r => r.vol), H = this.rows.map(r => r.high), L = this.rows.map(r => r.low);
+      this.maN = this.maN || [5, 10, 20, 60];
+      this.ma = this.maN.map(k => sma(c, k));
+      // BOLL(20,2)
+      const mid = sma(c, 20); this.boll = { mid, up: [], dn: [] };
+      for (let i = 0; i < c.length; i++) { if (mid[i] == null) { this.boll.up.push(null); this.boll.dn.push(null); continue; }
+        let s2 = 0; for (let j = i - 19; j <= i; j++) s2 += (c[j] - mid[i]) ** 2; const sd = Math.sqrt(s2 / 20); this.boll.up.push(mid[i] + 2 * sd); this.boll.dn.push(mid[i] - 2 * sd); }
+      // KDJ(9,3,3)
+      const K = [], D = [], J = []; let kp = 50, dp = 50;
+      for (let i = 0; i < c.length; i++) { const a = Math.max(0, i - 8); let hh = -Infinity, ll = Infinity; for (let j = a; j <= i; j++) { hh = Math.max(hh, H[j]); ll = Math.min(ll, L[j]); }
+        const rsv = hh > ll ? (c[i] - ll) / (hh - ll) * 100 : 50; kp = (2 * kp + rsv) / 3; dp = (2 * dp + kp) / 3; K.push(kp); D.push(dp); J.push(3 * kp - 2 * dp); }
+      this.kdj = { K, D, J };
+      // OBV
+      const obv = [0]; for (let i = 1; i < c.length; i++) obv.push(obv[i - 1] + (c[i] > c[i - 1] ? v[i] : c[i] < c[i - 1] ? -v[i] : 0)); this.obv = obv; this.obvma = sma(obv, 20);
+      // WR(14) / CCI(14) / BIAS(6,12,24)
+      this.wr = c.map((x, i) => { const a = Math.max(0, i - 13); let hh = -Infinity, ll = Infinity; for (let j = a; j <= i; j++) { hh = Math.max(hh, H[j]); ll = Math.min(ll, L[j]); } return hh > ll ? (hh - x) / (hh - ll) * 100 : 50; });
+      const tp = c.map((x, i) => (x + H[i] + L[i]) / 3), tpm = sma(tp, 14);
+      this.cci = tp.map((x, i) => { if (tpm[i] == null) return null; let md = 0; for (let j = i - 13; j <= i; j++) md += Math.abs(tp[j] - tpm[i]); md /= 14; return md ? (x - tpm[i]) / (0.015 * md) : 0; });
+      this.bias = [6, 12, 24].map(k => { const m = sma(c, k); return c.map((x, i) => m[i] ? (x / m[i] - 1) * 100 : null); });
       const e1 = ema(c, 12), e2 = ema(c, 26), dif = e1.map((x, i) => x - e2[i]), dea = ema(dif, 9);
       this.macd = { dif, dea, hist: dif.map((x, i) => 2 * (x - dea[i])) };
       this.vma = sma(v, 5);
@@ -51,11 +68,18 @@
         rsi.push(i < 6 ? null : dn === 0 ? 100 : 100 - 100 / (1 + up / dn));
       }
       this.rsi = rsi;
+      const rsiN = n => { const o = [null]; let u0 = 0, d0 = 0; for (let i = 1; i < c.length; i++) { const d = c[i] - c[i - 1], u = Math.max(d, 0), w = Math.max(-d, 0);
+        if (i <= n) { u0 += u / n; d0 += w / n; } else { u0 = (u0 * (n - 1) + u) / n; d0 = (d0 * (n - 1) + w) / n; } o.push(i < n ? null : d0 === 0 ? 100 : 100 - 100 / (1 + u0 / d0)); } return o; };
+      this.rsi12 = rsiN(12); this.rsi24 = rsiN(24);
       if (!keepView) { this.end = this.rows.length; this.count = Math.min(this.count, Math.max(30, this.rows.length)); }
       this.draw();
     }
     setOverlays(o) { this.overlays = o || []; this.draw(); }
     setSub(s) { this.sub = s; this.draw(); }
+    setMain(m) { this.main = m; this.draw(); }
+    setMA(list) { this.maN = list; this.setData(this.rows, true); }
+    setChips(ch) { this.chips = ch; this.draw(); }
+    setLines(ls) { this.extraLines = ls || []; this.draw(); }
     _range() {
       const n = this.rows.length; let end = Math.min(n, Math.max(Math.min(this.count, n), Math.round(this.end)));
       const start = Math.max(0, end - Math.round(this.count));
@@ -101,14 +125,15 @@
       if (!this.rows.length) return;
       const { ctx, w, h } = setup(this.cv);
       const [s, e] = this._range(); const R = this.rows.slice(s, e); const n = R.length;
-      const padR = 58, padB = 18, W = w - padR;
+      const chipW = this.chips && this.showChips ? Math.min(110, w * 0.18) : 0;
+      const padR = 58, padB = 18, W = w - padR - chipW;
       const hMain = (h - padB) * 0.62, hVol = (h - padB) * 0.15, hSub = (h - padB) * 0.23;
       const y0 = 0, y1 = hMain, y2 = hMain + hVol, y3 = h - padB;
       const bw = W / Math.max(n, 1); this._bw = bw;
       const cw = Math.max(1, Math.min(bw * 0.72, 18));
       let hi = -Infinity, lo = Infinity;
       for (let i = 0; i < n; i++) { hi = Math.max(hi, R[i].high); lo = Math.min(lo, R[i].low);
-        for (const m of this.ma) { const v = m[s + i]; if (v != null) { hi = Math.max(hi, v); lo = Math.min(lo, v); } } }
+        for (const m of (this.main === 'boll' ? [this.boll.up, this.boll.dn] : this.ma)) { const v = m[s + i]; if (v != null) { hi = Math.max(hi, v); lo = Math.min(lo, v); } } }
       for (const o of this.overlays) if (o.price && o.price < hi * 1.15 && o.price > lo * 0.85) { hi = Math.max(hi, o.price); lo = Math.min(lo, o.price); }
       const pad = (hi - lo) * 0.06 || hi * 0.01; hi += pad; lo -= pad;
       const py = p => y0 + 8 + (hi - p) / (hi - lo) * (hMain - 16);
@@ -124,7 +149,7 @@
       // 日期
       ctx.textAlign = 'center'; ctx.fillStyle = C.axis;
       const step = Math.max(1, Math.round(n / (W / 90)));
-      for (let i = 0; i < n; i += step) { ctx.fillText(R[i].date.slice(2), X(i), y3 + 9); ctx.strokeStyle = C.grid; ctx.beginPath(); ctx.moveTo(X(i) + .5, 0); ctx.lineTo(X(i) + .5, y3); ctx.stroke(); }
+      for (let i = 0; i < n; i += step) { ctx.fillText(R[i].date.length > 10 ? R[i].date.slice(5) : R[i].date.slice(2), X(i), y3 + 9); ctx.strokeStyle = C.grid; ctx.beginPath(); ctx.moveTo(X(i) + .5, 0); ctx.lineTo(X(i) + .5, y3); ctx.stroke(); }
       // 区间叠加
       for (const o of this.overlays) {
         if (o.zone) { const a = py(o.zone[1]), b = py(o.zone[0]); ctx.fillStyle = o.fill || 'rgba(255,176,0,.08)'; ctx.fillRect(0, a, W, Math.max(1, b - a)); }
@@ -138,12 +163,14 @@
         if (up && cw > 3) { ctx.fillStyle = '#0c1014'; ctx.fillRect(x - cw / 2, top, cw, bh); ctx.strokeRect(Math.round(x - cw / 2) + .5, Math.round(top) + .5, Math.round(cw) - 1, Math.max(1, Math.round(bh) - 1)); }
         else ctx.fillRect(x - cw / 2, top, cw, bh);
       }
-      // 均线
-      this.ma.forEach((m, k) => {
-        ctx.strokeStyle = C.ma[k]; ctx.lineWidth = 1; ctx.beginPath(); let st = false;
+      // 均线 / 布林线
+      const pline = (m, col, dash) => { ctx.strokeStyle = col; ctx.lineWidth = 1; if (dash) ctx.setLineDash(dash); ctx.beginPath(); let st = false;
         for (let i = 0; i < n; i++) { const v = m[s + i]; if (v == null) continue; const y = py(v); if (!st) { ctx.moveTo(X(i), y); st = true; } else ctx.lineTo(X(i), y); }
-        ctx.stroke();
-      });
+        ctx.stroke(); ctx.setLineDash([]); };
+      if (this.main === 'boll') { pline(this.boll.up, C.amber); pline(this.boll.mid, C.white); pline(this.boll.dn, C.cyan); }
+      else this.ma.forEach((m, k) => pline(m, C.ma[k % C.ma.length]));
+      // 额外曲线（回归通道等，对齐到最后 N 根）
+      for (const L of (this.extraLines || [])) { const off = this.rows.length - L.values.length; const arr = new Array(Math.max(0, off)).fill(null).concat(L.values); pline(arr, L.color, L.dash); }
       // 水平线（止损/止盈）
       ctx.setLineDash([5, 4]);
       for (const o of this.overlays) {
@@ -175,11 +202,33 @@
         [['dif', C.white], ['dea', C.amber]].forEach(([k, col]) => { ctx.strokeStyle = col; ctx.beginPath(); for (let i = 0; i < n; i++) { const y = sy(this.macd[k][s + i]); i ? ctx.lineTo(X(i), y) : ctx.moveTo(X(i), y); } ctx.stroke(); });
         ctx.fillStyle = C.axis; ctx.fillText('MACD', W + 4, sub + 8);
       } else {
-        const sy = v => sub + (100 - v) / 100 * subH;
-        ctx.strokeStyle = '#2a333d'; [20, 50, 80].forEach(v => { ctx.beginPath(); ctx.moveTo(0, sy(v)); ctx.lineTo(W, sy(v)); ctx.stroke(); ctx.fillStyle = C.axis; ctx.fillText(v, W + 4, sy(v)); });
-        ctx.strokeStyle = C.cyan; ctx.beginPath(); let f = false;
-        for (let i = 0; i < n; i++) { const v = this.rsi[s + i]; if (v == null) continue; f ? ctx.lineTo(X(i), sy(v)) : (ctx.moveTo(X(i), sy(v)), f = true); }
-        ctx.stroke();
+        const sets = { rsi: [[this.rsi, C.white], [this.rsi12, C.amber], [this.rsi24, '#d16cff']], kdj: [[this.kdj.K, C.white], [this.kdj.D, C.amber], [this.kdj.J, '#d16cff']],
+          obv: [[this.obv, C.cyan], [this.obvma, C.amber]], wr: [[this.wr, C.cyan]], cci: [[this.cci, C.cyan]], bias: [[this.bias[0], C.white], [this.bias[1], C.amber], [this.bias[2], '#d16cff']] }[this.sub] || [];
+        const fixed = { rsi: [0, 100, [20, 50, 80]], wr: [0, 100, [20, 50, 80]], kdj: null };
+        let lo2 = Infinity, hi2 = -Infinity;
+        sets.forEach(([arr]) => { for (let i = s; i < e; i++) { const v = arr[i]; if (v != null) { lo2 = Math.min(lo2, v); hi2 = Math.max(hi2, v); } } });
+        let marks = [];
+        if (fixed[this.sub]) { [lo2, hi2, marks] = fixed[this.sub]; }
+        else if (this.sub === 'kdj') { lo2 = Math.min(lo2, 0); hi2 = Math.max(hi2, 100); marks = [20, 50, 80]; }
+        else if (this.sub === 'cci') { lo2 = Math.min(lo2, -150); hi2 = Math.max(hi2, 150); marks = [-100, 0, 100]; }
+        else if (this.sub === 'bias') { const m = Math.max(Math.abs(lo2), Math.abs(hi2), 1); lo2 = -m; hi2 = m; marks = [0]; }
+        if (!(hi2 > lo2)) { hi2 = lo2 + 1; }
+        const sy = v => sub + (hi2 - v) / (hi2 - lo2) * subH;
+        ctx.strokeStyle = '#2a333d'; marks.forEach(v => { ctx.beginPath(); ctx.moveTo(0, sy(v)); ctx.lineTo(W, sy(v)); ctx.stroke(); ctx.fillStyle = C.axis; ctx.fillText(v, W + 4, sy(v)); });
+        sets.forEach(([arr, col]) => { ctx.strokeStyle = col; ctx.beginPath(); let f = false;
+          for (let i = 0; i < n; i++) { const v = arr[s + i]; if (v == null) continue; f ? ctx.lineTo(X(i), sy(v)) : (ctx.moveTo(X(i), sy(v)), f = true); } ctx.stroke(); });
+        ctx.fillStyle = C.axis; ctx.fillText(this.sub.toUpperCase(), W + 4, sub + subH - 6);
+      }
+      // 筹码分布（右侧）
+      if (chipW && this.chips) {
+        const ch = this.chips, x0 = W + padR, mx = Math.max(...ch.dist, 1e-9), last = this.rows[this.rows.length - 1].close;
+        ctx.fillStyle = 'rgba(255,255,255,.02)'; ctx.fillRect(x0, 0, chipW, hMain);
+        ch.dist.forEach((d, i) => { const p0 = ch.lo + i * ch.step, y = py(p0 + ch.step), y2_ = py(p0); if (y2_ < 0 || y > hMain) return;
+          ctx.fillStyle = p0 + ch.step / 2 <= last ? 'rgba(255,77,79,.65)' : 'rgba(47,211,230,.55)';
+          ctx.fillRect(x0 + 2, y, d / mx * (chipW - 6), Math.max(1, y2_ - y - 0.5)); });
+        const ya = py(ch.avg_cost); ctx.strokeStyle = C.amber; ctx.setLineDash([2, 2]); ctx.beginPath(); ctx.moveTo(x0, ya); ctx.lineTo(x0 + chipW, ya); ctx.stroke(); ctx.setLineDash([]);
+        ctx.fillStyle = C.amber; ctx.textAlign = 'left'; ctx.fillText('均成本 ' + ch.avg_cost, x0 + 4, Math.max(8, ya - 7));
+        ctx.fillStyle = C.text; ctx.fillText('获利 ' + ch.profit_ratio + '%', x0 + 4, hMain - 8);
       }
       // 十字光标
       let hi_ = n - 1;
@@ -196,7 +245,9 @@
         const r = R[hi_], prev = this.rows[s + hi_ - 1], pc = prev ? (r.close / prev.close - 1) * 100 : 0;
         const cls = pc >= 0 ? 'up' : 'down', f = v => v == null ? '--' : v.toFixed(2);
         this.lg.innerHTML = `<span>${r.date}</span><span>开 <b class="${cls}">${f(r.open)}</b></span><span>高 <b class="${cls}">${f(r.high)}</b></span><span>低 <b class="${cls}">${f(r.low)}</b></span><span>收 <b class="${cls}">${f(r.close)}</b></span><span class="${cls}">${pc >= 0 ? '+' : ''}${pc.toFixed(2)}%</span><span>量 ${fmtV(r.vol)}</span>`
-          + ['MA5', 'MA10', 'MA20', 'MA60'].map((k, j) => `<span style="color:${C.ma[j]}">${k} ${f(this.ma[j][s + hi_])}</span>`).join('');
+          + (this.main === 'boll' ? [['UP', this.boll.up, C.amber], ['MID', this.boll.mid, C.white], ['DN', this.boll.dn, C.cyan]].map(([k, a, col]) => `<span style="color:${col}">${k} ${f(a[s + hi_])}</span>`).join('')
+            : this.maN.map((k, j) => `<span style="color:${C.ma[j % C.ma.length]}">MA${k} ${f(this.ma[j][s + hi_])}</span>`).join(''))
+          + (this.sub === 'kdj' ? `<span>K ${f(this.kdj.K[s + hi_])} D ${f(this.kdj.D[s + hi_])} J ${f(this.kdj.J[s + hi_])}</span>` : '');
       }
     }
   }

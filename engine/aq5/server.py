@@ -11,7 +11,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import ai, analysis, auth, backtest, backup, db, learn, market, notify, picker, publisher, scheduler, sim, vault, sectors
+from . import ai, analysis, auth, backtest, backup, db, learn, market, notify, picker, publisher, scheduler, sim, vault, sectors, tunnel
 from .config import DATA, MOCK, WEB, load_settings, now, public_settings, save_settings
 from .strategies import DESC, NAMES
 
@@ -103,8 +103,11 @@ def api_quotes(q):
 def api_kline(q):
     code = q["code"][0]
     n = int(q.get("n", ["250"])[0])
+    period = q.get("period", ["day"])[0]
+    if period != "day":
+        return market.kline_period(code, period, min(n, 640))
     rows = market.kline_with_live(code, n)
-    return {"code": market.norm_code(code), "rows": rows}
+    return {"code": market.norm_code(code), "rows": rows, "period": "day"}
 
 
 def api_intraday(q):
@@ -138,7 +141,8 @@ def api_sim(q):
 def api_learn(_q):
     out = learn.summary()
     from .strategies import STRATEGIES
-    out["strategies"] = [{"id": k, "name": n, "desc": d} for k, n, _, d in STRATEGIES]
+    from .strategies import FORMULAS as SF
+    out["strategies"] = [{"id": k, "name": n, "desc": d, "formula": SF.get(k, "")} for k, n, _, d in STRATEGIES]
     out["boot"] = learn.BOOT
     out["history_samples"] = (db.q1("SELECT COUNT(*) n FROM samples WHERE session='history'") or {}).get("n", 0)
     return out
@@ -291,9 +295,11 @@ GET = {"/api/ai/status": api_ai_status, "/api/ai/comment": api_ai_comment, "/api
        "/api/events": api_events, "/api/strategies": api_strategies,
        "/api/sectors": lambda q: sectors.view(), "/api/sector": api_sector, "/api/ai/models": api_ai_models,
        "/api/ai/notes": api_ai_notes, "/api/ai/run": api_ai_run, "/api/ai/trade": api_ai_trade,
+       "/api/remote/status": lambda q: tunnel.status(),
+       "/api/diag/sources": lambda q: {"stats": market.SRC_STATS, "blocked": market.host_status(), "snap": market.SNAP_INFO},
        "/api/diag/net": lambda q: {"probes": market.probe(q.get("raw", ["0"])[0] == "1",
                                                      {"1": True, "0": False}.get(q.get("direct", [""])[0]),
-                                                     q.get("url")), "blocked": market.host_status(),
+                                                     q.get("url"), int((q.get("n") or [600])[0])), "blocked": market.host_status(),
                                    "snap": market.SNAP_INFO}}
 
 
@@ -411,7 +417,14 @@ POST = {"/api/picks/run": p_pick_run, "/api/sim/order": p_order, "/api/sim/cance
         "/api/ai/run": lambda b: ai.explain_run(int(b["id"]), force=True),
         "/api/ai/trade": lambda b: ai.trade_review(int(b["id"]), force=bool(b.get("force"))),
         "/api/me/dbsnap": lambda b: backup.db_snapshot(),
+        "/api/remote/enable": lambda b: tunnel.set_enabled(bool(b.get("on"))),
+        "/api/remote/download": lambda b: tunnel.download(),
+        "/api/remote/restart": lambda b: (tunnel.stop(), tunnel.start())[1],
         "/api/sectors/refresh": lambda b: (sectors.refresh_map_async(force=True), {"started": True})[1]}
+
+
+SENSITIVE = {"/api/me/vault", "/api/me/password", "/api/me/restore", "/api/me/token", "/api/me/revoke",
+             "/api/me/security", "/api/remote/enable", "/api/remote/download"}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -420,8 +433,25 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def _cors(self):
+        """只允许设置里的来源（默认 GitHub Pages）跨域调用，带 Token 访问。"""
+        o = self.headers.get("Origin") or ""
+        if o and o in load_settings().get("remote", {}).get("origins", []):
+            self.send_header("Access-Control-Allow-Origin", o)
+            self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Max-Age", "600")
+            self.send_header("Vary", "Origin")
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._cors()
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def _send(self, code, body: bytes, ctype="application/json; charset=utf-8", cache=False):
         self.send_response(code)
+        self._cors()
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "max-age=300" if cache else "no-store")
@@ -437,6 +467,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._cors()
         if cookie is not None:
             self.send_header("Set-Cookie", cookie)
         try:
@@ -457,6 +488,9 @@ class Handler(BaseHTTPRequestHandler):
         return None
 
     def _is_local(self):
+        # 经过 Cloudflare 隧道的请求虽然来自 127.0.0.1，但带有 Cf-/转发头：一律按外网处理
+        if any(self.headers.get(h) for h in ("Cf-Ray", "Cf-Connecting-Ip", "X-Forwarded-For", "Cf-Visitor")):
+            return False
         return self.client_address[0] in auth.LOCAL
 
     def _authorized(self) -> bool:
@@ -548,6 +582,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not self._authorized():
             return self._json({"error": "需要登录", "need_login": True}, 401)
+        if path in SENSITIVE and not self._is_local():
+            sess = auth.check(self._token())
+            if not sess or sess.get("kind") == "api":
+                return self._json({"error": "这个操作只能在电脑本机或网页登录后进行（手机远程 Token 无权限）"}, 403)
         if not self._handle(POST, body):
             self._json({"error": "not found"}, 404)
 
@@ -581,6 +619,7 @@ def main():
     ai.init()
     sectors.init()
     sectors.refresh_map_async()
+    tunnel.watchdog()
     _migrate_secrets()
     sim.ensure_accounts()
     market.ensure_universe_mock()

@@ -43,6 +43,9 @@ DEFAULTS = {
     "pick": {
         "times": ["09:26", "14:45"],
         "max_picks": 5,
+        "top_n": 10,                # 每次选股都输出综合分前 N 只（分 A/B/C 三级）
+        "ai_max_positions": 8,      # AI 自动盘最多同时持有几只
+        "ai_daily_trade": True,     # AI 自动盘每个交易日至少交易一次（收集迭代数据）
         "min_score": 72.0,          # 综合分门槛：宁缺毋滥
         "min_amount_yi": 1.0,       # 成交额至少 1 亿（尾盘），竞价按比例
         "exclude_st": True,
@@ -59,6 +62,7 @@ DEFAULTS = {
                 "push": True, "interval_min": 10, "repo_dir": ""},
     # 个人数据加密备份到 GitHub 私有仓库（备份密码在本机保险箱）
     "backup": {"enabled": True, "remote": "", "time": "15:50", "keep_days": 7},
+    "remote": {"enabled": False, "origins": ["https://suqi854.github.io"]},
     "net": {"direct_cn": True},
     "security": {"local_no_login": True},
     # AI 接口（Key 在本机保险箱）：provider 可选 DeepSeek / OpenAI / 通义千问 / Kimi / Claude / 自定义

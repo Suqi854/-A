@@ -104,6 +104,60 @@ def s_auction_strong(rows, ind, live, session):
     return None
 
 
+def _m(rows, ind):
+    if "models" not in ind:
+        from .models import compute
+        ind["models"] = compute(rows, ind)
+    return ind["models"]
+
+
+def s_reg_lower(rows, ind, live, session):
+    """回归通道低吸：上升趋势中回落到回归通道下沿。"""
+    r = _m(rows, ind).get("reg")
+    e = ind["extra"]
+    if r and r["slope_ann"] > 15 and r["r2"] > 0.5 and r["z"] < -1.3 and e["pct"] > -1:
+        conf = min(0.9, 0.5 + (-1.3 - r["z"]) * 0.2 + (r["r2"] - 0.5) * 0.4)
+        return conf, (f"60日对数回归通道向上（年化 {r['slope_ann']:+.0f}%，R² {r['r2']:.2f}），价格回落到通道下沿 "
+                      f"z={r['z']:+.2f}（下轨 {r['lower']}），统计上偏离过大、易回归")
+    return None
+
+
+def s_mean_revert(rows, ind, live, session):
+    """均值回归：Z20<-2 且 Hurst<0.5、半衰期短。"""
+    m = _m(rows, ind)
+    z, h, hl = m.get("z20"), m.get("hurst"), m.get("half_life")
+    if z is not None and z < -2 and h is not None and h < 0.5 and hl and hl < 20 and ind["extra"]["pct"] > -2:
+        return 0.5 + min(0.3, (-2 - z) * 0.15 + (0.5 - h)), (f"Z20={z:+.2f}（低于均值 {abs(z):.1f} 个标准差），Hurst={h:.2f}<0.5 "
+                                                              f"属均值回归型，半衰期 {hl} 天：短线有回归均值的统计优势")
+    return None
+
+
+def s_squeeze_break(rows, ind, live, session):
+    """波动收敛后放量突破布林上轨。"""
+    b = _m(rows, ind).get("bbw")
+    c, e = ind["close"], ind["extra"]
+    up = ind["boll_up"]
+    if not b or up[-2] is None:
+        return None
+    prev_sq = b.get("recent_min_pctile", 100) <= 20
+    if prev_sq and c[-1] > (up[-1] or 1e9) * 0.995 and e["vr"] >= 1.3 and e["pct"] > 1:
+        return 0.55 + min(0.3, (e["vr"] - 1.3) * 0.1), (f"布林带宽前几天处于近120日 {b['recent_min_pctile']:.0f}% 低分位（波动收敛），"
+                                                        f"今日放量（量比 {e['vr']:.1f}）冲击上轨 {up[-1]:.2f}：方向选择向上")
+    return None
+
+
+def s_trend_quality(rows, ind, live, session):
+    """高质量趋势：斜率大、R²高、Hurst>0.55、且未过热。"""
+    m = _m(rows, ind)
+    r, h = m.get("reg"), m.get("hurst")
+    c = ind["close"]
+    m20 = _g(ind["ma20"])
+    if r and h and r["slope_ann"] > 30 and r["r2"] > 0.75 and h > 0.55 and m20 and c[-1] > m20 and r["z"] < 1.2:
+        return min(0.85, 0.5 + (r["r2"] - 0.75) + (h - 0.55)), (f"趋势质量高：年化斜率 {r['slope_ann']:+.0f}%、R² {r['r2']:.2f}、"
+                                                               f"Hurst {h:.2f}（趋势延续型），价格在通道 z={r['z']:+.2f} 未过热")
+    return None
+
+
 STRATEGIES = [
     ("breakout", "趋势突破", s_breakout, "价格突破近20日最高点并放量，说明上方抛压被消化，趋势可能加速"),
     ("pullback", "多头回踩", s_pullback, "上升趋势中缩量回落到均线，是风险较小的低吸点"),
@@ -113,7 +167,25 @@ STRATEGIES = [
     ("accumulate", "主力吸筹", s_accumulate, "主力资金持续净流入但股价没怎么涨，可能在建仓"),
     ("tail_strong", "尾盘强势", s_tail_strong, "14:45 仍站稳均价线且收在高位，次日惯性上冲概率较高"),
     ("auction_strong", "竞价抢筹", s_auction_strong, "集合竞价高开且竞价量大，说明有资金提前抢筹"),
+    ("reg_lower", "回归通道低吸", s_reg_lower, "上升的对数回归通道里，价格跌到下沿（统计意义上的超跌），等待回归中轨"),
+    ("mean_revert", "均值回归", s_mean_revert, "价格偏离20日均值超过2个标准差，且该股属于均值回归型（Hurst<0.5）"),
+    ("squeeze_break", "收敛突破", s_squeeze_break, "布林带长期收窄后放量突破上轨，波动率扩张往往伴随趋势行情"),
+    ("trend_quality", "趋势质量", s_trend_quality, "斜率、拟合度、Hurst 三者都显示趋势强且稳定，顺势持有"),
 ]
+FORMULAS = {
+    "breakout": "Cₜ > max(H₋₂₀..H₋₁) 且 量比 ≥ 1.5 且 MA20ₜ > MA20ₜ₋₅；置信度 = 0.5 + 0.15·(量比−1.5) + 5·(Cₜ/H20 − 1)",
+    "pullback": "MA10 > MA20 且 min(|C/MA10−1|, |C/MA20−1|) < 2% 且 VMA5 < 0.85·VMA20 且 5日涨幅 < 2%",
+    "volume_start": "2% ≤ 涨幅 ≤ 7% 且 1.8 ≤ 量比 ≤ 5 且 3% ≤ 换手 ≤ 18% 且 20日涨幅 < 25%",
+    "oversold": "RSI6 < 25 且 (C/MA20 − 1) < −8% 且 今日收红 且 收盘位于日内区间上半部",
+    "macd_cross": "DIFₜ₋₁ ≤ DEAₜ₋₁ 且 DIFₜ > DEAₜ；DIF = EMA12 − EMA26，DEA = EMA9(DIF)；|DIF|/C < 1% 视为零轴附近",
+    "accumulate": "近5日主力净流入占比均值 > 3% 且 |20日涨幅| < 8% 且 ATR% < 5%",
+    "tail_strong": "14:45 时 价格 > 1.005·均价线 且 3% ≤ 涨幅 ≤ 7% 且 日内位置 > 0.8 且 量比 ≥ 1.5",
+    "auction_strong": "1% ≤ 竞价高开 ≤ 5% 且 竞价量比 ≥ 3 且 昨收 ≥ MA20",
+    "reg_lower": "ln P = a + b·t（60日）；年化斜率 > 15% 且 R² > 0.5 且 通道 z < −1.3",
+    "mean_revert": "Z20 = (C − MA20)/σ20 < −2 且 Hurst < 0.5 且 半衰期 = −ln2/β < 20 天",
+    "squeeze_break": "BBW = (上轨−下轨)/中轨 在前5日内曾处于近120日 ≤20% 分位 且 C ≥ 0.995·上轨 且 量比 ≥ 1.3",
+    "trend_quality": "年化斜率 > 30% 且 R² > 0.75 且 Hurst > 0.55 且 C > MA20 且 通道 z < 1.2",
+}
 NAMES = {s[0]: s[1] for s in STRATEGIES}
 DESC = {s[0]: s[3] for s in STRATEGIES}
 
@@ -129,7 +201,7 @@ def strategy_weights() -> dict:
 def detect(rows, ind, live, session="intraday", sw: dict | None = None) -> list[dict]:
     sw = sw or strategy_weights()
     out = []
-    for key, name, fn, _ in STRATEGIES:
+    for key, name, fn, *_ in STRATEGIES:
         try:
             r = fn(rows, ind, live, session)
         except (ZeroDivisionError, TypeError, IndexError, KeyError):

@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from . import learn, market
 from .config import load_settings
-from .factors import EXPLAIN, LABELS, current_weights, raw_factors, score
+from .factors import EXPLAIN, LABELS, current_weights, raw_factors, score, FORMULA, COMPOSITE
 from .indicators import ma
-from .strategies import DESC, detect, strategy_score, strategy_weights
+from .strategies import DESC, FORMULAS as SFORM, detect, strategy_score, strategy_weights
 
 
 def _r(x, n=2):
@@ -144,9 +144,21 @@ def analyze(code: str) -> dict:
     ind = ev.pop("ind")
     e = ind["extra"]
     lab, tone, advice = rating(ev["score"], ind)
-    mf = main_force(rows, ind, flows)
+    from . import mainforce, models
+    fs = (live.get("fmcap") or 0) * 1e8 / live["price"] if live.get("fmcap") and live.get("price") else None
+    try:
+        cyq = models.chips(rows, fs)
+    except (ZeroDivisionError, ValueError):
+        cyq = None
+    mf = mainforce.analyze(rows, ind, flows, cyq)
+    mdl = ind.get("models") or models.compute(rows, ind)
+    kel = models.kelly(ev["prob"], ev["plan"]["rr"] or 1)
+    try:
+        xc = market.cross_check(code)
+    except Exception:  # noqa: BLE001
+        xc = None
     factors = [{"key": k, "label": LABELS[k], "score": ev["parts"][k], "weight": round(w[k], 3),
-                "raw": ev["raw"][k], "explain": EXPLAIN[k]} for k in LABELS]
+                "raw": ev["raw"][k], "explain": EXPLAIN[k], "formula": FORMULA.get(k, "")} for k in LABELS]
     strong = sorted(factors, key=lambda f: -f["score"])
     reasons = [f"{f['label']}得分 {f['score']:.0f}：{f['explain']}" for f in strong[:3] if f["score"] >= 60]
     risks = [f"{f['label']}得分仅 {f['score']:.0f}" for f in strong[::-1][:3] if f["score"] < 40]
@@ -174,6 +186,8 @@ def analyze(code: str) -> dict:
         f"ATR（平均真实波幅）= {ev['plan']['atr']}，约占股价 {e['atrp']:.1f}%：止损一般放在 2 倍 ATR 以外，"
         f"避免被正常波动“洗”出去。",
         f"盈亏比 {ev['plan']['rr']}：赚的空间 / 亏的空间。长期看，盈亏比≥1.5 且胜率≥45% 的交易才值得做。",
+        f"凯利公式：按估计胜率 {ev['prob'] * 100:.0f}% 和盈亏比 {ev['plan']['rr']}，期望值 EV = {kel['ev']:+.2f} 份风险；"
+        f"凯利建议仓位 {kel['full']:.0f}%，实战用一半（{kel['half']:.0f}%）。EV 为负的交易，长期做一定亏钱。",
         "板块效应：A股资金常按行业和题材轮动，同一行业的股票往往同涨同跌。选股先看行业强不强，再挑行业里的龙头或补涨股，胜率更高。",
     ]
     return {"code": code, "name": live.get("name"), "quote": {k: live.get(k) for k in (
@@ -181,7 +195,10 @@ def analyze(code: str) -> dict:
                 "mcap", "fmcap", "main_net", "main_pct", "up_limit", "dn_limit", "time", "bids", "asks")},
             "score": ev["score"], "fscore": ev["fscore"], "sscore": ev["sscore"], "prob": ev["prob"],
             "prob_src": ev["prob_src"], "rating": lab, "tone": tone, "advice": advice, "factors": factors,
-            "signals": ev["signals"], "strategy_desc": DESC, "plan": ev["plan"], "main_force": mf,
+            "signals": ev["signals"], "strategy_desc": DESC, "strategy_formula": SFORM, "plan": ev["plan"], "main_force": mf,
             "reasons": reasons, "risks": risks, "lessons": lessons, "regime": regime(), "weights_ver": ver,
-            "sector": sec,
+            "sector": sec, "chips": cyq, "cross_check": xc, "composite": COMPOSITE,
+            "models": {**{k: v for k, v in mdl.items() if k != "reg"}, "reg": {k: v for k, v in (mdl.get("reg") or {}).items() if k != "line"} or None,
+                       "reg_line": (mdl.get("reg") or {}).get("line"), "kelly": kel, "summary": models.summary_lines(mdl),
+                       "formulas": models.FORMULAS},
             "flows": [{"date": f["date"], "main": f["main"], "main_pct": f["main_pct"]} for f in flows[-20:]]}

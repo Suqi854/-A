@@ -225,26 +225,93 @@ def tick() -> None:
                     c.execute("UPDATE positions SET stage=1 WHERE account=? AND code=?", (p["account"], p["code"]))
 
 
+TIER_SIZE = {"A": 1.0, "B": 0.6, "C": 0.3}
+
+
+def _traded_today(acct: str) -> int:
+    return (db.q1("SELECT COUNT(*) AS n FROM orders WHERE account=? AND created LIKE ? AND status IN ('filled','pending')",
+                  (acct, today() + "%")) or {}).get("n", 0)
+
+
 def auto_follow(picks: list[dict], session: str) -> None:
+    """AI 自动盘：A/B 级按仓位买入；每个交易日至少交易一次（尾盘检查），用于收集实战数据。
+
+    仓位 = 基础仓位 × 级别系数（A 1.0 / B 0.6 / C 0.3）× 凯利修正（半凯利与 1 取小）
+    """
+    from .models import kelly
     ensure_accounts()
+    cfg = load_settings()["pick"]
+    base = cfg["position_pct"]
+    max_pos = int(cfg.get("ai_max_positions", 8))
     v = view("ai", light=True)
-    pct = load_settings()["pick"]["position_pct"]
-    for p in picks:
-        if db.q1("SELECT 1 FROM positions WHERE account='ai' AND code=?", (p["code"],)):
-            continue
-        budget = min(v["equity"] * pct, v["cash"] * 0.98)
+    held = {p["code"] for p in v["positions"]}
+    pend = {o["code"] for o in db.q("SELECT code FROM orders WHERE account='ai' AND status='pending'")}
+    tag = "竞价" if session == "auction" else "尾盘"
+    bought = 0
+
+    def buy(p, size_k, why):
+        nonlocal bought
+        k = kelly(p.get("prob") or 0.5, (p["plan"].get("rr") or 1.5))
+        kf = min(1.0, max(0.3, (k["half"] / 100) / base)) if k["half"] > 0 else 0.3
+        budget = min(v["equity"] * base * size_k * kf, v["cash"] * 0.98)
         qty = int(budget / (p["price"] * 1.003) / 100) * 100
         if qty < 100:
-            db.event("trade", f"AI自动盘资金不足，跳过 {p['name']}", "")
-            continue
+            return False
         pl = p["plan"]
+        sig = p["signals"][0]["name"] if p.get("signals") else "综合评分"
         try:
             place("ai", p["code"], "buy", qty, stop=pl["stop"], target1=pl["target1"], target2=pl["target2"],
-                  reason=f"{'竞价' if session == 'auction' else '尾盘'}选股：{p['signals'][0]['name']}，评分{p['score']}",
-                  emotion="跟随系统", pick_id=p["id"])
-            v["cash"] -= qty * p["price"]
+                  reason=f"{tag}选股[{p.get('tier', '?')}级 第{p.get('rank', '?')}名]：{sig}，评分{p['score']}；{why}",
+                  emotion="跟随系统", pick_id=p.get("id"))
         except ValueError as e:
             db.event("trade", f"AI自动盘下单失败 {p['name']}", str(e), "warn")
+            return False
+        v["cash"] -= qty * p["price"]
+        held.add(p["code"])
+        bought += 1
+        return True
+
+    for p in picks:
+        if p.get("tier", "A") not in ("A", "B") or p["code"] in held or p["code"] in pend:
+            continue
+        if len(held) >= max_pos:
+            break
+        buy(p, TIER_SIZE[p.get("tier", "A")], f"仓位系数 {TIER_SIZE[p.get('tier', 'A')]}")
+
+    if session != "close" or not cfg.get("ai_daily_trade", True) or bought or _traded_today("ai"):
+        return
+    # —— 尾盘仍没有任何交易：保证每天至少一笔，收集迭代数据 ——
+    cands = [p for p in picks if p["code"] not in held and p["code"] not in pend]
+    if not cands:
+        return
+    best = cands[0]
+    if len(held) < max_pos and v["cash"] > best["price"] * 100 * 1.01:
+        if buy(best, TIER_SIZE.get(best.get("tier", "C"), 0.3), "每日最少一笔（试错仓，收集数据）"):
+            return
+    # 满仓或没钱：卖出当前评分最低、且明显弱于今日第一名的持仓，换成第一名
+    from .analysis import analyze
+    worst = None
+    for pos in v["positions"]:
+        if pos["avail"] <= 0:
+            continue
+        try:
+            sc = analyze(pos["code"])["score"]
+        except (RuntimeError, ValueError):
+            continue
+        if worst is None or sc < worst[1]:
+            worst = (pos, sc)
+    if worst and worst[1] < best["score"] - 5:
+        pos, sc = worst
+        try:
+            place("ai", pos["code"], "sell", pos["avail"],
+                  reason=f"调仓：持仓评分 {sc:.0f} 明显低于今日第1名 {best['name']} 的 {best['score']:.0f}", emotion="跟随系统")
+            v["cash"] += pos["avail"] * (pos["price"] or pos["cost"]) * 0.998
+            held.discard(pos["code"])
+            buy(best, TIER_SIZE.get(best.get("tier", "C"), 0.3), "调仓换股")
+        except ValueError as e:
+            db.event("trade", "AI自动盘调仓失败", str(e), "warn")
+    else:
+        db.event("trade", "AI自动盘今日未交易", "持仓都不弱于今日候选，且没有可用资金或仓位", "info")
 
 
 def view(acct: str, light: bool = False) -> dict:

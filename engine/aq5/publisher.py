@@ -48,7 +48,7 @@ def public_overview() -> dict:
     from .server import api_overview
     ov = api_overview({})
     ov.pop("lan", None)
-    ov["watchlist"] = []
+    # 自选股不算隐私（只有“我的模拟盘”和设置是隐私），公开发布
     ov["accounts"] = {"ai": ov["accounts"]["ai"]}
     ov["events"] = public_events(30)
     ov["scheduler"] = {"started": ov["scheduler"].get("started"), "jobs": ov["scheduler"].get("jobs", {})}
@@ -66,12 +66,13 @@ def public_events(limit=100) -> list[dict]:
 def _analysis_codes() -> list[str]:
     codes = [r["code"] for r in db.q("SELECT DISTINCT code FROM picks WHERE date >= date(?, '-7 day')", (today(),))]
     codes += [r["code"] for r in db.q("SELECT code FROM positions WHERE account='ai'")]
+    codes += [market.norm_code(c) for c in load_settings()["watchlist"]]
     seen, out = set(), []
     for c in codes:
         if c not in seen:
             seen.add(c)
             out.append(c)
-    return out[:40]
+    return out[:80]
 
 
 def export(full: bool = True) -> dict:
@@ -181,10 +182,18 @@ def _private_pack(d: Path, full: bool) -> list[str]:
     pack = {"time": now().strftime("%Y-%m-%d %H:%M:%S"), "watchlist": [qs.get(c) or {"code": c} for c in wl],
             "analysis": _PRIV_CACHE["analysis"], "me": me, "profile": (u or {}).get("profile", {}),
             "events": db.q("SELECT * FROM events WHERE kind IN ('alert','trade','ai') ORDER BY id DESC LIMIT 80"),
-            "ai": _private_ai(wl), "lan": _lan()}
+            "ai": _private_ai(wl), "lan": _lan(), "remote": _remote()}
     raw = gzip.compress(json.dumps(clean(pack), ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
     target.write_bytes(vault.seal_web(raw, pw))
     return [f"private.enc({len(_PRIV_CACHE['analysis'])}只自选,加密)"]
+
+
+def _remote():
+    try:
+        from . import tunnel
+        return tunnel.remote_info()
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _lan() -> str:
@@ -216,7 +225,7 @@ def _site(root: Path) -> None:
     """把只读网页复制到发布目录（GitHub Pages 用）。"""
     for sub in ("css", "js"):
         (root / sub).mkdir(parents=True, exist_ok=True)
-    for f in ("index.html", "manifest.json", "icon.svg", "css/app.css", "js/app.js", "js/charts.js"):
+    for f in ("index.html", "manifest.json", "icon.svg", "css/app.css", "js/app.js", "js/charts.js", "js/lite.js"):
         src = WEB / f
         if src.exists():
             shutil.copyfile(src, root / f)
