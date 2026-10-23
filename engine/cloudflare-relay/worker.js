@@ -9,7 +9,8 @@ export default {
     const url = new URL(req.url);
     if (url.pathname === "/__aq5/target") {
       if (req.method === "POST") {
-        if (!env.SECRET || req.headers.get("x-aq5-secret") !== env.SECRET) return new Response("forbidden", { status: 403 });
+        const want = (env.SECRET || "").trim(), got = (req.headers.get("x-aq5-secret") || "").trim();
+        if (!want || got !== want) return new Response("forbidden", { status: 403 });
         const { target } = await req.json();
         if (!/^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/.test(target || "")) return new Response("bad target", { status: 400 });
         await env.KV.put("target", target);

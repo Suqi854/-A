@@ -60,9 +60,16 @@ $secret = -join ((48..57) + (97..122) | Get-Random -Count 40 | ForEach-Object { 
 Write-Host "== 4/4 设置密钥并告诉本机引擎 =="
 Run "secret put SECRET" $secret | Out-Null
 $body = @{ url = $url; secret = $secret } | ConvertTo-Json
-try {
-  Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:18950/api/remote/relay" -ContentType "application/json; charset=utf-8" -Body ([Text.Encoding]::UTF8.GetBytes($body)) | Out-Null
-} catch { Fail "引擎没响应：$_" }
+$pushed = $false
+for ($i = 0; $i -lt 6 -and -not $pushed; $i++) {
+  Start-Sleep -Seconds 5
+  try {
+    $r = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:18950/api/remote/relay" -ContentType "application/json; charset=utf-8" -Body ([Text.Encoding]::UTF8.GetBytes($body))
+    $pushed = [bool]$r.pushed
+    "push try $i -> $($r.pushed)" | Out-File $LOG -Append -Encoding utf8
+  } catch { "push try $i error $_" | Out-File $LOG -Append -Encoding utf8 }
+}
+if (-not $pushed) { Write-Host "中转已部署，但还没把电脑地址推上去（请确认已开启手机远程）；引擎每 5 分钟会自动重试。" -ForegroundColor Yellow }
 "OK $url" | Out-File $LOG -Append -Encoding utf8
 Write-Host ""
 Write-Host "完成！固定地址：$url" -ForegroundColor Green
