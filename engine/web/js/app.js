@@ -657,8 +657,10 @@
         <div class="hint">API Token 给插件或脚本调用本机引擎用（请求头 Authorization: Bearer …），可随时注销。</div>` : '<p class="hint">创建账号后可用。</p>', { cls: 'c6' })}
       ${panel('VAULT <small>密钥保险箱 · 只存本机，不进 Git、不会公开发布</small>', `<div class="ticket">
         ${keyRow('ai_key', 'AI 接口 Key（DeepSeek 等）')}${keyRow('pushplus_token', 'PushPlus token')}${keyRow('serverchan_key', 'Server酱 SendKey')}
-        ${keyRow('backup_password', '备份密码（加密个人数据用，务必自己记住）')}</div>
-        <p class="hint">Windows 下用系统 DPAPI 加密，绑定你的 Windows 账户；拷走文件也解不开。建议把 E:\A量化分析 里的明文密钥文件迁移进来后删除。</p>
+        ${keyRow('backup_password', '备份密码（加密个人数据用，务必自己记住）')}
+        ${keyRow('mobile_password', '手机查看密码（GitHub 网页上点「解锁个人」时输入，至少 8 位）')}</div>
+        <p class="hint">手机解锁：${vs.mobile_password ? '<b class="down">已设置</b>，每次发布都会更新加密的个人数据' : '<b class="up">未设置</b>，手机上的「解锁个人」暂时用不了'}。设置或修改后会自动发布，约 1–2 分钟后手机刷新即可解锁。</p>
+        <p class="hint">Windows 下用系统 DPAPI 加密，绑定你的 Windows 账户；拷走文件也解不开。建议把 E:\\A量化分析 里的明文密钥文件迁移进来后删除。</p>
         <div class="row"><span class="sp"></span><button class="btn pri" id="vkSave">保存密钥</button></div>`, { cls: 'c6' })}
       ${panel('BACKUP <small>个人数据加密备份 → GitHub 私有仓库</small>', `<div class="ticket">
         <label class="full">私有仓库地址<input class="in" id="bkRemote" value="${esc(me.backup.remote || '')}" placeholder="https://github.com/Suqi854/aq-private.git"></label>
@@ -728,7 +730,9 @@
     const sl = $('#secLocal'); if (sl) sl.onchange = async () => { try { await api('me/security', { local_no_login: sl.checked }); toast(sl.checked ? '本机免登录已开启' : '本机也需要登录了'); } catch (e) { toast(e.message, 1); } };
     $$('#p-set [data-rv]').forEach(b => b.onclick = async () => { await api('me/revoke', { id: b.dataset.rv }); toast('已注销'); renderSet(); });
     on('tkGo', async () => { const r = await api('me/token', { name: $('#tkName').value }); prompt('API Token（只显示这一次，请复制保存）', r.token); renderSet(); });
-    on('vkSave', async () => { const v = {}; $$('#p-set .vk').forEach(i => { if (i.value.trim()) v[i.dataset.k] = i.value.trim(); }); if (!Object.keys(v).length) return toast('没有填写新的密钥', 1); await api('me/vault', v); toast('已加密保存到本机'); renderSet(); });
+    on('vkSave', async () => { const v = {}; $$('#p-set .vk').forEach(i => { if (i.value.trim()) v[i.dataset.k] = i.value.trim(); }); if (!Object.keys(v).length) return toast('没有填写新的密钥', 1); await api('me/vault', v);
+      if (v.mobile_password) { await api('publish', { full: true }).catch(() => null); toast('已保存，正在加密发布个人数据，1–2 分钟后手机刷新再解锁'); } else toast('已加密保存到本机');
+      renderSet(); });
     const cfg = () => api('me/security', { local_no_login: $('#secLocal') ? $('#secLocal').checked : true, remote: $('#bkRemote').value.trim(), enabled: $('#bkOn').checked });
     on('bkSaveCfg', async () => { await cfg(); toast('备份设置已保存'); });
     on('bkLocal', async () => { const r = await api('me/backup', { push: false }); toast('已加密备份到本机 ' + r.bytes + ' 字节'); renderSet(); });
@@ -739,7 +743,8 @@
   // ------------------------------------------------------------------ 公开网页：用密码在浏览器本地解密个人数据
   async function unlockPrivate(pw) {
     const r = await fetch('data/private.enc?t=' + Date.now());
-    if (!r.ok) throw new Error('还没有发布加密的个人数据（电脑端「设置 → 密钥保险箱」里设置手机查看密码）');
+    if (!r.ok) throw new Error('还没有加密的个人数据：请在电脑端「设置 → 密钥保险箱」设置「手机查看密码」，等 1–2 分钟发布完成再试');
+    if (!window.crypto || !crypto.subtle || typeof DecompressionStream === 'undefined') throw new Error('这个浏览器不支持本地解密，请换用系统自带浏览器或 Chrome（需 https 地址）');
     const buf = new Uint8Array(await r.arrayBuffer());
     if (new TextDecoder().decode(buf.slice(0, 5)) !== 'AQ5w1') throw new Error('文件格式不对');
     const salt = buf.slice(5, 21), nonce = buf.slice(21, 37), tag = buf.slice(37, 69), ct = buf.slice(69);

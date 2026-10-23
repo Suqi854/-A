@@ -188,6 +188,9 @@ def p_profile(b):
 
 
 def p_vault(b):
+    mp = str(b.get("mobile_password") or "")
+    if mp and len(mp) < 8:
+        raise ValueError("手机查看密码至少 8 位")
     vault.set_many({k: v for k, v in b.items() if k in VAULT_KEYS})
     return vault.status()
 
