@@ -792,15 +792,16 @@
         <button class="btn pri" id="rmDl" ${st.downloading ? 'disabled' : ''}>${st.downloading ? '下载中 ' + st.progress + '%' : '下载 cloudflared'}</button></div>` : ''}
       <div class="row" style="margin-top:6px"><label class="hint"><input type="checkbox" id="rmOn" ${st.enabled ? 'checked' : ''} ${st.installed ? '' : 'disabled'}> 开启手机远程</label><span class="sp"></span>
         ${st.installed ? '<button class="btn sm" id="rmRe">重启隧道</button>' : ''}</div>
-      <dl class="kv" style="margin-top:6px"><dt>状态</dt><dd>${st.running ? (st.url ? '<b class="down">已连通</b>' : '<span class="amber">连接中…</span>') : '<span class="muted">未运行</span>'}</dd>
+      <dl class="kv" style="margin-top:6px"><dt>状态</dt><dd>${st.running ? (st.connected && st.url ? '<b class="down">已连通</b>' : '<span class="amber">连接中…（拿到地址后还要等连上 Cloudflare）</span>') : '<span class="muted">未运行</span>'}</dd>
         <dt>远程地址</dt><dd class="mono" style="word-break:break-all">${st.url ? `<a href="${esc(st.url)}" target="_blank" rel="noopener">${esc(st.url)}</a>` : '--'}</dd>
         ${st.since ? `<dt>建立时间</dt><dd>${esc(st.since)}</dd>` : ''}</dl>
       ${st.error ? `<p class="up">${esc(st.error)}</p>` : ''}
+      ${st.running && !st.connected && st.log && st.log.length ? `<details class="fx"><summary>隧道日志</summary>${st.log.map(l => `<div><code>${esc(l)}</code></div>`).join('')}</details>` : ''}
       <p class="hint">安全：经过隧道的访问一律要登录或带手机专用 Token；改密钥、改密码、恢复备份只能在电脑本机做。地址每次重启会变，新地址会自动加密发布给手机。也可以直接用手机浏览器打开上面的地址并登录。</p>`;
     const dl = $('#rmDl'); if (dl) dl.onclick = async () => { await api('remote/download', {}); toast('开始下载 cloudflared'); pollRm(); };
     const on = $('#rmOn'); if (on) on.onchange = async () => { await api('remote/enable', { on: on.checked }); toast(on.checked ? '已开启，正在建立隧道（约10秒）' : '已关闭手机远程'); pollRm(); };
     const re = $('#rmRe'); if (re) re.onclick = async () => { await api('remote/restart', {}); toast('隧道重启中'); pollRm(); };
-    if (st.downloading || (st.enabled && st.running && !st.url)) pollRm();
+    if (st.downloading || (st.enabled && st.running && !(st.url && st.connected))) pollRm();
   }
   function pollRm() { clearTimeout(S.timers.rm); S.timers.rm = setTimeout(() => S.page === 'set' && loadRemote(), 2500); }
   async function loadSources(probe) {

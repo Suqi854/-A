@@ -25,7 +25,7 @@ URLS = {
     "linux": "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
     "darwin": "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64.tgz",
 }
-STATE = {"running": False, "url": None, "since": None, "error": None, "downloading": False, "progress": 0,
+STATE = {"running": False, "connected": False, "url": None, "since": None, "error": None, "downloading": False, "progress": 0,
          "installed": False, "log": []}
 _proc: dict = {"p": None}
 _lock = threading.Lock()
@@ -99,6 +99,12 @@ def _reader(p):
         if not t:
             continue
         STATE["log"] = (STATE["log"] + [t[-200:]])[-30:]
+        if "Registered tunnel connection" in t:
+            STATE.update(connected=True, error=None)
+        elif "Unregistered tunnel connection" in t or ("ERR" in t and "connIndex=0" in t):
+            STATE["connected"] = False
+            if "quic" in t.lower():
+                STATE["error"] = "QUIC(UDP) 连不上 Cloudflare，已改用 http2(TCP)"
         m = pat.search(t)
         if m and m.group(0) != STATE["url"]:
             STATE.update(url=m.group(0), since=now().strftime("%Y-%m-%d %H:%M:%S"), error=None)
@@ -119,10 +125,13 @@ def start() -> dict:
             raise ValueError("还没有 cloudflared，先点「下载」")
         port = load_settings()["port"]
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        p = subprocess.Popen([str(EXE), "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{port}"],
+        # 用 http2（TCP 443）而不是默认的 QUIC（UDP）：代理软件 TUN 模式、公司/校园网常常拦 UDP
+        proto = load_settings().get("remote", {}).get("protocol", "http2")
+        p = subprocess.Popen([str(EXE), "tunnel", "--no-autoupdate", "--protocol", proto, "--edge-ip-version", "auto",
+                              "--url", f"http://127.0.0.1:{port}"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=flags)
         _proc["p"] = p
-        STATE.update(running=True, url=None, error=None)
+        STATE.update(running=True, connected=False, url=None, error=None)
         threading.Thread(target=_reader, args=(p,), daemon=True, name="aq5-cfread").start()
         return {"running": True}
 
@@ -133,7 +142,7 @@ def stop() -> dict:
         if p and p.poll() is None:
             p.terminate()
         _proc["p"] = None
-        STATE.update(running=False, url=None)
+        STATE.update(running=False, connected=False, url=None)
     return {"running": False}
 
 
