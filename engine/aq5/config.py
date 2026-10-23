@@ -60,6 +60,9 @@ DEFAULTS = {
     # 个人数据加密备份到 GitHub 私有仓库（备份密码在本机保险箱）
     "backup": {"enabled": False, "remote": "", "time": "15:50"},
     "security": {"local_no_login": True},
+    # AI 接口（Key 在本机保险箱）：provider 可选 DeepSeek / OpenAI / 通义千问 / Kimi / Claude / 自定义
+    "ai": {"provider": "DeepSeek", "base_url": "", "model": "", "format": "", "daily_limit": 300,
+           "auto_review": True, "auto_sentiment": True, "temperature": 0.3},
 }
 
 _lock = threading.Lock()

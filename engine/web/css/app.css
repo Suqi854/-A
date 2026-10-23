@@ -281,3 +281,7 @@ body.static.unlocked .pv { display: inline-flex !important; }
 @media (max-width: 900px) { body.static #mockTag { display: none; } #unlockBtn { padding: 0 6px; } }
 .btn.star { padding: 0 5px; height: 20px; color: var(--muted); border-color: transparent; background: transparent; font-size: 13px; }
 .btn.star.on, .btn.star:hover { color: var(--amber); }
+.mdh { font: 700 13px var(--sans); color: var(--amber); margin: 10px 0 4px; }
+.mdh:first-child { margin-top: 0; }
+.mdp { margin: 4px 0; line-height: 1.7; }
+code { font-family: var(--mono); color: var(--cyan); }

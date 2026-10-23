@@ -5,7 +5,7 @@ import threading
 import time
 import traceback
 
-from . import backup, db, learn, market, picker, publisher, sim
+from . import ai, backup, db, learn, market, picker, publisher, sim
 from .config import load_settings, now, today
 
 STATUS = {"started": None, "last_tick": None, "jobs": {}, "errors": []}
@@ -99,6 +99,8 @@ def loop() -> None:
                         publisher.publish_async(full=False)
                     if hm >= 1545:
                         _once("publish", lambda: publisher.publish(full=True))
+                if hm >= 1540 and ai.ready() and ai.cfg()["auto_review"]:
+                    _once("ai_review", ai.daily_review)
                 bk = s.get("backup", {})
                 if bk.get("enabled") and hm >= _hm(bk.get("time", "15:50")):
                     _once("backup", lambda: backup.backup(push=bool(bk.get("remote"))))

@@ -137,6 +137,28 @@ def _run(session: str, top_n: int) -> dict:
     with ThreadPoolExecutor(max_workers=4) as ex:
         top = list(ex.map(refine, top))
     evaluated = sorted(top + evaluated[30:], key=lambda e: -e["score"])
+    # AI 新闻情绪：只给前 8 名做（省调用），正面最多 +4 分、负面最多 -4 分，并写进理由
+    try:
+        from . import ai
+        if ai.ready() and ai.cfg()["auto_sentiment"]:
+            STATE["stage"] = "AI 读新闻打情绪分"
+
+            def senti(ev):
+                try:
+                    ev["sentiment"] = ai.sentiment(ev["code"], ev["row"].get("name"))
+                except Exception:  # noqa: BLE001 - AI 失败不影响选股
+                    ev["sentiment"] = None
+                return ev
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                top8 = list(ex.map(senti, evaluated[:8]))
+            for ev in top8:
+                se = ev.get("sentiment")
+                if se:
+                    ev["score"] = round(ev["score"] + 4 * se["score"], 1)
+                    ev["raw"]["sentiment"] = se["score"]
+            evaluated = sorted(top8 + evaluated[8:], key=lambda e: -e["score"])
+    except Exception:  # noqa: BLE001
+        pass
 
     # 门槛：随大盘状态收紧
     min_score, max_picks = cfg["min_score"], cfg["max_picks"]
@@ -176,10 +198,15 @@ def _run(session: str, top_n: int) -> dict:
             parts = sorted(e["parts"].items(), key=lambda kv: -kv[1])
             reasons = [x["why"] for x in e["signals"][:3]] + \
                       [f"{LABELS[k]}因子 {v:.0f} 分" for k, v in parts[:3]]
+            se = e.get("sentiment")
+            if se and se["score"] >= 0.2:
+                reasons.append(f"AI 读新闻：偏正面（{se['score']:+.1f}）{se['reason']}")
             risks = [f"{LABELS[k]}偏弱（{v:.0f}分）" for k, v in parts[::-1][:2] if v < 45]
             ex_ = e["ind"]["extra"]
             if ex_["rsi6"] > 75:
                 risks.append(f"RSI6={ex_['rsi6']:.0f}，短线偏热，别追高，回落到买入区再分批")
+            if se and se["score"] <= -0.2:
+                risks.append(f"AI 读新闻：偏负面（{se['score']:+.1f}）{se['reason']}")
             if reg["code"] != "bull":
                 risks.append(f"大盘处于{reg['state']}，仓位要比平时轻")
             pl = e["plan"]

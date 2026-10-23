@@ -235,7 +235,7 @@ def _load_model():
 
 def predict(raw: dict, sigs, total: float) -> tuple[float, str]:
     m = _load_model()
-    if m:
+    if m and len(m["w"]) == len(_features(raw, sigs)):
         x = _features(raw, sigs)
         z = sum(m["w"][j] * (x[j] - m["mu"][j]) / m["sd"][j] for j in range(len(x))) + m["b"]
         return round(_sig(z), 3), "model"

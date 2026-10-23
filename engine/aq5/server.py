@@ -11,7 +11,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import analysis, auth, backtest, backup, db, learn, market, notify, picker, publisher, scheduler, sim, vault
+from . import ai, analysis, auth, backtest, backup, db, learn, market, notify, picker, publisher, scheduler, sim, vault
 from .config import DATA, MOCK, WEB, load_settings, now, public_settings, save_settings
 from .strategies import DESC, NAMES
 
@@ -222,7 +222,43 @@ def p_security(b):
                           "backup": {k: b[k] for k in ("enabled", "remote") if k in b}})["security"]
 
 
-GET = {"/api/me": api_me, "/api/overview": api_overview, "/api/quotes": api_quotes, "/api/kline": api_kline,
+def api_ai_status(_q):
+    return {"cfg": ai.cfg(), "ready": ai.ready(), "usage": ai.usage(), "presets": ai.PRESETS,
+            "review": ai.latest("review", ""), "suggest": ai.latest("suggest", ""),
+            "reviews": db.q("SELECT id, date, created, substr(content,1,60) AS head FROM ai_notes WHERE kind='review' "
+                            "ORDER BY id DESC LIMIT 20")}
+
+
+def api_ai_comment(q):
+    code = q["code"][0]
+    if q.get("cached", ["0"])[0] == "1":
+        return ai.latest("comment", market.norm_code(code)) or {}
+    return ai.comment(code, q.get("refresh", ["0"])[0] == "1")
+
+
+def api_ai_news(q):
+    a = q["code"][0]
+    name = (db.q1("SELECT name FROM universe WHERE code=?", (market.norm_code(a),)) or {}).get("name")
+    return ai.fetch_news(a, name)
+
+
+def api_ai_note(q):
+    r = db.q1("SELECT * FROM ai_notes WHERE id=?", (int(q["id"][0]),))
+    return r or {}
+
+
+def p_ai_config(b):
+    allowed = {k: b[k] for k in ("provider", "base_url", "model", "format", "daily_limit", "auto_review",
+                                  "auto_sentiment", "temperature") if k in b}
+    return save_settings({"ai": allowed})["ai"]
+
+
+def p_ai_ask(b):
+    return ai.ask(b["code"], b["question"])
+
+
+GET = {"/api/ai/status": api_ai_status, "/api/ai/comment": api_ai_comment, "/api/ai/news": api_ai_news,
+       "/api/ai/note": api_ai_note, "/api/me": api_me, "/api/overview": api_overview, "/api/quotes": api_quotes, "/api/kline": api_kline,
        "/api/intraday": api_intraday, "/api/analyze": api_analyze, "/api/search": api_search,
        "/api/picks/runs": api_runs, "/api/picks/candidates": api_candidates, "/api/picks/state": api_pick_state,
        "/api/sim": api_sim, "/api/learn": api_learn, "/api/backtest": api_backtest, "/api/settings": api_settings,
@@ -331,7 +367,10 @@ POST = {"/api/picks/run": p_pick_run, "/api/sim/order": p_order, "/api/sim/cance
         "/api/watchlist": p_watch, "/api/notify/test": p_notify_test, "/api/events/read": p_events_read, "/api/publish": p_publish,
         "/api/me/profile": p_profile, "/api/me/vault": p_vault, "/api/me/password": p_password,
         "/api/me/revoke": p_revoke, "/api/me/token": p_api_token, "/api/me/backup": p_backup,
-        "/api/me/restore": p_restore, "/api/me/security": p_security}
+        "/api/me/restore": p_restore, "/api/me/security": p_security,
+        "/api/ai/config": p_ai_config, "/api/ai/test": lambda b: ai.test_connection(), "/api/ai/ask": p_ai_ask,
+        "/api/ai/review": lambda b: ai.daily_review(force=True), "/api/ai/suggest": lambda b: ai.suggest_iteration(),
+        "/api/ai/adopt": lambda b: ai.adopt_suggestion()}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -498,6 +537,7 @@ def _migrate_secrets():
 def main():
     db.init()
     auth.init()
+    ai.init()
     _migrate_secrets()
     sim.ensure_accounts()
     market.ensure_universe_mock()

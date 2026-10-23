@@ -61,6 +61,17 @@
   }
   const panel = (title, body, opts = {}) => `<div class="panel ${opts.cls || ''}" ${opts.id ? `id="${opts.id}"` : ''}>
     <div class="ph"><h3>${title}</h3><div class="r">${opts.right || ''}</div></div><div class="pb ${opts.np ? 'np' : ''}">${body}</div></div>`;
+  function md(t) {
+    const lines = esc(t || '').split(/\n/); let html = '', inList = false;
+    const inline = s => s.replace(/\*\*(.+?)\*\*/g, '<b class="amber">$1</b>').replace(/`(.+?)`/g, '<code>$1</code>');
+    for (const l of lines) {
+      const m = /^\s*[-*]\s+(.*)/.exec(l), h = /^(#{1,4})\s+(.*)/.exec(l);
+      if (m) { if (!inList) { html += '<ul class="why">'; inList = true; } html += '<li>' + inline(m[1]) + '</li>'; continue; }
+      if (inList) { html += '</ul>'; inList = false; }
+      if (h) html += `<div class="mdh">${inline(h[2])}</div>`; else if (l.trim()) html += `<p class="mdp">${inline(l)}</p>`;
+    }
+    return html + (inList ? '</ul>' : '');
+  }
   const nameCell = (name, code) => `<span class="nm">${esc(name || '')}</span><span class="cd">${short(code)}</span>`;
 
   // ------------------------------------------------------------------ 路由与快捷键
@@ -363,8 +374,12 @@
         : '<div class="empty" style="padding:12px">当前没有触发任何买点策略</div>') +
         `<div class="sep"></div><div class="hint">看多理由</div><ul class="why">${a.reasons.map(x => `<li>${esc(x)}</li>`).join('') || '<li>暂无明显优势</li>'}</ul>
          <div class="hint">风险提示</div><ul class="why risk">${a.risks.map(x => `<li>${esc(x)}</li>`).join('') || '<li>暂无明显风险项</li>'}</ul>`, { cls: 'c4' })}
+      ${STATIC ? '' : panel('AI <small>AI 点评 · ' + esc((S.aiStatus && S.aiStatus.cfg.model) || '未配置') + '</small>', '<div id="aiCmt" class="hint">载入中…</div>', { cls: 'c8', right: '<button class="btn sm" id="aiCmtGo">生成 / 刷新</button>' })}
+      ${STATIC ? '' : panel('NEWS <small>公告与新闻</small>', '<div id="aiNews" class="scroll" style="max-height:330px"><div class="loading">抓取中</div></div>', { cls: 'c4', np: true })}
+      ${STATIC ? '' : panel('ASK <small>问 AI 关于这只股票</small>', `<div class="row"><input class="in" id="aiQ" style="flex:1" placeholder="例如：现在缩量回调，适合低吸吗？止损为什么设在这里？"><button class="btn pri" id="aiQGo">提问</button></div><div id="aiA" style="margin-top:8px"></div>`, { cls: 'c12' })}
       ${panel('LEARN <small>学习要点 · 这只股票教会你什么</small>', a.lessons.map(x => `<div class="lesson">${esc(x)}</div>`).join(''), { cls: 'c12' })}
     </div>`;
+    if (!STATIC) loadAiStock(a);
     const cv = $('#chK');
     S.kchart = new Charts.KChart(cv, $('#chLg'));
     const k = await api(`kline?code=${a.code}&n=400`);
@@ -399,6 +414,49 @@
     if (!idx.length) return '';
     return panel('PUBLIC <small>公开版可查看的个股</small>', `<table class="t"><tr><th>股票</th><th>评分</th><th>评级</th><th>分析时间</th></tr>${idx.map(x => `<tr class="click" data-c="${x.code}"><td>${nameCell(x.name, x.code)}</td><td class="amber">${num(x.score, 1)}</td><td>${esc(x.rating)}</td><td class="muted">${esc(x.time)}</td></tr>`).join('')}</table>`, { np: true })
       .replace('<table', '<table onclick="var t=event.target.closest(\'[data-c]\');if(t)location.hash=\'anly/\'+t.dataset.c"');
+  }
+
+  async function loadAiLearn(L) {
+    const st = await aiStatus();
+    if (!$('#aiRev')) return;
+    const ready = st && st.ready;
+    const showRev = r => { $('#aiRev').className = ''; $('#aiRev').innerHTML = r && r.content ? md(r.content) + `<div class="hint mono">${esc(r.date)} · ${esc(r.model || '')}</div>` : '<div class="hint">还没有复盘。收盘后 15:40 自动生成，或点「立即生成」。</div>'; };
+    if (!ready) $('#aiRev').innerHTML = '配置 AI 接口后可用（设置 → 密钥保险箱 / AI 接口）。'; else showRev(st.review);
+    $('#aiRevSel').innerHTML = (st && st.reviews || []).map(r => `<option value="${r.id}">${r.date}</option>`).join('');
+    $('#aiRevSel').onchange = async e => showRev(await api('ai/note?id=' + e.target.value));
+    $('#aiRevGo').onclick = async () => { $('#aiRev').innerHTML = '<div class="loading">AI 写复盘中</div>'; try { showRev(await api('ai/review', {})); } catch (e) { $('#aiRev').innerHTML = `<div class="up">${esc(e.message)}</div>`; } };
+    const lab = L.labels;
+    const showSug = r => {
+      if (!r || !r.meta || !r.meta.weights) { $('#aiSug').innerHTML = '<p>AI 会读因子 IC、策略胜率和成绩单，提出一组新权重。系统先在<b class="amber">最近 30% 时间段的样本外数据</b>上验证：前 10 名股票之后 3 日平均收益要比现在高 0.05% 以上、胜率不变差，才算通过；最后由你决定是否采用。</p>'; return; }
+      const m = r.meta;
+      $('#aiSug').className = '';
+      $('#aiSug').innerHTML = `<div class="row"><span class="chip ${m.passed ? 'u' : ''}">${m.passed ? '验证通过' : '未通过验证'}</span><span class="hint mono">${esc(r.created)}</span></div>
+        <p>${esc(m.reason)}</p>
+        <table class="t"><tr><th>因子</th><th>现在</th><th>建议</th></tr>${Object.keys(m.weights).map(k => `<tr><td>${lab[k] || k}</td><td>${num(m.old[k] * 100, 1)}%</td><td class="${cls(m.weights[k] - m.old[k])}">${num(m.weights[k] * 100, 1)}%</td></tr>`).join('')}</table>
+        <div class="hint mono" style="margin-top:6px">样本外（${esc(m.cut)} 之后）前10名3日：现在 均${m.test_base.avg ?? '--'}% 胜${m.test_base.win != null ? num(m.test_base.win * 100, 0) : '--'}% → 建议 均${m.test_new.avg ?? '--'}% 胜${m.test_new.win != null ? num(m.test_new.win * 100, 0) : '--'}%</div>
+        ${m.passed ? '<div class="row" style="margin-top:8px"><span class="sp"></span><button class="btn pri" id="aiAdopt">采用这组权重</button></div>' : ''}`;
+      const ad = $('#aiAdopt'); if (ad) ad.onclick = async () => { if (!confirm('采用后下一次选股就会用新权重，确定？')) return; await api('ai/adopt', {}); toast('已采用，记入迭代历史'); renderLearn(); };
+    };
+    showSug(st && st.suggest);
+    $('#aiSugGo').onclick = async () => { $('#aiSug').innerHTML = '<div class="loading">AI 分析中，并在样本外回测验证</div>'; try { showSug(await api('ai/suggest', {})); } catch (e) { $('#aiSug').innerHTML = `<div class="up">${esc(e.message)}</div>`; } };
+  }
+  async function aiStatus() { try { S.aiStatus = await api('ai/status'); } catch { S.aiStatus = null; } return S.aiStatus; }
+  async function loadAiStock(a) {
+    const st = S.aiStatus || await aiStatus();
+    const box = $('#aiCmt');
+    const showCmt = c => { if (!$('#aiCmt')) return; $('#aiCmt').className = '';
+      $('#aiCmt').innerHTML = c && c.content ? md(c.content) + `<div class="hint mono" style="margin-top:6px">${esc(c.model || '')} · ${esc(c.created || '')}</div>` : '<div class="hint">还没有今天的 AI 点评，点右上角「生成」。</div>'; };
+    if (!st || !st.ready) { box.innerHTML = '还没有配置 AI 接口。到「设置 → 密钥保险箱」填 DeepSeek Key，再到「AI 接口」点「测试连接」。'; }
+    else { try { showCmt(await api('ai/comment?cached=1&code=' + a.code)); } catch (e) { box.textContent = e.message; } }
+    $('#aiCmtGo').onclick = async () => { const b = $('#aiCmtGo'); b.disabled = true; b.textContent = 'AI 思考中…';
+      try { showCmt(await api('ai/comment?refresh=1&code=' + a.code)); } catch (e) { toast(e.message, 1); } b.disabled = false; b.textContent = '生成 / 刷新'; };
+    $('#aiQGo').onclick = async () => { const q = $('#aiQ').value.trim(); if (!q) return; $('#aiA').innerHTML = '<div class="loading">AI 思考中</div>';
+      try { const r = await api('ai/ask', { code: a.code, question: q }); $('#aiA').innerHTML = md(r.answer); } catch (e) { $('#aiA').innerHTML = `<div class="up">${esc(e.message)}</div>`; } };
+    $('#aiQ').onkeydown = e => { if (e.key === 'Enter') $('#aiQGo').click(); };
+    try {
+      const ns = await api('ai/news?code=' + a.code);
+      if ($('#aiNews')) $('#aiNews').innerHTML = ns.length ? ns.map(n => `<div class="ev"><div class="tm">${esc(n.date.slice(5, 10))}<br><span class="${n.kind === '公告' ? 'amber' : 'cyan'}">${n.kind}</span></div><div><a href="${esc(n.url)}" target="_blank" rel="noopener" class="tt" style="color:var(--text)">${esc(n.title)}</a><div class="bd">${esc(n.source)}</div></div></div>`).join('') : '<div class="empty">没有抓到公告或新闻</div>';
+    } catch (e) { if ($('#aiNews')) $('#aiNews').innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
   }
 
   // ------------------------------------------------------------------ 下单弹窗
@@ -526,8 +584,11 @@
           <div class="hint">概率模型</div>${md ? `<dl class="kv"><dt>训练时间</dt><dd>${L.model.created}</dd><dt>样本</dt><dd>${md.n}</dd><dt>基准成功率</dt><dd>${num(md.base_rate * 100, 1)}%</dd>
             <dt>检验AUC</dt><dd class="amber">${num(md.test_auc, 3)}</dd><dt>高分组命中</dt><dd>${md.top20_hit == null ? '--' : num(md.top20_hit * 100, 1) + '%'}</dd><dt>状态</dt><dd>${md.usable ? '<span class="up">已启用</span>' : '<span class="muted">效果不足，未启用</span>'}</dd></dl>`
             : `<div class="hint">样本不足 ${L.min_model} 个，暂未训练（当前 ${L.evaluated}）</div>`}`, { cls: 'c4' })}
+      ${STATIC ? '' : panel('AI REVIEW <small>AI 盘后复盘（每天15:40自动）</small>', '<div id="aiRev" class="hint">载入中…</div>', { cls: 'c7', right: '<select class="in" id="aiRevSel" style="height:22px"></select><button class="btn sm" id="aiRevGo">立即生成</button>' })}
+      ${STATIC ? '' : panel('AI ITERATE <small>AI 迭代建议 · 回测把关</small>', '<div id="aiSug" class="hint">载入中…</div>', { cls: 'c5', right: '<button class="btn sm" id="aiSugGo">让 AI 提建议</button>' })}
       ${panel('HISTORY <small>迭代记录</small>', `<div class="scroll" style="max-height:320px"><table class="t"><tr><th>版本</th><th>时间</th><th class="l">主要变化</th></tr>${hist.map(h => `<tr><td class="amber">v${h.version}</td><td class="muted">${h.created}</td><td class="l nm">${esc(h.note)}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">还没有迭代记录：有效样本≥' + L.min_ic + ' 个后，每天15:30自动迭代</td></tr>'}</table></div>`, { cls: 'c12', np: true })}
     </div>`;
+    if (!STATIC) loadAiLearn(L);
     $('#lrBoot').onclick = async () => { try { const r = await api('learn/bootstrap', {}); toast(r.started ? '冷启动开始，约需1-3分钟' : r.message); setTimeout(() => S.page === 'learn' && renderLearn(), 4000); } catch (e) { toast(e.message, 1); } };
     if (L.boot.running) setTimeout(() => S.page === 'learn' && renderLearn(), 3000);
     $('#lrRun').onclick = async () => { try { const r = await api('learn/run', {}); toast(r.iterate.changed ? '权重已更新' : r.iterate.reason); renderLearn(); } catch (e) { toast(e.message, 1); } };
@@ -607,6 +668,15 @@
           <button class="btn" id="bkSaveCfg">保存</button><button class="btn" id="bkLocal">仅本机备份</button><button class="btn pri" id="bkGo">立即备份并推送</button></div>
         <div class="row" style="margin-top:6px"><input class="in" id="rsPw" type="password" placeholder="恢复时输入备份密码（本机已保存可留空）" style="flex:1"><button class="btn sell" id="rsGo">从备份恢复</button></div>`, { cls: 'c6' })}` : '';
     $('#p-set').innerHTML = `<div class="grid">${personal}
+      ${panel('AI <small>AI 接口（Key 在密钥保险箱）</small>', `<div class="ticket">
+        <label>服务商<select class="in" id="aiProv">${['DeepSeek', 'OpenAI', '通义千问', 'Kimi', 'Claude', '自定义'].map(p => `<option ${s.ai.provider === p ? 'selected' : ''}>${p}</option>`).join('')}</select></label>
+        <label>模型<input class="in" id="aiModel" value="${esc(s.ai.model)}" placeholder="留空用默认，如 deepseek-chat"></label>
+        <label class="full">接口地址<input class="in" id="aiBase" value="${esc(s.ai.base_url)}" placeholder="留空用默认，如 https://api.deepseek.com"></label>
+        <label>接口格式<select class="in" id="aiFmt"><option value="">自动</option><option value="openai" ${s.ai.format === 'openai' ? 'selected' : ''}>OpenAI 兼容</option><option value="anthropic" ${s.ai.format === 'anthropic' ? 'selected' : ''}>Claude</option></select></label>
+        <label>每天最多调用<input class="in" id="aiLimit" value="${esc(s.ai.daily_limit)}"></label>
+        <label class="full"><span><input type="checkbox" id="aiAutoRev" ${s.ai.auto_review ? 'checked' : ''}> 每天 15:40 自动生成 AI 盘后复盘</span></label>
+        <label class="full"><span><input type="checkbox" id="aiAutoSen" ${s.ai.auto_sentiment ? 'checked' : ''}> 选股时让 AI 读前 8 名的新闻打情绪分（±4 分）</span></label></div>
+        <div class="row"><span class="hint mono" id="aiTestR"></span><span class="sp"></span><button class="btn" id="aiSave">保存</button><button class="btn pri" id="aiTest">测试连接</button></div>`, { cls: 'c6' })}
       ${panel('MOBILE <small>手机访问</small>', `<p>手机和电脑连同一个 WiFi，用手机浏览器打开：</p><div class="mono amber" style="font-size:20px;word-break:break-all">${esc(S.ov ? S.ov.lan : '')}</div>
         <p class="hint">打开后点浏览器菜单「添加到主屏幕」，就像 App 一样使用。若打不开，请在 Windows 防火墙允许 Python 访问专用网络。</p>`, { cls: 'c4' })}
       ${panel('PICK <small>自动选股</small>', `<div class="ticket">${f('sT1', '竞价选股时间', s.pick.times[0])}${f('sT2', '尾盘选股时间', s.pick.times[1])}
@@ -643,6 +713,9 @@
       } catch (e) { toast(e.message, 1); }
     };
     if (me) bindPersonal(me);
+    const aiCfg = () => api('ai/config', { provider: $('#aiProv').value, model: $('#aiModel').value.trim(), base_url: $('#aiBase').value.trim(), format: $('#aiFmt').value, daily_limit: +$('#aiLimit').value || 300, auto_review: $('#aiAutoRev').checked, auto_sentiment: $('#aiAutoSen').checked });
+    $('#aiSave').onclick = async () => { try { await aiCfg(); toast('AI 设置已保存'); } catch (e) { toast(e.message, 1); } };
+    $('#aiTest').onclick = async () => { $('#aiTestR').textContent = '连接中…'; try { await aiCfg(); const r = await api('ai/test', {}); $('#aiTestR').innerHTML = `<span class="up">成功</span> ${esc(r.model)} ${r.ms}ms：${esc(r.reply)}`; } catch (e) { $('#aiTestR').innerHTML = `<span class="up">失败：${esc(e.message)}</span>`; } };
     $('#pNow').onclick = async () => { try { await api('publish', { full: true }); toast('开始发布，约需 1 分钟，结果见日志'); } catch (e) { toast(e.message, 1); } };
     $('#nTest').onclick = async () => { try { const r = await api('notify/test', {}); toast(r.sent ? '已发送，去微信看看' : r.reason, !r.sent); } catch (e) { toast(e.message, 1); } };
   }
