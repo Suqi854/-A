@@ -7,6 +7,7 @@ import traceback
 
 from . import ai, backup, db, hf, learn, market, marketstate, picker, publisher, sectors, signals, sim
 from .config import load_settings, now, today
+from .cloud import CLOUD
 
 STATUS = {"started": None, "last_tick": None, "jobs": {}, "errors": []}
 _done: set[str] = set()
@@ -82,9 +83,10 @@ def loop() -> None:
             times = s["pick"]["times"]
             if t.weekday() < 5 and market.is_trading_day():
                 a, c = _hm(times[0]), _hm(times[1])
-                if a <= hm < a + 4 and not _ran("auction"):
+                late = 90 if CLOUD else 4  # 云端任务可能晚几分钟才启动：放宽补跑窗口
+                if a <= hm < a + late and hm < 1130 and not _ran("auction"):
                     _once("auction", lambda: picker.run("auction"))
-                if c <= hm < c + 6 and not _ran("close"):
+                if c <= hm < c + (12 if CLOUD else 6) and not _ran("close"):
                     _once("close", lambda: picker.run("close"))
                 if market.market_phase() == "trading":
                     sim.tick()

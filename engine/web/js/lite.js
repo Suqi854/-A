@@ -19,6 +19,13 @@
     const q = ((node.qt || {})[code]) || null;
     return { rows, qt: q, source: '腾讯（浏览器直连）' };
   }
+  async function minutes(code, m = 5, n = 320) {
+    const v = vname('mk_');
+    const d = await loadVar(`https://web.ifzq.gtimg.cn/appstock/app/kline/mkline?param=${code},m${m},,${n}&_var=${v}`, v);
+    const arr = (((d.data || {})[code] || {})['m' + m]) || [];
+    const rows = arr.map(a => { const t = String(a[0]); return { date: `${t.slice(0, 4)}-${t.slice(4, 6)}-${t.slice(6, 8)} ${t.slice(8, 10)}:${t.slice(10, 12)}`, open: +a[1], close: +a[2], high: +a[3], low: +a[4], vol: +a[5] * 100 }; });
+    return { rows, source: '腾讯（浏览器直连）' };
+  }
   async function intraday(code) {
     const v = vname('mq_');
     const d = await loadVar(`https://web.ifzq.gtimg.cn/appstock/app/minute/query?_var=${v}&code=${code}`, v);
@@ -112,5 +119,83 @@
       lessons: ['这是浏览器里的简化分析。电脑开着并开启「手机远程」时，手机会自动连上电脑，得到含主力资金、行业强度、数学模型和 AI 的完整分析。'],
       regime: { state: '--', desc: '' }, weights_ver: '-', flows: [], lite: true, kline: rows };
   }
-  window.Lite = { klines, intraday, search, analyze };
+
+  // ---------------- 当日信号（与电脑端 signals.plan 同口径的浏览器版）
+  const rsiOf = (c, n = 6) => { if (c.length < n + 2) return null; let up = 0, dn = 0;
+    for (let i = 1; i < c.length; i++) { const d = c[i] - c[i - 1], u = Math.max(d, 0), w = Math.max(-d, 0);
+      if (i <= n) { up += u / n; dn += w / n; } else { up = (up * (n - 1) + u) / n; dn = (dn * (n - 1) + w) / n; } }
+    return dn === 0 ? 100 : 100 - 100 / (1 + up / dn); };
+  const cst = () => new Date(Date.now() + (new Date().getTimezoneOffset() + 480) * 60000);
+  function session() { const d = cst(), wd = d.getDay(), hm = d.getHours() * 100 + d.getMinutes();
+    const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const trading = wd > 0 && wd < 6 && ((hm >= 930 && hm <= 1130) || (hm >= 1300 && hm <= 1500));
+    const phase = wd === 0 || wd === 6 ? 'post' : hm < 930 ? 'pre' : hm > 1500 ? 'post' : 'intra';
+    return { ymd, hm, trading, phase, time: `${ymd} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:00` }; }
+  async function plan(code, a, pos) {
+    const ss = session();
+    let rows = (a.kline || []).slice();
+    if (rows.length && rows[rows.length - 1].date === ss.ymd) rows = rows.slice(0, -1);
+    if (rows.length < 20) throw new Error('K线不足');
+    const y = rows[rows.length - 1];
+    const P = (y.high + y.low + y.close) / 3, R1 = 2 * P - y.low, S1 = 2 * P - y.high, R2 = P + (y.high - y.low), S2 = P - (y.high - y.low);
+    const trs = rows.slice(1).map((r, i) => Math.max(r.high - r.low, Math.abs(r.high - rows[i].close), Math.abs(r.low - rows[i].close)));
+    const atr = trs.slice(-14).reduce((s, x) => s + x, 0) / Math.min(14, trs.length);
+    const q = a.quote || {}, price = q.price || y.close;
+    const live = ss.phase !== 'pre' && q.price && Math.abs(q.price - y.close) > 1e-9 || ss.trading;
+    let vwap = null, rsi5 = null;
+    if (live) {
+      try { const it = await intraday(code); const pts = it.points || []; if (pts.length) vwap = pts[pts.length - 1].avg; } catch (e) { }
+      try { const m5 = await minutes(code, 5, 48); rsi5 = rsiOf(m5.rows.map(r => r.close)); } catch (e) { }
+    }
+    const anchor = vwap || y.close;
+    let low = anchor - 0.45 * atr, high = anchor + 0.45 * atr;
+    if (low < S1 && S1 < anchor) low = S1;
+    if (anchor < R1 && R1 < high) high = R1;
+    if (high < low * 1.006) { const mid = (high + low) / 2; low = mid * 0.997; high = mid * 1.003; }
+    const pl = a.plan, mf = a.main_force || {}, score = a.score, rating = a.rating, badMf = mf.tone === 'down';
+    const sigs = [], actions = [];
+    const add = (kind, label, p, why, tone = 'neutral', strength = 50) => sigs.push({ kind, label, price: p == null ? null : r2(p), why, tone, strength });
+    if (pos) {
+      const cost = pos.cost, pnl = (price / cost - 1) * 100, stop = Math.max(pos.stop || 0, pl.stop);
+      if (price <= stop) { actions.push('止损'); add('stop', '止损离场', stop, `现价 ${price.toFixed(2)} 已跌破止损 ${stop.toFixed(2)}，按纪律离场`, 'down', 95); }
+      else add('stop', '止损位', stop, `收盘跌破 ${stop.toFixed(2)} 就走（距现价 ${((stop / price - 1) * 100).toFixed(1)}%）`, 'down', 60);
+      const t1 = pos.target1 || pl.target1;
+      if (t1 && price >= t1) { actions.push('减仓'); add('reduce', '到止盈①减半', t1, `已到第一止盈 ${t1.toFixed(2)}（浮盈 ${pnl.toFixed(1)}%），卖出一半，止损上移到成本 ${cost.toFixed(2)}`, 'down', 85); }
+      else add('take', '止盈①', t1, `到 ${(+t1).toFixed(2)} 先卖一半`, 'up', 55);
+      add('take', '止盈②', pos.target2 || pl.target2, '到这里清仓或跌破5日线清仓', 'up', 50);
+      if (score < 45 || badMf) { actions.push('减仓'); add('reduce', '转弱减仓', price, `评分 ${score.toFixed(0)}${badMf ? `，主力「${mf.label}」` : ''}：先减一半，反弹无力再清仓`, 'down', 75); }
+      const sup = (pl.supports || [])[0];
+      if (score >= 60 && !badMf && sup && pnl > -4 && ['buy', 'watch_buy', 'hold'].includes(a.tone)) { add('add', '回踩加仓', sup, `趋势未坏（评分 ${score.toFixed(0)}），回踩支撑 ${sup.toFixed(2)} 附近可加 1/3 仓`, 'up', 60); if (price <= sup * 1.01) actions.push('加仓'); }
+      if (!actions.length) actions.push('持有');
+    } else {
+      const bz = pl.buy_zone;
+      if (['buy', 'watch_buy'].includes(a.tone) && !badMf) {
+        if (bz[0] <= price && price <= bz[1] * 1.005) { actions.push('买入'); add('entry', '买入区内', price, `评级「${rating}」，价格在买入区 ${bz[0]}~${bz[1]}，可按计划分批买`, 'up', 80); }
+        else add('entry', '等回踩买入', bz[0], `评级「${rating}」但现价不在买入区，回踩到 ${bz[0]}~${bz[1]} 再买，不追高`, 'up', 60);
+        const res = (pl.resistances || [])[0]; if (res) add('entry', '放量突破追入', res, `放量（量比>1.5）站上压力 ${res.toFixed(2)} 可小仓追入`, 'up', 50);
+      } else add('entry', '观望', null, `评级「${rating}」（${score.toFixed(0)}分）${badMf ? `，主力「${mf.label}」` : ''}：暂不买，等评分≥68 或出现买点`, 'neutral', 40);
+      add('stop', '若买入的止损', pl.stop, `买入后收盘跌破 ${pl.stop} 离场`, 'down', 40);
+      add('take', '目标①/②', pl.target1, `${pl.target1} / ${pl.target2}`, 'up', 40);
+      if (!actions.length) actions.push('观望');
+    }
+    const canSell = !!(pos && (pos.avail == null ? pos.qty : pos.avail) > 0);
+    const tw = `今日做T区间：低吸 ${r2(low)} / 高抛 ${r2(high)}（枢轴 S1 ${r2(S1)} / R1 ${r2(R1)}${vwap ? `，VWAP ${r2(vwap)}` : '，按昨收估算'}）`;
+    if (canSell) { add('t_high', '做T高抛', high, `冲到 ${r2(high)} 附近先卖 1/3 可卖仓位，回落到 ${r2(low)} 附近买回`, 'down', 55); add('t_low', '做T低吸', low, `回落到 ${r2(low)} 附近接回；跌破止损则不接`, 'up', 55); }
+    else if (pos) add('t_low', '做T低吸（今日新仓）', low, '今天新买的不能卖，只能低吸摊低成本', 'up', 40);
+    else add('t_low', '日内低吸参考', low, '没有持仓：可作为日内更好的买点参考', 'up', 35);
+    if (ss.trading) {
+      if (price <= low && price > (pl.stop || 0)) { add('t_fire', '⚡触及低吸位', price, `现价 ${price} ≤ 低吸位 ${r2(low)}${rsi5 != null && rsi5 < 30 ? `，5分钟RSI ${rsi5.toFixed(0)} 超卖` : ''}`, 'amber', 90); if (pos && !actions.includes('止损')) actions.unshift('做T'); }
+      else if (price >= high && canSell) { add('t_fire', '⚡触及高抛位', price, `现价 ${price} ≥ 高抛位 ${r2(high)}${rsi5 != null && rsi5 > 70 ? `，5分钟RSI ${rsi5.toFixed(0)} 超买` : ''}`, 'amber', 90); if (!actions.includes('止损')) actions.unshift('做T'); }
+    }
+    const act = actions[0];
+    const TONE = { 买入: 'up', 加仓: 'up', 持有: 'neutral', 做T: 'amber', 减仓: 'down', 卖出: 'down', 止损: 'down', 观望: 'neutral' };
+    const base = { 买入: '条件满足，可以按计划买入', 加仓: '回踩到支撑、趋势未坏，可小幅加仓', 持有: '按计划持有，守住止损', 做T: '盘中触及做T价位，按区间高抛低吸', 减仓: '到达止盈或转弱，先减一半', 止损: '已破止损，按纪律离场', 观望: '没有优势，先观望' }[act] || '';
+    const stopV = pos ? r2(Math.max(pos.stop || 0, pl.stop)) : pl.stop;
+    return { code, name: a.name, phase: ss.phase, time: ss.time, action: act, actions, tone: TONE[act] || 'neutral', score, rating, main_force: mf.label, price: r2(price), pct: q.pct,
+      levels: { pivot: r2(P), r1: r2(R1), s1: r2(S1), r2: r2(R2), s2: r2(S2), atr: Math.round(atr * 1000) / 1000, vwap: r2(vwap), rsi5: rsi5 == null ? null : Math.round(rsi5 * 10) / 10,
+        t_low: r2(low), t_high: r2(high), buy_zone: pl.buy_zone, stop: stopV, target1: pos ? r2(pos.target1 || pl.target1) : pl.target1, target2: pos ? r2(pos.target2 || pl.target2) : pl.target2 },
+      position: pos ? { qty: pos.qty, avail: pos.avail == null ? pos.qty : pos.avail, cost: Math.round(pos.cost * 1000) / 1000, pnl_pct: r2((price / pos.cost - 1) * 100) } : null,
+      signals: sigs, t_note: tw, triggered: [], summary: `${base}（评分 ${score.toFixed(0)}，${rating}，主力「${mf.label || '--'}」）`, lite: true };
+  }
+  window.Lite = { klines, minutes, intraday, search, analyze, plan, session };
 })();

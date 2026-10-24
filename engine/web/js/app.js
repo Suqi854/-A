@@ -36,7 +36,7 @@
       case 'analyze': if (S.priv && S.priv.analysis[code]) return S.priv.analysis[code];
         try { return await sj('analysis/' + code + '.json'); } catch { const k = await Lite.klines(code, 'day', 320); S.liteCache = { code, rows: k.rows }; return Lite.analyze(code, k.rows, k.qt); }
       case 'kline': { const per = q.get('period') || 'day';
-        if (per !== 'day') { if (/^m/.test(per)) throw new Error('公开版暂不支持分钟K，电脑连上后可用'); const k = await Lite.klines(code, per, 320); return { code, rows: k.rows, source: k.source }; }
+        if (per !== 'day') { const k = /^m(\d+)$/.test(per) ? await Lite.minutes(code, +per.slice(1), 320) : await Lite.klines(code, per, 320); return { code, rows: k.rows, source: k.source }; }
         const x = (S.priv && S.priv.analysis[code]) || await sj('analysis/' + code + '.json').catch(() => null);
         if (x && x.kline) return { code, rows: x.kline }; if (S.liteCache && S.liteCache.code === code) return { code, rows: S.liteCache.rows, source: '腾讯（浏览器直连）' };
         const k = await Lite.klines(code, 'day', 320); return { code, rows: k.rows, source: k.source }; }
@@ -51,6 +51,13 @@
       case 'market/state': return sj('market.json');
       case 't/stats': return sj('t.json');
       case 'watch/signals': return [];
+      case 'watch/signal': {  // 电脑发布的当日信号；没有或不是今天的，就在浏览器里现算
+        const pub = S.priv && S.priv.signals && S.priv.signals[code];
+        if (pub && pub.latest && String(pub.latest.time || '').slice(0, 10) === Lite.session().ymd) return pub;
+        const a = await staticApi('analyze?code=' + code);
+        if (!a.kline) { const k = await Lite.klines(code, 'day', 320); a.kline = k.rows; }
+        const pos = S.priv && S.priv.me && (S.priv.me.positions || []).find(p => p.code === code);
+        const d = await Lite.plan(code, a, pos || null); return { latest: d, phases: { [d.phase]: d }, lite: true }; }
       case 'sector': throw new Error('公开版只有板块排行，成分股请在电脑端或局域网完整版查看');
       case 'quotes': return {};
       case 'search': { const v = (q.get('q') || '').toLowerCase(); try { const r = await Lite.search(v); if (r.length) return r; } catch { }
@@ -593,7 +600,7 @@
     const L = d.levels || {}, tone = { up: 'var(--up)', down: 'var(--down)', amber: 'var(--amber)', neutral: 'var(--muted)' };
     const lv = (k, v, c) => `<div><div class="l">${k}</div><div class="v ${c || ''}">${v == null ? '--' : Array.isArray(v) ? v.map(x => num(x)).join('~') : num(v)}</div></div>`;
     box.className = '';
-    box.innerHTML = `<div class="sigcard"><div class="sigact" style="border-color:${tone[d.tone]};color:${tone[d.tone]}"><b>${esc(d.action)}</b><small>${esc(PH[d.phase] || '')} ${esc((d.time || '').slice(11, 16))}</small></div>
+    box.innerHTML = `<div class="sigcard"><div class="sigact" style="border-color:${tone[d.tone]};color:${tone[d.tone]}"><b>${esc(d.action)}</b><small>${esc(PH[d.phase] || '')} ${esc((d.time || '').slice(11, 16))}${d.lite ? '<br>手机本地计算' : ''}</small></div>
       <div class="sigmain"><p style="margin:0 0 6px">${esc(d.summary)}</p>
         ${d.position ? `<div class="hint mono">我的持仓 ${d.position.qty} 股（可卖 ${d.position.avail}）· 成本 ${d.position.cost} · 浮盈 <b class="${cls(d.position.pnl_pct)}">${pct(d.position.pnl_pct)}</b></div>` : '<div class="hint">未持有（「我的模拟盘」）</div>'}
         <div class="plan siglv">${lv('买入区', L.buy_zone)}${lv('做T低吸', L.t_low, 'up')}${lv('做T高抛', L.t_high, 'down')}${lv('止损', L.stop, 'down')}${lv('止盈①', L.target1, 'up')}${lv('止盈②', L.target2, 'up')}${lv('枢轴 P', L.pivot)}${lv('VWAP 均价', L.vwap)}</div>
@@ -1044,6 +1051,24 @@
     const re = $('#rmRe'); if (re) re.onclick = async () => { await api('remote/restart', {}); toast('隧道重启中'); pollRm(); };
     if (st.downloading || (st.enabled && st.running && !(st.url && st.connected))) pollRm();
   }
+  async function loadCloud() {
+    const box = $('#cloudBox'); if (!box) return;
+    let c; try { c = await api('cloud/status'); } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    const r = c.remote || {};
+    box.className = '';
+    box.innerHTML = `<dl class="kv"><dt>状态仓库</dt><dd>${esc(c.repo || '--')}（state 分支）</dd>
+        <dt>加密口令</dt><dd>${c.key ? '<b class="down">已有（手机查看密码）</b>' : '<b class="up">未设置手机查看密码</b>'}</dd>
+        <dt>本机最近上传</dt><dd>${esc(c.last_up || '--')}</dd><dt>最近接回云端数据</dt><dd>${esc(c.last_pull || '--')}</dd>
+        <dt>云端最后状态</dt><dd>${r.owner ? `${r.owner === 'cloud' ? '<b class="amber">云端</b>' : '电脑'} · ${esc(r.updated || '')}${r.active ? ' · 运行中' : ''}` : '--'}</dd>
+        ${c.waiting ? '<dt>交接</dt><dd class="amber">云端正在代跑，等它交接…</dd>' : ''}${c.error ? `<dt>错误</dt><dd class="up">${esc(c.error)}</dd>` : ''}</dl>
+      <div class="row" style="margin-top:8px"><button class="btn sm rw" id="cloudSync">立即上传状态</button><a class="btn sm" href="https://github.com/${esc(c.repo)}/actions" target="_blank">查看云端运行记录</a></div>
+      <details class="note"><summary>工作方式与一次性设置</summary><div class="hint" style="line-height:1.7">
+        电脑交易时段每 5 分钟把核心数据（选股、模拟盘、学习样本、权重、信号，不含行情缓存和账号）加密上传到仓库的 state 分支。
+        电脑关机后，GitHub 云端每 15 分钟检查一次：发现电脑离线就接手，按同样的规则自动选股、跑 AI 自动盘、生成自选信号并发布网页；电脑一开机，云端会存好状态退出，电脑自动接回。<br>
+        <b class="amber">一次性设置：</b>打开 GitHub 仓库 → Settings → Secrets and variables → Actions → New repository secret，
+        名称 <code>AQ5_KEY</code>，值填你的「手机查看密码」；想让云端也用 AI 复盘，再加 <code>AQ5_AI_KEY</code>。</div></details>`;
+    const b = $('#cloudSync'); if (b) b.onclick = async () => { b.disabled = true; b.textContent = '上传中…'; try { const x = await api('cloud/sync', {}); toast(x.ok ? '已上传 ' + x.time : x.error, !x.ok); } catch (e) { toast(e.message, 1); } loadCloud(); };
+  }
   function pollRm() { clearTimeout(S.timers.rm); S.timers.rm = setTimeout(() => S.page === 'set' && loadRemote(), 2500); }
   async function loadSources(probe) {
     const box = $('#srcBox'); if (!box) return;
@@ -1140,6 +1165,7 @@
         <div class="row"><span class="hint mono" id="aiTestR"></span><span class="sp"></span><button class="btn" id="aiSave">保存</button><button class="btn pri" id="aiTest">测试连接</button></div>`, { cls: 'c6' })}
       ${panel('MOBILE <small>手机访问</small>', `<p>手机和电脑连同一个 WiFi，用手机浏览器打开：</p><div class="mono amber" style="font-size:20px;word-break:break-all">${esc(S.ov ? S.ov.lan : '')}</div>
         <p class="hint">打开后点浏览器菜单「添加到主屏幕」，就像 App 一样使用。若打不开，请在 Windows 防火墙允许 Python 访问专用网络。</p>`, { cls: 'c4' })}
+      ${panel('CLOUD <small>云端代跑 · 电脑关机时 GitHub 接着跑</small>', '<div id="cloudBox" class="loading">载入</div>', { cls: 'c6' })}
       ${panel('REMOTE <small>手机远程连电脑 · 外网也能下单/改设置</small>', '<div id="rmBox" class="loading">载入</div>', { cls: 'c6' })}
       ${panel('SOURCES <small>数据源 · 腾讯 / 同花顺 / 新浪 / 东财 自动切换</small>', '<div id="srcBox" class="loading">载入</div>', { cls: 'c6', right: '<button class="btn sm" id="srcProbe">全面体检</button>' })}
       ${panel('PICK <small>自动选股</small>', `<div class="ticket">${f('sT1', '竞价选股时间', s.pick.times[0])}${f('sT2', '尾盘选股时间', s.pick.times[1])}
@@ -1178,7 +1204,7 @@
     };
     if (me) bindPersonal(me);
     const aiCfg = () => api('ai/config', { provider: $('#aiProv').value, model: $('#aiModel').value.trim(), base_url: $('#aiBase').value.trim(), format: $('#aiFmt').value, daily_limit: +$('#aiLimit').value || 300, auto_review: $('#aiAutoRev').checked, auto_sentiment: $('#aiAutoSen').checked, auto_explain: $('#aiAutoExp').checked, auto_brief: $('#aiAutoBrief').checked });
-    loadRemote(); loadSources();
+    loadRemote(); loadSources(); loadCloud();
     $('#srcProbe').onclick = () => loadSources(true);
     $('#aiProv').onchange = () => { const p = ((S.aiStatus && S.aiStatus.presets) || {})[$('#aiProv').value]; if (p) { $('#aiModel').value = p.model; $('#aiBase').value = ''; $('#aiFmt').value = ''; } $('#aiModelSel').style.display = 'none'; };
     $('#aiPull').onclick = async () => {

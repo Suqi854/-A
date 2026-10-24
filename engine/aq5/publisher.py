@@ -194,7 +194,7 @@ def _private_pack(d: Path, full: bool) -> list[str]:
     pack = {"time": now().strftime("%Y-%m-%d %H:%M:%S"), "watchlist": [qs.get(c) or {"code": c} for c in wl],
             "analysis": _PRIV_CACHE["analysis"], "me": me, "profile": (u or {}).get("profile", {}),
             "events": db.q("SELECT * FROM events WHERE kind IN ('alert','trade','ai') ORDER BY id DESC LIMIT 80"),
-            "ai": _private_ai(wl), "lan": _lan(), "remote": _remote()}
+            "ai": _private_ai(wl), "lan": _lan(), "remote": _remote(), "signals": _private_signals(wl)}
     raw = gzip.compress(json.dumps(clean(pack), ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
     target.write_bytes(vault.seal_web(raw, pw))
     return [f"private.enc({len(_PRIV_CACHE['analysis'])}只自选,加密)"]
@@ -230,6 +230,22 @@ def _private_ai(wl: list[str]) -> dict:
         n = ai.latest("trade", str(t["id"]))
         if n:
             out["trades"][str(t["id"])] = pick(n)
+    return out
+
+
+def _private_signals(codes) -> dict:
+    """自选股的当日信号（含我的持仓信息，只放进加密包）。"""
+    out = {}
+    try:
+        from . import signals
+        for c in codes:
+            ph = signals.phases(c)
+            if ph:
+                order = {"post": 3, "intra": 2, "pre": 1}
+                latest = max(ph.values(), key=lambda d: (order.get(d.get("phase"), 0), d.get("time", "")))
+                out[c] = {"latest": latest, "phases": ph}
+    except Exception:  # noqa: BLE001
+        pass
     return out
 
 

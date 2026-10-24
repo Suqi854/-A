@@ -1,8 +1,35 @@
-// A量化 固定地址中转：https://aq5-relay.<你的子域>.workers.dev → 当前的 trycloudflare 隧道地址
-// 电脑引擎每次隧道地址变化都会带密钥 POST /__aq5/target 更新；其他请求原样转发给电脑。
-const page = (msg) => `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>A量化</title><body style="background:#050608;color:#d4dbe2;font:16px system-ui;padding:40px;text-align:center">
-<h2 style="color:#ffb000">A量化</h2><p>${msg}</p><p style="color:#6c7a89">电脑开机、A量化运行并开启「手机远程」后，刷新本页即可。<br>也可以先用 GitHub 网页版只读查看。</p></body>`;
+// A量化 固定地址中转：https://aq5-relay.<你的子域>.workers.dev
+// 电脑在线：原样转发到电脑的 trycloudflare 隧道（完整版）；
+// 电脑离线：自动改为提供 GitHub 网页版（只读 + 手机本地分析 + 云端代跑的数据），不再报错。
+// 电脑引擎每次隧道地址变化都会带密钥 POST /__aq5/target 更新。
+const PAGES = "https://suqi854.github.io/-A";
+
+async function upstream(target, req, url, ms) {
+  const h = new Headers(req.headers);
+  h.delete("host");
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), ms);
+  try {
+    const r = await fetch(new URL(url.pathname + url.search, target), {
+      method: req.method, headers: h, redirect: "manual", signal: ac.signal,
+      body: ["GET", "HEAD"].includes(req.method) ? undefined : req.body,
+    });
+    if ([502, 504, 530, 1033].includes(r.status)) return null;
+    return r;
+  } catch (e) {
+    return null;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function pages(url) {
+  const r = await fetch(PAGES + url.pathname + url.search, { cf: { cacheTtl: 60, cacheEverything: true } });
+  const out = new Response(r.body, r);
+  out.headers.set("x-aq5-mode", "static");
+  out.headers.set("cache-control", "no-cache");
+  return out;
+}
 
 export default {
   async fetch(req, env) {
@@ -19,19 +46,18 @@ export default {
       return Response.json({ ok: true, online: !!(await env.KV.get("target")) });
     }
     const target = await env.KV.get("target", { cacheTtl: 30 });
-    const html = (m, s) => new Response(page(m), { status: s, headers: { "content-type": "text/html; charset=utf-8" } });
-    if (!target) return html("电脑引擎还没有上线。", 503);
-    const h = new Headers(req.headers);
-    h.delete("host");
-    try {
-      const r = await fetch(new URL(url.pathname + url.search, target), {
-        method: req.method, headers: h, redirect: "manual",
-        body: ["GET", "HEAD"].includes(req.method) ? undefined : req.body,
-      });
-      if (r.status === 530 || r.status === 1033) return html("暂时连不上电脑（可能关机、休眠或隧道正在重启）。", 502);
-      return new Response(r.body, { status: r.status, headers: new Headers(r.headers) });
-    } catch (e) {
-      return html("暂时连不上电脑（可能关机、休眠或隧道正在重启）。", 502);
+    // 电脑是否真的在线（云端代跑据此决定要不要接手）
+    if (url.pathname === "/__aq5/alive") {
+      if (!target) return Response.json({ alive: false });
+      const r = await upstream(target, new Request(url.origin + "/api/auth/me"), new URL(url.origin + "/api/auth/me"), 6000);
+      return Response.json({ alive: !!(r && r.status === 200) }, { headers: { "cache-control": "no-store" } });
     }
+    const isApi = url.pathname.startsWith("/api/");
+    if (target) {
+      const r = await upstream(target, req, url, isApi ? 25000 : 6000);
+      if (r) return new Response(r.body, { status: r.status, headers: new Headers(r.headers) });
+    }
+    if (isApi) return Response.json({ error: "电脑离线" }, { status: 503 });
+    return pages(url);
   },
 };

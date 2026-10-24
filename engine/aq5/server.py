@@ -11,7 +11,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import ai, analysis, auth, backtest, backup, db, learn, market, notify, picker, publisher, scheduler, sim, vault, sectors, tunnel, signals, tracking, hf, marketstate
+from . import ai, analysis, auth, backtest, backup, cloud, db, learn, market, notify, picker, publisher, scheduler, sim, vault, sectors, tunnel, signals, tracking, hf, marketstate
 from .config import DATA, MOCK, WEB, load_settings, now, public_settings, save_settings
 from .strategies import DESC, NAMES
 
@@ -308,7 +308,7 @@ def api_sector(q):
 
 
 GET = {"/api/ai/status": api_ai_status, "/api/ai/comment": api_ai_comment, "/api/ai/news": api_ai_news,
-       "/api/ai/note": api_ai_note, "/api/me": api_me, "/api/overview": api_overview, "/api/quotes": api_quotes, "/api/kline": api_kline,
+       "/api/ai/note": api_ai_note, "/api/me": api_me, "/api/cloud/status": lambda q: cloud.status(), "/api/overview": api_overview, "/api/quotes": api_quotes, "/api/kline": api_kline,
        "/api/intraday": api_intraday, "/api/analyze": api_analyze, "/api/search": api_search,
        "/api/picks/runs": api_runs, "/api/picks/candidates": api_candidates, "/api/picks/state": api_pick_state,
        "/api/sim": api_sim, "/api/learn": api_learn, "/api/backtest": api_backtest, "/api/settings": api_settings,
@@ -444,6 +444,7 @@ POST = {"/api/picks/run": p_pick_run, "/api/sim/order": p_order, "/api/sim/cance
         "/api/ai/run": lambda b: ai.explain_run(int(b["id"]), force=True),
         "/api/ai/trade": lambda b: ai.trade_review(int(b["id"]), force=bool(b.get("force"))),
         "/api/me/dbsnap": lambda b: backup.db_snapshot(),
+        "/api/cloud/sync": lambda b: cloud.upload(active=False),
         "/api/watch/run": lambda b: signals.run_watch(b.get("phase")),
         "/api/ai/mode": lambda b: save_settings({"pick": {"ai_mode": "high" if b.get("mode") == "high" else "low"}})["pick"]["ai_mode"],
         "/api/hf/scan": lambda b: hf.quick_scan(force=True),
@@ -669,7 +670,6 @@ def main():
     marketstate.init()
     sectors.refresh_map_async()
     tunnel.cleanup_stale()
-    hf.start()
     tunnel.watchdog()
     _migrate_secrets()
     s0 = load_settings()
@@ -690,7 +690,18 @@ def main():
         print(f"端口 {port} 已被占用（A量化可能已经在运行）：{e}", flush=True)
         return
     httpd.daemon_threads = True
-    scheduler.start()
+
+    def _workers():  # 先让网页和隧道起来，再和云端交接，最后才开始交易/调度
+        try:
+            r = cloud.reconcile()
+            if r.get("pulled"):
+                print("已接回云端代跑的数据", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print("云端交接出错：", e, flush=True)
+        hf.start()
+        scheduler.start()
+        cloud.uploader()
+    threading.Thread(target=_workers, daemon=True, name="aq5-workers").start()
     if not db.q1("SELECT 1 FROM samples LIMIT 1"):
         def _boot():
             import time as _t

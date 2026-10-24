@@ -1,0 +1,60 @@
+name: A量化 云端代跑
+
+# 电脑关机时，由 GitHub 云端接着跑：自动选股、AI 自动盘、自选信号、发布网页。
+# 电脑开着时（固定地址能连到电脑），云端任务会立刻退出，不重复交易。
+# 需要在仓库 Settings → Secrets and variables → Actions 添加：
+#   AQ5_KEY     = 「手机查看密码」（用来解密/加密 state 分支里的状态）
+#   AQ5_AI_KEY  = （可选）DeepSeek 等 AI 接口 Key，用于云端 AI 复盘/简报
+
+on:
+  schedule:
+    - cron: "40 0 * * 1-5"       # 北京时间 08:40
+    - cron: "*/15 1-7 * * 1-5"   # 北京时间 09:00-15:45 每 15 分钟检查一次
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "run = 正常代跑；diag = 只测试行情源"
+        default: diag
+        type: choice
+        options: [diag, run]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: aq5-cloud
+  cancel-in-progress: false
+
+jobs:
+  cloud:
+    runs-on: ubuntu-latest
+    timeout-minutes: 358
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Git 身份
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config --global user.name "aq5-cloud"
+          git config --global user.email "aq5-cloud@users.noreply.github.com"
+          git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+      - name: 代跑
+        working-directory: engine
+        env:
+          AQ5_CLOUD: "1"
+          AQ5_DATA: ${{ runner.temp }}/aq5
+          AQ5_KEY: ${{ secrets.AQ5_KEY }}
+          AQ5_AI_KEY: ${{ secrets.AQ5_AI_KEY }}
+          AQ5_RELAY: ${{ vars.AQ5_RELAY || 'https://aq5-relay.phehwm62784.workers.dev' }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          if [ "${{ inputs.mode }}" = "diag" ]; then python -m aq5.cloud diag; exit 0; fi
+          if [ -z "$AQ5_KEY" ]; then echo "还没有设置 Secret AQ5_KEY（手机查看密码），跳过"; exit 0; fi
+          python -m aq5.cloud
