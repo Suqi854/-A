@@ -350,6 +350,28 @@ def diag() -> int:
     print("电脑在线：", pc_alive(), "  relay:", _cfg()["relay"], flush=True)
     meta = remote_meta()
     print("state 分支：", meta, flush=True)
+    if os.environ.get("AQ5_KEY"):
+        try:
+            blob = _gh_raw("state.bin")
+            d = json.loads(vault.unseal(blob, os.environ["AQ5_KEY"])) if blob else None
+            print("AQ5_KEY：", "正确，能解开电脑上传的状态" if d else "state.bin 还不存在", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print("AQ5_KEY：错误 ——", e, "（请确认填的是电脑上设置的「手机查看密码」）", flush=True)
+    else:
+        print("AQ5_KEY：未设置", flush=True)
+    print("AQ5_AI_KEY：", "已设置" if os.environ.get("AQ5_AI_KEY") else "未设置", flush=True)
+    if os.environ.get("AQ5_AI_KEY") and meta:
+        try:
+            st = json.loads(vault.unseal(_gh_raw("state.bin"), os.environ["AQ5_KEY"]))["settings"]
+            from . import config
+            config.SETTINGS_PATH.write_text(json.dumps(st, ensure_ascii=False), "utf-8")
+            vault.set_many({"ai_key": os.environ["AQ5_AI_KEY"]})
+            from . import ai
+            ai.init()
+            r = ai.chat([{"role": "user", "content": "回复两个字：可用"}], max_tokens=10) if hasattr(ai, "chat") else None
+            print("AI 接口：", "可用 ——" if r else "未测试", (r[0] or "")[:40] if r else "", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print("AI 接口：测试失败 ——", str(e)[:200], flush=True)
     tests = [("腾讯实时 quotes", lambda: len(market.quotes(["sh600519", "sh000001"]))),
              ("腾讯高频 quotes_fast", lambda: len(market.quotes_fast(["sh600519"]))),
              ("日K kline", lambda: len(market.kline("sh600519", 60))),
