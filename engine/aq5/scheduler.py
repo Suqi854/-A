@@ -5,7 +5,7 @@ import threading
 import time
 import traceback
 
-from . import ai, backup, db, hf, learn, market, marketstate, picker, publisher, sectors, signals, sim
+from . import ai, announce, backup, db, hf, learn, market, marketstate, picker, publisher, sectors, signals, sim
 from .config import load_settings, now, today
 from .cloud import CLOUD
 
@@ -74,6 +74,7 @@ def loop() -> None:
     last_t = 0.0
     last_ms = 0.0
     last_hf = 0.0
+    last_ann = 0.0
     while True:
         try:
             STATUS["last_tick"] = now().strftime("%H:%M:%S")
@@ -94,6 +95,11 @@ def loop() -> None:
                         last_alert = time.time()
                         alerts()
                 bg = lambda key, fn: _once(key, lambda: threading.Thread(target=fn, daemon=True).start())  # noqa: E731
+                if 830 <= hm < 1535 and time.time() - last_ann > 120:  # 公告每 2 分钟拉一轮（只盯自选/持仓/选股池）
+                    last_ann = time.time()
+                    threading.Thread(target=announce.poll, daemon=True).start()
+                if 1305 <= hm < 1400:
+                    bg("ann_noon", announce.noon_followup)
                 if 905 <= hm < 925:
                     bg("watch_pre", lambda: signals.run_watch("pre"))
                 if market.market_phase() == "trading":

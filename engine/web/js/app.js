@@ -252,7 +252,7 @@
     (ov.events || []).slice().reverse().forEach(ev => {
       if (S.seen.has(ev.id)) return;
       S.seen.add(ev.id);
-      if (fresh && (ev.kind === 'pick' || ev.kind === 'trade' || ev.kind === 'alert' || ev.kind === 'market')) toast(ev.title, ev.level === 'error');
+      if (fresh && (ev.kind === 'pick' || ev.kind === 'trade' || ev.kind === 'alert' || ev.kind === 'market' || ev.kind === 'announce')) toast(ev.title, ev.level === 'error');
     });
     updateBell(ov.events || []);
   }
@@ -260,7 +260,7 @@
     if (/^(sh000|sz399)/.test(it.dataset.c)) openIndex(it.dataset.c, it.querySelector('b').textContent); else go('anly', it.dataset.c); });
 
   // ---- 小喇叭：大盘异动 / 提醒 / 选股 / 成交，红点 = 未读条数（已读位置记在本机浏览器）
-  const BELL_KINDS = ['market', 'alert', 'pick', 'trade'];
+  const BELL_KINDS = ['market', 'announce', 'alert', 'pick', 'trade'];
   const bellList = evs => evs.filter(e => BELL_KINDS.includes(e.kind));
   const bellSeen = () => +(lsGet('aq5_bell_seen') || 0);
   function updateBell(evs) {

@@ -11,7 +11,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import ai, analysis, auth, backtest, backup, cloud, db, learn, market, notify, picker, publisher, scheduler, sim, vault, sectors, tunnel, signals, tracking, hf, marketstate
+from . import ai, analysis, auth, backtest, backup, cloud, db, learn, market, notify, picker, publisher, scheduler, sim, vault, sectors, tunnel, signals, tracking, hf, marketstate, announce
 from .config import DATA, MOCK, WEB, load_settings, now, public_settings, save_settings
 from .strategies import DESC, NAMES
 
@@ -668,6 +668,7 @@ def main():
     sectors.init()
     signals.init()
     marketstate.init()
+    announce.init()
     sectors.refresh_map_async()
     tunnel.cleanup_stale()
     tunnel.watchdog()

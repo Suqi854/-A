@@ -193,7 +193,7 @@ def _private_pack(d: Path, full: bool) -> list[str]:
     u = auth.user() if auth.has_user() else None
     pack = {"time": now().strftime("%Y-%m-%d %H:%M:%S"), "watchlist": [qs.get(c) or {"code": c} for c in wl],
             "analysis": _PRIV_CACHE["analysis"], "me": me, "profile": (u or {}).get("profile", {}),
-            "events": db.q("SELECT * FROM events WHERE kind IN ('alert','trade','ai') ORDER BY id DESC LIMIT 80"),
+            "events": db.q("SELECT * FROM events WHERE kind IN ('alert','trade','ai','announce') ORDER BY id DESC LIMIT 80"),
             "ai": _private_ai(wl), "lan": _lan(), "remote": _remote(), "signals": _private_signals(wl)}
     raw = gzip.compress(json.dumps(clean(pack), ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
     target.write_bytes(vault.seal_web(raw, pw))
