@@ -475,12 +475,14 @@
   }
   async function showRun(r) {
     const m = r.market || {}, br = m.breadth || {}, rg = m.regime || {};
+    const foldPicks = innerWidth <= 600;  // 手机默认折叠，只看结论；点开看说明
     const cards = r.items.map(p => {
       const pl = { stop: p.stop, target1: p.target1, target2: p.target2 };
-      return `<div class="pick"><div class="hd">${p.tier ? `<span class="tier t${p.tier}" title="${TIER[p.tier]}">${p.tier}</span><span class="muted mono" style="margin-right:6px">#${p.rank}</span>` : ''}<span class="nm">${esc(p.name)}</span><span class="cd">${short(p.code)}</span></div>
+      return `<div class="pick${foldPicks ? ' fold' : ''}"><div class="hd" data-tg>${p.tier ? `<span class="tier t${p.tier}" title="${TIER[p.tier]}">${p.tier}</span><span class="muted mono" style="margin-right:6px">#${p.rank}</span>` : ''}<span class="nm">${esc(p.name)}</span><span class="cd">${short(p.code)}</span></div>
         <div class="score"><b>${num(p.score, 1)}</b><small>综合评分 · 估计胜率 ${num(p.prob * 100, 0)}%</small></div>
-        <div class="row" style="margin-top:6px">${p.industry ? `<span class="chip c">${esc(p.industry)}</span>` : ''}${p.strategies.slice(0, 3).map(s => `<span class="chip a">${esc(s.name)}</span>`).join('')}</div>
         <div class="row mono livep" data-lp="${p.code}" data-base="${p.price}" style="margin-top:6px"><span class="muted">现价</span><b class="lpx">--</b><b class="lpc">--</b><span class="muted">较选出</span><b class="lps">--</b></div>
+        <div class="pk-foot row"><span class="chip ${p.industry ? 'c' : ''} pk-mini">${esc(p.industry || (p.strategies[0] || {}).name || '')}</span><span class="sp"></span><button class="btn sm pk-tg" data-tg>${foldPicks ? '展开说明 ▾' : '收起 ▴'}</button><button class="btn sm pri" data-a="${p.code}">分析 ›</button></div>
+        <div class="pk-body"><div class="row" style="margin-top:6px">${p.industry ? `<span class="chip c">${esc(p.industry)}</span>` : ''}${p.strategies.slice(0, 3).map(s => `<span class="chip a">${esc(s.name)}</span>`).join('')}</div>
         <div class="plan"><div><div class="l">选出价</div><div class="v">${num(p.price)}</div></div>
           <div><div class="l">止损</div><div class="v down">${num(pl.stop)}</div><div class="p down">${pct((pl.stop / p.price - 1) * 100, 1)}</div></div>
           <div><div class="l">止盈①</div><div class="v up">${num(pl.target1)}</div><div class="p up">${pct((pl.target1 / p.price - 1) * 100, 1)}</div></div>
@@ -488,7 +490,7 @@
         <div class="hint">机会：</div><ul class="why">${p.reasons.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
         ${p.risks.length ? `<div class="hint" style="margin-top:4px">风险：</div><ul class="why risk">${p.risks.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
         ${p.ret_1d != null ? `<div class="sep"></div><div class="row mono" style="font-size:12px"><span class="muted">事后验证</span><span>1日 <b class="${cls(p.ret_1d)}">${pct(p.ret_1d)}</b></span><span>3日 <b class="${cls(p.ret_3d)}">${pct(p.ret_3d)}</b></span><span>5日 <b class="${cls(p.ret_5d)}">${pct(p.ret_5d)}</b></span><span class="chip">${esc(p.outcome || '')}</span></div>` : ''}
-        <div class="row" style="margin-top:8px"><button class="btn sm" data-a="${p.code}">详细分析</button>${star(p.code, p.name)}<span class="sp"></span><button class="btn sm buy rw" data-b='${esc(JSON.stringify({ code: p.code, name: p.name, price: p.price, stop: p.stop, target1: p.target1, target2: p.target2, pick_id: p.id }))}'>模拟买入</button></div></div>`;
+        <div class="row" style="margin-top:8px">${star(p.code, p.name)}<span class="sp"></span><button class="btn sm buy rw" data-b='${esc(JSON.stringify({ code: p.code, name: p.name, price: p.price, stop: p.stop, target1: p.target1, target2: p.target2, pick_id: p.id }))}'>模拟买入</button></div></div></div>`;
     }).join('');
     $('#runDetail').innerHTML = panel(`RESULT <small>${r.date} ${SESSION[r.session] || r.session} · ${r.started || ''}</small>`,
       `<div class="row hint mono" style="margin-bottom:10px"><span>扫描 <b class="amber">${r.scanned}</b></span><span>精评 <b class="amber">${r.candidates}</b></span><span>门槛 <b class="amber">${num(m.min_score, 0)}</b></span>
@@ -497,7 +499,9 @@
        ${r.items.length ? `<div class="picks">${cards}</div>` : `<div class="nopick"><b>宁缺毋滥 · 本次无机会</b><span class="hint">扫描 ${r.scanned} 只、精评 ${r.candidates} 只，没有股票同时满足：综合分≥${num(m.min_score, 0)}、至少一个策略信号、盈亏比≥1.4、不过热。<br>空仓也是一种仓位。</span></div>`}`, {}) +
       `<div style="height:10px"></div>` + panel('AI <small>AI 解读这次选股</small>', '<div id="runAi"><div class="loading">载入</div></div>', { right: '<button class="btn sm rw" id="runAiGo">生成解读</button>' }) +
       `<div style="height:10px"></div>` + panel('CANDIDATES <small>候选前30（参考，不是推荐）</small>', '<div class="scroll" style="max-height:420px"><table class="t" id="candT"><tr><td class="loading">载入</td></tr></table></div>', { np: true });
-    $$('#runDetail [data-a]').forEach(b => b.onclick = () => go('anly', b.dataset.a));
+    $$('#runDetail [data-a]').forEach(b => b.onclick = e => { e.stopPropagation(); go('anly', b.dataset.a); });
+    $$('#runDetail .pick [data-tg]').forEach(b => b.onclick = e => { if (e.target.closest('[data-a], .star')) return; const c = b.closest('.pick'); const f = !c.classList.contains('fold');
+      c.classList.toggle('fold', f); const t = c.querySelector('.pk-tg'); if (t) t.textContent = f ? '展开说明 ▾' : '收起 ▴'; });
     $$('#runDetail [data-b]').forEach(b => b.onclick = () => openOrder(JSON.parse(b.dataset.b)));
     const showRunAi = n => { const el = $('#runAi'); if (el) el.innerHTML = n && n.content ? md(n.content) + `<div class="hint mono">${esc(n.created || '')}</div>` : `<div class="hint">${STATIC ? '这次还没有 AI 解读' : '还没有 AI 解读。配置了 AI 后，每次选股会自动生成；也可以点「生成解读」。'}</div>`; };
     if (STATIC) showRunAi(r.ai); else api('ai/run?id=' + r.id).then(showRunAi).catch(() => showRunAi(null));
@@ -571,14 +575,14 @@
     const mine = {}; ((S.ov.accounts.me || {}).positions || []).forEach(p => mine[p.code] = p);
     const PH = { pre: '盘前', intra: '盘中', post: '盘后' };
     const old = {}; t.querySelectorAll('tr[data-c]').forEach(tr => old[tr.dataset.c] = +tr.dataset.p);
-    t.innerHTML = `<tr><th>#</th><th class="l">名称 / 代码</th><th>现价</th><th>涨幅</th><th class="hide-m">涨跌</th><th class="hide-m">量比</th><th class="hide-m">换手</th><th class="hide-m">成交额</th><th class="l">今日信号</th><th class="hide-m">评分</th><th class="hide-m">我的持仓</th><th class="rw"></th></tr>` +
+    t.innerHTML = `<tr><th class="hide-m">#</th><th class="l">名称 / 代码</th><th>现价</th><th>涨幅</th><th class="hide-m">涨跌</th><th class="hide-m">量比</th><th class="hide-m">换手</th><th class="hide-m">成交额</th><th class="l">今日信号</th><th class="hide-m">评分</th><th class="hide-m">我的持仓</th><th class="rw hide-m"></th></tr>` +
       (S.ov.watchlist.length ? S.ov.watchlist.map((q, i) => { const g = (S.wsig || {})[q.code], m = mine[q.code];
-        return `<tr class="click" data-c="${q.code}" data-p="${q.price || 0}"><td class="muted">${i + 1}</td><td class="l">${nameCell(q.name || '--', q.code)}</td>
+        return `<tr class="click" data-c="${q.code}" data-p="${q.price || 0}"><td class="muted hide-m">${i + 1}</td><td class="l">${nameCell(q.name || '--', q.code)}</td>
         <td class="${cls(q.pct)} ${old[q.code] && q.price !== old[q.code] ? (q.price > old[q.code] ? 'flash-up' : 'flash-down') : ''}">${num(q.price)}</td><td class="${cls(q.pct)}"><b>${pct(q.pct)}</b></td><td class="hide-m ${cls(q.chg)}">${sgn(q.chg)}</td>
         <td class="hide-m ${q.vr > 2 ? 'amber' : ''}">${num(q.vr)}</td><td class="hide-m">${num(q.turnover)}%</td><td class="hide-m">${money(q.amount)}</td>
-        <td class="l">${g ? `<span class="chip ${ACT_CLS[g.tone] || ''}">${esc(g.action)}</span> <small class="muted">${PH[g.phase] || ''} ${esc((g.time || '').slice(11, 16))}</small>` : '<span class="muted">--</span>'}</td>
+        <td class="l">${g ? `<span class="chip ${ACT_CLS[g.tone] || ''}">${esc(g.action)}</span> <small class="muted sigt">${PH[g.phase] || ''} ${esc((g.time || '').slice(11, 16))}</small>` : '<span class="muted">--</span>'}</td>
         <td class="hide-m amber">${g ? num(g.score, 0) : '--'}</td><td class="hide-m">${m ? `${m.qty}股 <span class="${cls(m.pnl_pct)}">${pct(m.pnl_pct)}</span>` : '<span class="muted">-</span>'}</td>
-        <td class="rw"><button class="btn sm" data-up="${q.code}" title="置顶">↑</button> <button class="btn sm" data-rm="${q.code}" title="移出">×</button></td></tr>`; }).join('')
+        <td class="rw hide-m"><button class="btn sm" data-up="${q.code}" title="置顶">↑</button> <button class="btn sm" data-rm="${q.code}" title="移出">×</button></td></tr>`; }).join('')
         : '<tr><td colspan="12" class="empty">还没有自选股，在上面搜索添加</td></tr>');
     t.querySelectorAll('tr[data-c]').forEach(tr => tr.onclick = e => { if (e.target.closest('button')) return; go('anly', tr.dataset.c); });
     t.querySelectorAll('[data-up]').forEach(b => b.onclick = async () => { await api('watchlist', { code: b.dataset.up, op: 'move', dir: 'top' }); await poll(); drawWatch(); });

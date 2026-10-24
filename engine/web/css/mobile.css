@@ -131,3 +131,30 @@
   .pick .hd { padding-right: 64px; }
   .idx .c { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 }
+
+/* ---------- 选股卡片：可折叠 ---------- */
+.pick .hd[data-tg] { cursor: pointer; }
+.pick .pk-foot { margin-top: 6px; gap: 6px; }
+.pick:not(.fold) .pk-mini { display: none; }
+.pick.fold .pk-body { display: none; }
+.pick.fold { padding-bottom: 8px; }
+.pick .pk-foot .btn { height: 26px; }
+
+/* K 线：上下滑动交给页面滚动，左右拖动和双指缩放留给图表 */
+.chartbox canvas { touch-action: pan-y; }
+
+@media (max-width: 600px) {
+  .picks { gap: 6px; }
+  .pick { padding: 8px 10px; }
+  .pick .hd .nm { font-size: 15px; }
+  .pick .score { top: 6px; right: 8px; }
+  .pick .score b { font-size: 20px; }
+  .pick .livep { font-size: 12px; gap: 6px; margin-top: 4px !important; }
+  #wlTable .cd { display: block; margin-left: 0; font-size: 10.5px; }
+  #wlTable .sigt { display: block; font-size: 10px; }
+  #wlTable td, #wlTable th { padding: 6px 5px; }
+  #wlTable .chip { padding: 1px 6px; }
+  .chartbar { padding: 4px 6px; }
+  .chartbar .seg { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; }
+  .chartbar .seg button { flex: 0 0 auto; }
+}
