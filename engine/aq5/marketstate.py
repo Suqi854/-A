@@ -17,6 +17,8 @@ from .config import now, today
 INDICES = [("sh000001", "上证指数"), ("sz399001", "深证成指"), ("sh000300", "沪深300"), ("sz399006", "创业板指")]
 STATE = {"label": None, "shifts": [], "since": None}
 _cache = {"t": 0.0, "data": None}
+_alerted: dict = {}  # (指数代码, 异动类型) -> 上次提醒时间，同类 30 分钟内不重复
+IDX_ALERTS = ("异动拉升", "异动跳水", "V形反转", "冲高回落")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS market_daily(date TEXT PRIMARY KEY, label TEXT, pct REAL, vol_ratio REAL, up_ratio REAL,
@@ -114,6 +116,7 @@ def state(force: bool = False) -> dict:
             idx.append(index_state(code, name))
         except Exception:  # noqa: BLE001
             idx.append({"code": code, "name": name})
+    _alert_indices(idx)
     main = next((x for x in idx if x["code"] == "sh000300"), {})
     try:
         br = market.breadth(market.snapshot())
@@ -135,6 +138,20 @@ def state(force: bool = False) -> dict:
         _track_shift(label, data)
     _cache.update(t=time.time(), data=data)
     return data
+
+
+def _alert_indices(idx: list[dict]) -> None:
+    """指数层面的异动写入事件（kind=market），前端小喇叭读取；规则沿用上面的 5/15 分钟速度阈值。"""
+    t = time.time()
+    for x in idx:
+        if not x.get("live"):
+            continue
+        for ev in x.get("events") or []:
+            if ev not in IDX_ALERTS or t - _alerted.get((x["code"], ev), 0) < 1800:
+                continue
+            _alerted[(x["code"], ev)] = t
+            db.event("market", f"{x['name']} {ev}", f"现 {x.get('pct', 0):+.2f}%，5分钟 {x.get('speed5', 0):+.2f}%，15分钟 {x.get('speed15', 0):+.2f}%",
+                     "warn" if ev in ("异动跳水", "冲高回落") else "info")
 
 
 def _track_shift(label: str, data: dict) -> None:

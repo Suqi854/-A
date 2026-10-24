@@ -58,7 +58,7 @@ def public_overview() -> dict:
 
 
 def public_events(limit=100) -> list[dict]:
-    rows = db.q("SELECT * FROM events WHERE kind IN ('pick','learn') OR (kind='trade' AND title LIKE 'AI自动盘%') "
+    rows = db.q("SELECT * FROM events WHERE kind IN ('pick','learn','market') OR (kind='trade' AND title LIKE 'AI自动盘%') "
                 "ORDER BY id DESC LIMIT ?", (limit,))
     return rows
 

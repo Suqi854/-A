@@ -274,7 +274,7 @@
     draw() {
       const d = this.d; if (!d || !d.points || !d.points.length) return;
       const { ctx, w, h } = setup(this.cv);
-      const padL = 52, padR = 52, padB = 18, W = w - padL - padR, hP = (h - padB) * 0.72, hV = (h - padB) * 0.24;
+      const padL = 52, padR = 52, padB = 18, W = w - padL - padR, hP = (h - padB) * (this.noVol ? 0.96 : 0.72), hV = (h - padB) * 0.24;
       const pts = d.points, prev = d.prev || pts[0].p;
       let m = 0; for (const p of pts) m = Math.max(m, Math.abs(p.p - prev), Math.abs((p.avg || p.p) - prev)); m = m * 1.1 || prev * 0.01;
       const py = p => 6 + (prev + m - p) / (2 * m) * (hP - 12), N = 241, X = i => padL + i / (N - 1) * W;
@@ -291,13 +291,13 @@
       ctx.strokeStyle = C.white; ctx.lineWidth = 1.2; ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(X(i), py(p.p)) : ctx.moveTo(X(i), py(p.p))); ctx.stroke();
       ctx.strokeStyle = C.amber; ctx.lineWidth = 1; ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(X(i), py(p.avg || p.p)) : ctx.moveTo(X(i), py(p.avg || p.p))); ctx.stroke();
       let vm = 0; pts.forEach(p => vm = Math.max(vm, p.v)); const vb = h - padB;
-      pts.forEach((p, i) => { const hh = p.v / (vm || 1) * hV; ctx.fillStyle = (i && p.p < pts[i - 1].p) ? C.down : C.up; ctx.fillRect(X(i) - 0.6, vb - hh, Math.max(1, W / N - 0.4), hh); });
+      if (!this.noVol) pts.forEach((p, i) => { const hh = p.v / (vm || 1) * hV; ctx.fillStyle = (i && p.p < pts[i - 1].p) ? C.down : C.up; ctx.fillRect(X(i) - 0.6, vb - hh, Math.max(1, W / N - 0.4), hh); });
       ctx.fillStyle = col; ctx.beginPath(); ctx.arc(X(pts.length - 1), py(last), 3, 0, 7); ctx.fill();
       let k = pts.length - 1;
       if (this.hover != null && this.hover > padL) { k = Math.max(0, Math.min(pts.length - 1, Math.round((this.hover - padL) / W * (N - 1))));
         ctx.strokeStyle = `rgba(${C.accRGB},.6)`; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(X(k), 0); ctx.lineTo(X(k), h - padB); ctx.stroke(); ctx.setLineDash([]); }
       if (this.lg) { const p = pts[k], pc = (p.p / prev - 1) * 100;
-        this.lg.innerHTML = `<span>${p.t}</span><span>价 <b class="${pc >= 0 ? 'up' : 'down'}">${p.p.toFixed(2)}</b></span><span class="${pc >= 0 ? 'up' : 'down'}">${pc >= 0 ? '+' : ''}${pc.toFixed(2)}%</span><span style="color:${C.amber}">均价 ${(p.avg || p.p).toFixed(2)}</span><span>量 ${fmtV(p.v)}</span>`; }
+        this.lg.innerHTML = `<span>${p.t}</span><span>价 <b class="${pc >= 0 ? 'up' : 'down'}">${p.p.toFixed(2)}</b></span><span class="${pc >= 0 ? 'up' : 'down'}">${pc >= 0 ? '+' : ''}${pc.toFixed(2)}%</span><span style="color:${C.amber}">均价 ${(p.avg || p.p).toFixed(2)}</span>${this.noVol ? '' : `<span>量 ${fmtV(p.v)}</span>`}`; }
     }
   }
 

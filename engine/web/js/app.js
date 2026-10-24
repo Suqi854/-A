@@ -252,10 +252,58 @@
     (ov.events || []).slice().reverse().forEach(ev => {
       if (S.seen.has(ev.id)) return;
       S.seen.add(ev.id);
-      if (fresh && (ev.kind === 'pick' || ev.kind === 'trade' || ev.kind === 'alert')) toast(ev.title, ev.level === 'error');
+      if (fresh && (ev.kind === 'pick' || ev.kind === 'trade' || ev.kind === 'alert' || ev.kind === 'market')) toast(ev.title, ev.level === 'error');
     });
+    updateBell(ov.events || []);
   }
-  $('#tape').addEventListener('click', e => { const it = e.target.closest('[data-c]'); if (it && /^(sh|sz)\d{6}$/.test(it.dataset.c) && !/^(sh000|sz399)/.test(it.dataset.c)) go('anly', it.dataset.c); });
+  $('#tape').addEventListener('click', e => { const it = e.target.closest('[data-c]'); if (!it || !/^(sh|sz)\d{6}$/.test(it.dataset.c)) return;
+    if (/^(sh000|sz399)/.test(it.dataset.c)) openIndex(it.dataset.c, it.querySelector('b').textContent); else go('anly', it.dataset.c); });
+
+  // ---- 小喇叭：大盘异动 / 提醒 / 选股 / 成交，红点 = 未读条数（已读位置记在本机浏览器）
+  const BELL_KINDS = ['market', 'alert', 'pick', 'trade'];
+  const bellList = evs => evs.filter(e => BELL_KINDS.includes(e.kind));
+  const bellSeen = () => +(lsGet('aq5_bell_seen') || 0);
+  function updateBell(evs) {
+    const d = $('#bellDot'); if (!d) return;
+    const n = bellList(evs).filter(e => e.id > bellSeen()).length;
+    d.hidden = !n; d.textContent = n > 9 ? '9+' : n;
+  }
+  $('#bell').onclick = () => {
+    const evs = bellList((S.ov && S.ov.events) || []), seen = bellSeen();
+    const m = document.createElement('div'); m.className = 'modal'; m.onclick = e => { if (e.target === m) m.remove(); };
+    m.innerHTML = `<div class="box" style="max-width:480px">${panel('ALERT <small>大盘异动 · 提醒 · 选股 · 成交</small>', evs.length
+      ? evs.map(e => `<div style="${e.id > seen ? 'border-left:3px solid #e53935;padding-left:6px' : ''}">${evHtml(e)}</div>`).join('') : '<div class="empty">暂无消息</div>',
+      { right: '<button class="btn sm" data-x>×</button>', np: true })}</div>`;
+    document.body.appendChild(m); $('[data-x]', m).onclick = () => m.remove();
+    if (evs.length) { try { localStorage.setItem('aq5_bell_seen', String(Math.max(...evs.map(e => e.id)))); } catch { } }
+    updateBell(S.ov ? S.ov.events || [] : []);
+  };
+
+  // ---- 指数详情：分时（不带分时量）+ 日/周/月/分钟 K
+  async function openIndex(code, name) {
+    const m = document.createElement('div'); m.className = 'modal'; let timer = null;
+    const close = () => { clearInterval(timer); m.remove(); };
+    m.onclick = e => { if (e.target === m) close(); };
+    const per = [['i', '分时'], ['day', '日K'], ['week', '周K'], ['month', '月K'], ['m60', '60分'], ['m30', '30分'], ['m15', '15分'], ['m5', '5分']];
+    m.innerHTML = `<div class="box" style="max-width:920px;width:96vw">${panel(`INDEX <small>${esc(name || code)} · ${short(code)}</small>`,
+      `<div class="chartbar"><div class="seg" id="ixPer">${per.map(([k, t]) => `<button data-p="${k}" class="${k === 'i' ? 'on' : ''}">${t}</button>`).join('')}</div></div>
+       <div class="legend" id="ixLg" style="padding:4px 10px;min-height:22px"></div><div class="chartbox" id="ixBox" style="height:380px"><canvas id="ixCv"></canvas></div>
+       <div class="hint mono" id="ixSrc" style="padding:3px 10px 6px"></div>`, { right: '<button class="btn sm" data-x>×</button>', np: true })}</div>`;
+    document.body.appendChild(m); $('[data-x]', m).onclick = close;
+    let cur = 'i', ich = null;
+    const load = async () => {
+      const box = $('#ixBox', m); box.innerHTML = '<canvas id="ixCv"></canvas>'; ich = null;
+      try {
+        if (cur === 'i') { ich = new Charts.Intraday($('#ixCv', m), $('#ixLg', m)); ich.noVol = true; const d = await api('intraday?code=' + code); ich.setData(d); $('#ixSrc', m).textContent = d.source ? '数据源：' + d.source : ''; return; }
+        const kc = new Charts.KChart($('#ixCv', m), $('#ixLg', m)); kc.maN = [5, 10, 20, 60]; kc.main = 'ma'; kc.sub = 'macd';
+        const k = cur === 'day' ? await api(`kline?code=${code}&n=400`) : await api(`kline?code=${code}&n=${cur === 'month' ? 200 : 320}&period=${cur}`);
+        kc.setData(k.rows); $('#ixSrc', m).textContent = '数据源：' + (k.source || '腾讯/同花顺/新浪 自动切换');
+      } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+    };
+    $$('#ixPer button', m).forEach(b => b.onclick = () => { cur = b.dataset.p; $$('#ixPer button', m).forEach(x => x.classList.toggle('on', x === b)); load(); });
+    timer = setInterval(async () => { if (cur === 'i' && ich && S.ov && S.ov.phase === 'trading') { try { ich.setData(await api('intraday?code=' + code)); } catch { } } }, 5000);
+    await load();
+  }
 
   async function poll() {
     try {
@@ -390,10 +438,11 @@
     // 指数
     const ic = $('#idxCards');
     if (ic.children.length !== ov.indices.length) {
-      ic.innerHTML = ov.indices.map(q => `<div class="card" data-c="${q.code}"><div class="n"><span>${esc(q.name)}</span><span class="mono">${short(q.code)}</span></div>
+      ic.innerHTML = ov.indices.map(q => `<div class="card click" data-c="${q.code}" style="cursor:pointer" title="点开看分时和K线"><div class="n"><span>${esc(q.name)}</span><span class="mono">${short(q.code)}</span></div>
         <div class="p mono"></div><div class="c"></div><canvas id="sp-${q.code}"></canvas></div>`).join('');
       loadIdxSpark();
     }
+    ic.onclick = e => { const c = e.target.closest('[data-c]'); if (c) { const q = ov.indices.find(x => x.code === c.dataset.c); openIndex(c.dataset.c, q && q.name); } };
     ov.indices.forEach(q => { const c = ic.querySelector(`[data-c="${q.code}"]`); if (!c) return;
       c.querySelector('.p').className = 'p mono ' + cls(q.pct); c.querySelector('.p').textContent = num(q.price);
       c.querySelector('.c').innerHTML = `<span class="${cls(q.pct)}">${sgn(q.chg)}  ${pct(q.pct)}</span> <span class="muted">额 ${money(q.amount)}</span>`; });
