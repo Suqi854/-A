@@ -42,6 +42,8 @@
         const k = await Lite.klines(code, 'day', 320); return { code, rows: k.rows, source: k.source }; }
       case 'intraday': return sj('intraday/' + code + '.json').catch(() => Lite.intraday(code));
       case 'sim': return (q.get('acct') === 'me' && S.priv) ? S.priv.me : sj('ai.json');
+      case 'plan': { const p = S.priv && S.priv.plan; if (p) return { ...p, static_time: S.priv.time };
+        return { exists: false, static: true, error: S.priv ? '电脑上还没有建立计划模拟（在电脑或连上电脑后设定）' : '解锁个人数据后可以看计划模拟' }; }
       case 'learn': return sj('learn.json');
       case 'events': { const e = await sj('events.json'); return S.priv ? [...S.priv.events, ...e].sort((x, y) => y.time < x.time ? -1 : 1) : e; }
       case 'settings': return sj('settings.json');
@@ -84,7 +86,8 @@
       const m = await fetch(r.url + '/api/auth/me', { headers: { Authorization: 'Bearer ' + r.token }, signal: ctl.signal }).then(x => x.json());
       if (!m.authorized) return false;
       S.remote = { url: r.url, token: r.token }; STATIC = false; document.body.classList.remove('static'); document.body.classList.add('remote');
-      setRemoteBadge(); restartPoll(); initAssistant(); toast('已连上你的电脑：现在是完整版，可以下单、改设置、用 AI'); return true;
+      setRemoteBadge(); restartPoll(); initAssistant(); toast('已连上你的电脑：现在是完整版，可以下单、改设置、用 AI');
+      api('settings').then(s => syncLook(s.look)).catch(() => { }); return true;
     } catch { return false; }
   }
   async function api(path, body) {
@@ -131,6 +134,16 @@
   const DENS = [['compact', '紧凑'], ['normal', '标准'], ['cozy', '宽松']];
   const UPDN = [['rg', '红涨绿跌'], ['gu', '绿涨红跌']];
   const LOOK = (() => { try { return JSON.parse(localStorage.getItem('aq5_look') || '{}') || {}; } catch { return {}; } })();
+  // 外观各端同步：引擎设置里存一份（带修改时间），本机/局域网/固定地址/GitHub 网页版谁改得晚以谁为准
+  const canWrite = () => !STATIC || !!S.remote;
+  function saveLook() { if (canWrite()) api('look', LOOK).then(syncLook).catch(() => { }); }
+  function syncLook(srv) {
+    if (!srv || typeof srv !== 'object') return;
+    const st = +srv.t || 0, lt = +LOOK.t || 0;
+    if (st > lt) { Object.keys(LOOK).forEach(k => delete LOOK[k]); Object.assign(LOOK, srv); applyLook(); if (S.page === 'set') renderSet(); }
+    else if (lt > st && canWrite()) saveLook();
+    else if (!st && !lt && canWrite() && Object.keys(LOOK).length) { LOOK.t = 1; saveLook(); }  // 引擎里还没有：先用这台设备的
+  }
   function applyLook() {
     const d = document.documentElement;
     [['theme', 'terminal'], ['ui', 'term'], ['density', 'normal'], ['updown', 'rg']].forEach(([k, def]) => {
@@ -141,7 +154,7 @@
   }
   function lookPanel() {
     const cur = LOOK.theme || 'terminal', seg = (id, arr, v) => `<div class="seg" id="${id}">${arr.map(([k, t]) => `<button data-v="${k}" class="${k === v ? 'on' : ''}">${t}</button>`).join('')}</div>`;
-    return panel('LOOK <small>外观 · 皮肤和界面风格 · 只保存在这台设备</small>', `<div class="skins" id="lkTheme">${THEMES.map(([k, n, d, c]) => `<button class="skin ${k === cur ? 'on' : ''}" data-v="${k}">
+    return panel(`LOOK <small>外观 · 皮肤和界面风格 · ${canWrite() ? '电脑、手机、网页版自动同步' : '网页版只读：在这里改只对这台设备生效，连上电脑或在电脑上改会同步到所有设备'}</small>`, `<div class="skins" id="lkTheme">${THEMES.map(([k, n, d, c]) => `<button class="skin ${k === cur ? 'on' : ''}" data-v="${k}">
         <div class="sw" style="background:${c[0]}"><i style="background:${c[1]}"></i><i style="background:${c[2]}"></i><i style="background:${c[1]};opacity:.4"></i></div><b>${n}</b><small>${d}</small></button>`).join('')}</div>
       <div class="optrow"><span>界面风格</span>${seg('lkUi', UIS, LOOK.ui || 'term')}</div>
       <div class="optrow"><span>信息密度</span>${seg('lkDen', DENS, LOOK.density || 'normal')}</div>
@@ -149,11 +162,11 @@
       <p class="hint">点任意面板的标题可以折叠 / 展开，选股历史、迭代记录这类次要内容默认是折叠的。</p>`, { cls: 'c12', nofold: true });
   }
   function bindLook() {
-    const pick = (id, key) => $$('#' + id + ' [data-v]').forEach(b => b.onclick = () => { LOOK[key] = b.dataset.v; applyLook(); renderSet(); });
+    const pick = (id, key) => $$('#' + id + ' [data-v]').forEach(b => b.onclick = () => { LOOK[key] = b.dataset.v; LOOK.t = Date.now(); applyLook(); saveLook(); renderSet(); });
     pick('lkTheme', 'theme'); pick('lkUi', 'ui'); pick('lkDen', 'density'); pick('lkUd', 'updown');
     $('#lkUnfold').onclick = () => { Object.keys(FOLDS).forEach(k => delete FOLDS[k]); FOLD_DEFAULT.forEach(k => FOLDS[k] = false);
       try { localStorage.setItem('aq5_folds', JSON.stringify(FOLDS)); } catch { } toast('已全部展开'); renderSet(); };
-    $('#lkReset').onclick = () => { Object.keys(LOOK).forEach(k => delete LOOK[k]); applyLook(); renderSet(); };
+    $('#lkReset').onclick = () => { Object.keys(LOOK).forEach(k => delete LOOK[k]); LOOK.t = Date.now(); applyLook(); saveLook(); renderSet(); };
   }
   applyLook();
   // ---- 长说明默认收成一行：点一下展开 / 收起
@@ -894,14 +907,15 @@
   }
 
   // ================================================================== F4 模拟盘
-  const acctSeg = () => `<div class="seg rw pv" id="acctSeg"><button data-a="me" class="${S.acct === 'me' ? 'on' : ''}">我的模拟盘</button><button data-a="ai" class="${S.acct === 'ai' ? 'on' : ''}">AI自动盘</button>${STATIC ? '' : `<button data-a="plan" class="${S.acct === 'plan' ? 'on' : ''}">计划模拟</button>`}</div>`;
+  const acctSeg = () => `<div class="seg rw pv" id="acctSeg"><button data-a="me" class="${S.acct === 'me' ? 'on' : ''}">我的模拟盘</button><button data-a="ai" class="${S.acct === 'ai' ? 'on' : ''}">AI自动盘</button>${STATIC && !S.priv ? '' : `<button data-a="plan" class="${S.acct === 'plan' ? 'on' : ''}">计划模拟</button>`}</div>`;
   async function renderSim() {
     if (STATIC && !S.priv) S.acct = 'ai';
-    if (STATIC && S.acct === 'plan') S.acct = 'me';
     let P = null;
     if (S.acct === 'plan') {
       P = await api('plan').catch(e => ({ error: e.message }));
       if (P.error) return planError(P.error);
+      if (!P.exists && P.static) return planError(P.error);
+      if (STATIC) S.planEdit = false;
       if (!P.exists || S.planEdit) return planSetup(P);
     }
     const a = P ? P.account : await api('sim?acct=' + S.acct).catch(e => ({ error: e.message }));
@@ -987,6 +1001,7 @@
         <span class="chip">${P.cfg.mode === 'auto' ? 'AI 自选' : '已锁定'}</span><span class="chip">风格 ${esc(P.cfg.risk)}</span>${P.active ? '' : '<span class="chip d">已暂停</span>'}<span class="sp"></span>
         <select class="in rw" id="plModeSel" style="width:auto;height:24px"><option value="auto" ${P.cfg.mode === 'auto' ? 'selected' : ''}>策略：AI 自选</option>${mo}</select>
         <button class="btn sm rw" id="plToggle">${P.active ? '暂停' : '恢复'}</button></div>
+      ${P.static_time ? `<div class="hint" style="margin-bottom:4px">网页版只读：数据来自电脑或云端代跑最近一次发布（${esc(P.static_time.slice(5, 16))}），改策略、暂停、重新设定请在电脑上或连上电脑后操作</div>` : ''}
       <div class="hint" style="margin-top:4px">${esc(P.reason || 'AI 正在分析持仓和大盘，几秒后刷新就能看到它选的策略…')}${P.updated ? ` <span class="mono">（${esc(P.updated.slice(5, 16))}）</span>` : ''}</div>
       ${pend.length ? `<div class="row hint" style="margin-top:4px"><span class="amber">待成交</span>${pend.map(o => `<span class="chip">${esc(o.name)} ${o.side === 'buy' ? '买' : '卖'} ${o.qty} 股</span>`).join('')}<span>非交易时间下的单，开盘后按 A 股规则自动成交</span></div>` : ''}
       <div class="row hint mono" style="margin-top:6px"><span>计划收益 <b class="${cls(a.total_pct)}">${pct(a.total_pct)}</b></span><span>一直不动 <b class="${cls(b.pct)}">${pct(b.pct)}</b></span>
@@ -998,7 +1013,7 @@
   function bindPlan(P) {
     const ms = $('#plModeSel'); if (ms) ms.onchange = async () => { try { const r = await api('plan/mode', { mode: ms.value }); toast('策略：' + (P.modes[r.mode] ? P.modes[r.mode].name : '已更新')); } catch (e) { toast(e.message, 1); } renderSim(); };
     const tg = $('#plToggle'); if (tg) tg.onclick = async () => { if (P.active && !confirm('暂停后 AI 不再交易，到价止损止盈也会停，持仓和记录保留。确定暂停？')) return; try { await api(P.active ? 'plan/stop' : 'plan/resume', {}); } catch (e) { toast(e.message, 1); } renderSim(); };
-    if (!P.mode || !P.reason) setTimeout(() => { if (S.page === 'sim' && S.acct === 'plan' && !S.planEdit) renderSim(); }, 6000);  // 刚建立：等 AI 选完策略自动刷新
+    if (!STATIC && (!P.mode || !P.reason)) setTimeout(() => { if (S.page === 'sim' && S.acct === 'plan' && !S.planEdit) renderSim(); }, 6000);  // 刚建立：等 AI 选完策略自动刷新
   }
   function planSetup(P) {
     const c = (P.exists && P.cfg) || {};
@@ -1496,6 +1511,7 @@
     S.priv = await unlockPrivate(pw);
     document.body.classList.add('unlocked');
     if (remember) lsSet('aq5_pw', pw);
+    syncLook(S.priv.look);
     const b = $('#unlockBtn'); if (b) b.textContent = '已解锁 ' + (S.priv.profile.nickname || '');
     toast('个人数据已解锁（数据时间 ' + S.priv.time.slice(5, 16) + '）' + (S.priv.remote ? '，正在连接电脑…' : ''));
     await connectRemote();
@@ -1592,7 +1608,7 @@
       S.auth = me;
       if (!me.authorized) { showLogin(me); return; }
     }
-    api('settings').then(s => S.settings = s).catch(() => { });
+    api('settings').then(s => { S.settings = s; syncLook(s.look); }).catch(() => { });
     poll().then(() => { const [p, a] = location.hash.slice(1).split('/'); show(PAGES.includes(p) ? p : 'mon', a); });
   }
   boot();

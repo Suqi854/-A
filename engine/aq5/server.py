@@ -15,7 +15,7 @@ from . import ai, analysis, auth, backtest, backup, cloud, db, learn, market, no
 from .config import DATA, MOCK, WEB, load_settings, now, public_settings, save_settings
 from .strategies import DESC, NAMES
 
-VERSION = "5.1.0"
+VERSION = "5.1.1"
 
 
 def lan_ip() -> str:
@@ -427,6 +427,20 @@ def p_publish(b):
     return {"started": True}
 
 
+LOOK_KEYS = {"theme", "ui", "density", "updown"}
+
+
+def p_look(b):
+    """外观设置（皮肤、界面风格、密度、涨跌色）存到引擎里，各端（本机、局域网、固定地址、GitHub 网页版）同步。"""
+    look = {k: str(v)[:20] for k, v in b.items() if k in LOOK_KEYS and v}
+    look["t"] = int(b.get("t") or 0)
+    cur = load_settings().get("look") or {}
+    if look["t"] < int(cur.get("t") or 0):
+        return cur  # 别的设备改得更晚，以它为准
+    save_settings({"look": None})
+    return save_settings({"look": look})["look"]
+
+
 def p_events_read(_b):
     with db.tx() as c:
         c.execute("UPDATE events SET read=1")
@@ -456,6 +470,7 @@ POST = {"/api/picks/run": p_pick_run, "/api/sim/order": p_order, "/api/sim/cance
         "/api/hf/scan": lambda b: hf.quick_scan(force=True),
         "/api/sim/follow": lambda b: _follow(int(b["run_id"])),
         "/api/plan/start": lambda b: plan.start(b),
+        "/api/look": p_look,
         "/api/plan/preview": lambda b: plan.preview(b),
         "/api/plan/stop": lambda b: plan.stop(),
         "/api/plan/resume": lambda b: plan.resume(),

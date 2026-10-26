@@ -131,7 +131,8 @@ def export(full: bool = True) -> dict:
         s = load_settings()
         _w(d / "settings.json", {"pick": {k: s["pick"][k] for k in ("times", "max_picks", "min_score")},
                                  "risk": s["risk"], "emotions": sim.EMOTIONS, "static": True,
-                                 "ai": {"provider": s.get("ai", {}).get("provider"), "model": s.get("ai", {}).get("model")}})
+                                 "ai": {"provider": s.get("ai", {}).get("provider"), "model": s.get("ai", {}).get("model")},
+                                 "look": s.get("look") or {}})  # 外观（皮肤等）各端同步，不含个人数据
         idx = []
         for code in _analysis_codes():
             try:
@@ -163,7 +164,7 @@ _PRIV_CACHE: dict = {"analysis": {}}
 
 
 def _private_pack(d: Path, full: bool) -> list[str]:
-    """自选股 + 我的模拟盘 + 个人资料 → 用「手机查看密码」加密成 private.enc。
+    """自选股 + 我的模拟盘 + 计划模拟盘 + 个人资料 → 用「手机查看密码」加密成 private.enc。
     仓库里只有密文；在 GitHub 网页上输入密码后由浏览器本地解密，服务器和 GitHub 都看不到明文。"""
     import gzip
     from .analysis import analyze
@@ -194,10 +195,21 @@ def _private_pack(d: Path, full: bool) -> list[str]:
     pack = {"time": now().strftime("%Y-%m-%d %H:%M:%S"), "watchlist": [qs.get(c) or {"code": c} for c in wl],
             "analysis": _PRIV_CACHE["analysis"], "me": me, "profile": (u or {}).get("profile", {}),
             "events": db.q("SELECT * FROM events WHERE kind IN ('alert','trade','ai','announce') ORDER BY id DESC LIMIT 80"),
-            "ai": _private_ai(wl), "lan": _lan(), "remote": _remote(), "signals": _private_signals(wl)}
+            "ai": _private_ai(wl), "lan": _lan(), "remote": _remote(), "signals": _private_signals(wl),
+            "plan": _private_plan(), "look": load_settings().get("look") or {}}
     raw = gzip.compress(json.dumps(clean(pack), ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
     target.write_bytes(vault.seal_web(raw, pw))
     return [f"private.enc({len(_PRIV_CACHE['analysis'])}只自选,加密)"]
+
+
+def _private_plan():
+    """计划模拟盘（持仓、策略、成交）只进加密包：电脑离线时手机解锁后也能看。"""
+    try:
+        from . import plan
+        v = plan.view()
+        return v if v.get("exists") else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _remote():
