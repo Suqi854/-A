@@ -697,6 +697,8 @@ def main():
     s = load_settings()
     port = int(sys.argv[1]) if len(sys.argv) > 1 else s["port"]
     try:
+        # Windows 上 SO_REUSEADDR 会让第二个引擎也绑上同一端口（两个引擎同时交易），这里关掉，让重复启动直接失败退出
+        ThreadingHTTPServer.allow_reuse_address = sys.platform != "win32"
         httpd = ThreadingHTTPServer((s["host"], port), Handler)
     except OSError as e:
         print(f"端口 {port} 已被占用（A量化可能已经在运行）：{e}", flush=True)
