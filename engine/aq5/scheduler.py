@@ -5,7 +5,7 @@ import threading
 import time
 import traceback
 
-from . import ai, announce, backup, db, hf, learn, market, marketstate, picker, publisher, sectors, signals, sim
+from . import ai, announce, backup, db, hf, learn, market, marketstate, picker, plan, publisher, sectors, signals, sim
 from .config import load_settings, now, today
 from .cloud import CLOUD
 
@@ -111,6 +111,7 @@ def loop() -> None:
                     if time.time() - last_t > 120:
                         last_t = time.time()
                         threading.Thread(target=signals.scan_t, daemon=True).start()
+                        threading.Thread(target=plan.tick, daemon=True, name="aq5-plan").start()
                     slot = (hm // 100) * 2 + (1 if hm % 100 >= 30 else 0)
                     bg(f"watch_intra_{slot}", lambda: signals.run_watch("intra"))
                 if hm >= 1510:
@@ -123,6 +124,8 @@ def loop() -> None:
                 if hm >= 1505:
                     _once("equity", sim.record_equity)
                     _once("sector_daily", sectors.record_daily)
+                if 1135 <= hm < 1255:  # 午间快速迭代：用昨天样本的 1 日收益更新权重，下午选股/高频就用上
+                    bg("learn_noon", learn.quick)
                 if hm >= 1530:
                     _once("learn", learn.daily)
                 pub = s["publish"]

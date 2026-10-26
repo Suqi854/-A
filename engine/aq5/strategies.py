@@ -196,10 +196,10 @@ def s_squeeze_break(rows, ind, live, session):
     up = ind["boll_up"]
     if not b or up[-2] is None:
         return None
-    prev_sq = b.get("recent_min_pctile", 100) <= 20
-    if prev_sq and c[-1] > (up[-1] or 1e9) * 0.995 and e["vr"] >= 1.3 and e["pct"] > 1:
-        return 0.55 + min(0.3, (e["vr"] - 1.3) * 0.1), (f"布林带宽前几天处于近120日 {b['recent_min_pctile']:.0f}% 低分位（波动收敛），"
-                                                        f"今日放量（量比 {e['vr']:.1f}）冲击上轨 {up[-1]:.2f}：方向选择向上")
+    prev_sq = b.get("recent_min_pctile", 100) <= 15   # 5.1 收紧：此前信号偏多，只要真正收敛后的放量站上上轨
+    if prev_sq and c[-1] >= (up[-1] or 1e9) and e["vr"] >= 1.5 and e["pct"] > 2 and e["pos_day"] > 0.6:
+        return 0.55 + min(0.3, (e["vr"] - 1.5) * 0.1), (f"布林带宽前几天处于近120日 {b['recent_min_pctile']:.0f}% 低分位（波动收敛），"
+                                                        f"今日放量（量比 {e['vr']:.1f}）收在上轨 {up[-1]:.2f} 之上：方向选择向上")
     return None
 
 
@@ -212,6 +212,50 @@ def s_trend_quality(rows, ind, live, session):
     if r and h and r["slope_ann"] > 30 and r["r2"] > 0.75 and h > 0.55 and m20 and c[-1] > m20 and r["z"] < 1.2:
         return min(0.85, 0.5 + (r["r2"] - 0.75) + (h - 0.55)), (f"趋势质量高：年化斜率 {r['slope_ann']:+.0f}%、R² {r['r2']:.2f}、"
                                                                f"Hurst {h:.2f}（趋势延续型），价格在通道 z={r['z']:+.2f} 未过热")
+    return None
+
+
+def s_limit_pullback(rows, ind, live, session):
+    """涨停回踩：近 2~6 天有过涨停，之后缩量回踩但守住涨停当天的开盘价。"""
+    c, v, e = ind["close"], ind["vol"], ind["extra"]
+    if len(c) < 10:
+        return None
+    for k in range(2, 7):
+        i = len(c) - 1 - k
+        if i < 1 or not c[i - 1]:
+            continue
+        if (c[i] / c[i - 1] - 1) * 100 >= 9.5:
+            base = rows[i]["open"]
+            shrink = v[-1] < v[i] * 0.7
+            if c[-1] >= base and shrink and -3 <= e["pct"] <= 3 and c[-1] < c[i] * 1.08:
+                conf = 0.55 + min(0.25, (1 - v[-1] / v[i]) * 0.3)
+                return conf, (f"{k} 天前涨停（{rows[i]['date']}），之后缩量回踩（今日量仅涨停日的 {v[-1] / v[i]:.0%}），"
+                              f"守住涨停日开盘价 {base:.2f}：强势股的二次买点")
+            return None
+    return None
+
+
+def s_pocket_pivot(rows, ind, live, session):
+    """口袋支点：上涨日成交量超过近 10 天任一下跌日的量，且贴着 10 日线、没有过度拉伸。"""
+    c, v, e = ind["close"], ind["vol"], ind["extra"]
+    m10, m60 = _g(ind["ma10"]), _g(ind["ma60"])
+    if len(c) < 15 or not (m10 and m60) or e["pct"] <= 0:
+        return None
+    downs = [v[i] for i in range(len(c) - 11, len(c) - 1) if c[i] < c[i - 1]]
+    if downs and v[-1] > max(downs) and c[-1] > m10 > m60 and c[-1] <= m10 * 1.04:
+        return 0.55 + min(0.2, (v[-1] / max(downs) - 1) * 0.1), (f"上涨日放量 {v[-1] / max(downs):.1f} 倍于近10天最大下跌日量能，"
+                                                                f"价格贴着10日线 {m10:.2f}（MA10>MA60）：机构式的口袋支点买点")
+    return None
+
+
+def s_rs_high(rows, ind, live, session):
+    """相对强势新高：收盘创 60 日新高、20 日涨幅 > 10%，量能温和、没有过热。"""
+    c, e = ind["close"], ind["extra"]
+    if len(c) < 61:
+        return None
+    if c[-1] >= max(c[-60:-1]) and e["r20"] > 10 and 1.0 <= e["vr"] <= 3 and e["rsi6"] < 85 and e["pct"] > 0:
+        return 0.5 + min(0.3, (e["r20"] - 10) * 0.01 + (3 - e["vr"]) * 0.03), (f"收盘创60日新高，20日涨幅 {e['r20']:.0f}%，"
+                                                                              f"量比 {e['vr']:.1f} 温和、RSI6 {e['rsi6']:.0f} 未过热：强者恒强")
     return None
 
 
@@ -232,6 +276,9 @@ STRATEGIES = [
     ("mean_revert", "均值回归", s_mean_revert, "价格偏离20日均值超过2个标准差，且该股属于均值回归型（Hurst<0.5）"),
     ("squeeze_break", "收敛突破", s_squeeze_break, "布林带长期收窄后放量突破上轨，波动率扩张往往伴随趋势行情"),
     ("trend_quality", "趋势质量", s_trend_quality, "斜率、拟合度、Hurst 三者都显示趋势强且稳定，顺势持有"),
+    ("limit_pullback", "涨停回踩", s_limit_pullback, "近几天涨停过，之后缩量回踩不破涨停日开盘价，强势股的二次买点"),
+    ("pocket_pivot", "口袋支点", s_pocket_pivot, "上涨日的量超过近10天任一下跌日，且贴着10日线：资金悄悄进场"),
+    ("rs_high", "强势新高", s_rs_high, "收盘创60日新高、近20日明显跑赢，量能温和不过热：强者恒强"),
 ]
 FORMULAS = {
     "breakout": "Cₜ > max(H₋₂₀..H₋₁) 且 量比 ≥ 1.5 且 MA20ₜ > MA20ₜ₋₅；置信度 = 0.5 + 0.15·(量比−1.5) + 5·(Cₜ/H20 − 1)",
@@ -248,21 +295,24 @@ FORMULAS = {
     "close_vwap": "14:45 时 0 ≤ 涨幅 ≤ 3% 且 均价 ≤ 价格 ≤ 1.005·均价 且 0.4 ≤ 日内位置 ≤ 0.8 且 MA5 > MA10",
     "reg_lower": "ln P = a + b·t（60日）；年化斜率 > 15% 且 R² > 0.5 且 通道 z < −1.3",
     "mean_revert": "Z20 = (C − MA20)/σ20 < −2 且 Hurst < 0.5 且 半衰期 = −ln2/β < 20 天",
-    "squeeze_break": "BBW = (上轨−下轨)/中轨 在前5日内曾处于近120日 ≤20% 分位 且 C ≥ 0.995·上轨 且 量比 ≥ 1.3",
+    "squeeze_break": "BBW = (上轨−下轨)/中轨 在前5日内曾处于近120日 ≤15% 分位 且 C ≥ 上轨 且 量比 ≥ 1.5 且 涨幅 > 2% 且 日内位置 > 0.6",
     "trend_quality": "年化斜率 > 30% 且 R² > 0.75 且 Hurst > 0.55 且 C > MA20 且 通道 z < 1.2",
+    "limit_pullback": "k∈[2,6] 天前涨幅 ≥ 9.5%（涨停日 i）且 Cₜ ≥ Open_i 且 Vₜ < 0.7·V_i 且 −3% ≤ 今日涨幅 ≤ 3% 且 Cₜ < 1.08·C_i",
+    "pocket_pivot": "今日上涨 且 Vₜ > max(近10天下跌日成交量) 且 C > MA10 > MA60 且 C ≤ 1.04·MA10",
+    "rs_high": "Cₜ ≥ max(C₋₅₉..C₋₁) 且 20日涨幅 > 10% 且 1 ≤ 量比 ≤ 3 且 RSI6 < 85 且 今日收红",
 }
 NAMES = {s[0]: s[1] for s in STRATEGIES}
 DESC = {s[0]: s[3] for s in STRATEGIES}
 
 
 def strategy_weights(session: str | None = None) -> dict:
-    """来自最近一次学习结果的策略权重（默认 1.0）；指定场次且该场次样本≥10时用场次专属权重。"""
+    """来自最近一次学习结果的策略权重（默认 1.0）；指定场次且该场次样本≥5时用场次专属权重（已做贝叶斯收缩）。"""
     r = db.q1("SELECT strat FROM weights ORDER BY version DESC LIMIT 1")
     w = db.loads(r["strat"], {}) if r else {}
     by = ((w.get("_by_session") or {}).get(session) or {}) if session else {}
     out = {}
     for k, *_ in STRATEGIES:
-        x = by.get(k) if isinstance(by.get(k), dict) and (by[k].get("n") or 0) >= 10 else w.get(k)
+        x = by.get(k) if isinstance(by.get(k), dict) and (by[k].get("n") or 0) >= 5 else w.get(k)
         out[k] = float(x.get("weight", 1.0)) if isinstance(x, dict) else 1.0
     return out
 

@@ -12,14 +12,16 @@ from datetime import date
 from . import db, market
 from .config import load_settings, now, today
 
-ACCOUNTS = {"me": "我的模拟盘", "ai": "AI自动盘"}
+ACCOUNTS = {"me": "我的模拟盘", "ai": "AI自动盘", "plan": "计划模拟盘"}
+AUTO_ACCOUNTS = ("me", "ai")  # 启动时自动建好的账户；计划模拟盘由用户设定后才创建
 EMOTIONS = ["逻辑驱动", "计划内", "跟随系统", "追涨", "抄底", "恐慌", "贪心", "跟风"]
 
 
 def ensure_accounts() -> None:
     init = load_settings()["init_cash"]
     with db.tx() as c:
-        for k, v in ACCOUNTS.items():
+        for k in AUTO_ACCOUNTS:
+            v = ACCOUNTS[k]
             c.execute("INSERT OR IGNORE INTO accounts(id, name, cash, init_cash, created, peak) VALUES(?,?,?,?,?,?)",
                       (k, v, init, init, today(), init))
 
@@ -28,7 +30,7 @@ def migrate_capital() -> None:
     """把模拟资金提到设置里的 init_cash（默认 100 万）：没交易过的账户直接重置，有交易的只补资金、保留记录。"""
     target = float(load_settings()["init_cash"])
     for a in db.q("SELECT * FROM accounts"):
-        if a["init_cash"] >= target:
+        if a["id"] not in AUTO_ACCOUNTS or a["init_cash"] >= target:
             continue
         n = (db.q1("SELECT COUNT(*) AS n FROM orders WHERE account=?", (a["id"],)) or {}).get("n", 0)
         if not n:
@@ -40,6 +42,10 @@ def migrate_capital() -> None:
                       (delta, target, delta, a["id"]))
             c.execute("UPDATE equity SET equity=equity+? WHERE account=?", (delta, a["id"]))
         db.event("trade", f"{ACCOUNTS[a['id']]} 资金已提升到 {target / 1e4:.0f} 万", f"补入 {delta:.0f} 元，原有持仓和记录保留")
+
+
+def existing() -> list[str]:
+    return [r["id"] for r in db.q("SELECT id FROM accounts") if r["id"] in ACCOUNTS]
 
 
 def fees(side: str, amount: float) -> float:
@@ -446,6 +452,8 @@ def auto_follow(picks: list[dict], session: str) -> None:
 def view(acct: str, light: bool = False) -> dict:
     ensure_accounts()
     a = db.q1("SELECT * FROM accounts WHERE id=?", (acct,))
+    if not a:
+        raise ValueError(f"{ACCOUNTS.get(acct, acct)}还没有建立")
     poss = db.q("SELECT * FROM positions WHERE account=? ORDER BY opened", (acct,))
     qs = market.quotes([p["code"] for p in poss]) if poss else {}
     mv, today_pnl = 0.0, 0.0
@@ -541,7 +549,7 @@ def record_equity() -> None:
         accrue_interest()
     except Exception:  # noqa: BLE001
         pass
-    for k in ACCOUNTS:
+    for k in existing():
         v = view(k, light=True)
         with db.tx() as c:
             c.execute("INSERT OR REPLACE INTO equity VALUES(?,?,?)", (k, today(), v["equity"]))

@@ -158,3 +158,42 @@
   .chartbar .seg { flex-wrap: nowrap; overflow-x: auto; max-width: 100%; }
   .chartbar .seg button { flex: 0 0 auto; }
 }
+
+/* ---------- 手机：除 K 线图外不出现左右滑动（5.1） ---------- */
+@media (max-width: 600px) {
+  html, body, #main { overflow-x: hidden; }
+  #main { overscroll-behavior-x: none; }
+  .pb, .scroll, .mkts, .modal .box { overflow-x: hidden; }
+  .ph h3 { white-space: normal; }
+  table.t { width: 100%; max-width: 100%; }
+  table.t th, table.t td { white-space: normal; overflow-wrap: anywhere; padding: 5px 4px; }
+  table.t td small { white-space: nowrap; }
+  table.t th { overflow-wrap: normal; word-break: keep-all; }
+  .chartbar .seg { flex-wrap: wrap; overflow-x: visible; }
+  pre, code { white-space: pre-wrap; word-break: break-all; }
+  img, svg, video { max-width: 100%; }
+  .row { flex-wrap: wrap; }
+  details.fx > div, details.note { overflow-wrap: anywhere; }
+}
+
+/* ---------- 日志分类 ---------- */
+details.logcat { border-bottom: 1px solid var(--line); }
+details.logcat > summary { display: flex; align-items: center; gap: 8px; padding: 8px 10px; cursor: pointer; list-style: none; user-select: none; }
+details.logcat > summary::-webkit-details-marker { display: none; }
+details.logcat > summary::before { content: '▸'; color: var(--amber); width: 10px; }
+details.logcat[open] > summary::before { content: '▾'; }
+details.logcat > summary b { color: var(--amber); }
+
+/* ---------- 计划模拟 ---------- */
+.planform { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
+.planform .full { grid-column: 1 / -1; }
+.planrows .prow { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1.4fr) minmax(0, 1.4fr) auto; gap: 6px; margin-bottom: 6px; }
+.planrows .prow.b2 { grid-template-columns: minmax(0, 2fr) minmax(0, 2fr) auto; }
+.modechips { display: flex; flex-wrap: wrap; gap: 6px; }
+.modechips .chip.on { border-color: var(--amber); color: var(--amber); }
+@media (max-width: 600px) {
+  .planform { grid-template-columns: minmax(0, 1fr); }
+  .planrows .prow { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .planrows .prow > :first-child { grid-column: 1 / -1; }
+  .planrows .prow.b2 { grid-template-columns: minmax(0, 1fr) auto; }
+}

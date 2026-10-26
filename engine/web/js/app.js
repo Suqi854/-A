@@ -464,9 +464,12 @@
     const lr = ov.last_run, mp = $('#monPick'); mp.className = '';
     if (!lr) mp.innerHTML = `<div class="empty">还没有选股记录<br><br>交易日 09:26 / 14:45 自动运行<br><br><button class="btn pri" onclick="location.hash='pick'">去手动选股</button></div>`;
     else mp.innerHTML = `<div class="row"><span class="chip a">${SESSION[lr.session] || lr.session}</span><span class="mono muted">${lr.date} ${lr.finished || ''}</span><span class="sp"></span><span class="mono muted">扫描${lr.scanned}·精评${lr.candidates}</span></div>
-        ${lr.items.length ? `<table class="t" style="margin-top:6px"><tr><th>股票</th><th>评分</th><th>选出价</th><th>现价</th><th>涨幅</th><th class="hide-m">较选出</th><th>止损</th><th>目标</th></tr>${lr.items.map(p => { const lq = (S.pq || {})[p.code] || {}; const since = lq.price && p.price ? (lq.price / p.price - 1) * 100 : null;
-          return `<tr class="click" data-c="${p.code}"><td>${p.tier ? `<span class="tier t${p.tier}">${p.tier}</span>` : ''}${nameCell(p.name, p.code)}</td><td class="amber">${num(p.score, 1)}</td><td class="muted">${num(p.price)}</td>
-          <td class="${cls(lq.pct)}">${num(lq.price)}</td><td class="${cls(lq.pct)}">${pct(lq.pct)}</td><td class="hide-m ${cls(since)}">${pct(since)}</td><td class="down">${num(p.stop)}</td><td class="up">${num(p.target1)}</td></tr>`; }).join('')}</table>`
+        ${lr.items.length ? `<table class="t" style="margin-top:6px"><tr><th>股票</th><th>评分</th><th class="hide-m">选出价</th><th>现价</th><th class="hide-m">涨幅</th><th>较选出</th><th>止损</th><th>目标</th></tr>${lr.items.map(p => { const lq = (S.pq || {})[p.code] || {}; const since = lq.price && p.price ? (lq.price / p.price - 1) * 100 : null;
+          const rel = v => v && p.price ? (v / p.price - 1) * 100 : null;
+          return `<tr class="click" data-c="${p.code}"><td>${p.tier ? `<span class="tier t${p.tier}">${p.tier}</span>` : ''}${nameCell(p.name, p.code)}</td><td class="amber">${num(p.score, 1)}</td><td class="hide-m muted">${num(p.price)}</td>
+          <td class="${cls(lq.pct)}">${num(lq.price)}</td><td class="hide-m ${cls(lq.pct)}">${pct(lq.pct)}</td><td class="${cls(since)}"><b>${pct(since)}</b></td>
+          <td class="down" title="止损价 ${num(p.stop)}">${pct(rel(p.stop), 1)}</td><td class="up" title="目标价 ${num(p.target1)}">${pct(rel(p.target1), 1)}</td></tr>`; }).join('')}</table>
+          <div class="hint" style="margin-top:4px">较选出 = 现价相对选出价的涨跌；止损、目标也按相对选出价的百分比显示（电脑上鼠标悬停可看价格）</div>`
         : `<div class="nopick" style="margin-top:8px"><b>宁缺毋滥</b><span class="hint">本次没有达到门槛的机会，今天先观望</span></div>`}`;
     mp.querySelectorAll('[data-c]').forEach(tr => tr.onclick = () => go('anly', tr.dataset.c));
     if (lr && lr.items.length && (!S.pqT || Date.now() - S.pqT > 4000)) { S.pqT = Date.now();
@@ -891,21 +894,29 @@
   }
 
   // ================================================================== F4 模拟盘
+  const acctSeg = () => `<div class="seg rw pv" id="acctSeg"><button data-a="me" class="${S.acct === 'me' ? 'on' : ''}">我的模拟盘</button><button data-a="ai" class="${S.acct === 'ai' ? 'on' : ''}">AI自动盘</button>${STATIC ? '' : `<button data-a="plan" class="${S.acct === 'plan' ? 'on' : ''}">计划模拟</button>`}</div>`;
   async function renderSim() {
     if (STATIC && !S.priv) S.acct = 'ai';
-    const a = await api('sim?acct=' + S.acct).catch(e => ({ error: e.message }));
+    if (STATIC && S.acct === 'plan') S.acct = 'me';
+    let P = null;
+    if (S.acct === 'plan') {
+      P = await api('plan').catch(e => ({ error: e.message }));
+      if (P.error) { $('#p-sim').innerHTML = `<div class="empty">${esc(P.error)}</div>`; return; }
+      if (!P.exists || S.planEdit) return planSetup(P);
+    }
+    const a = P ? P.account : await api('sim?acct=' + S.acct).catch(e => ({ error: e.message }));
     if (a.error) { $('#p-sim').innerHTML = `<div class="empty">${esc(a.error)}</div>`; return; }
     const st = a.stats;
     $('#p-sim').innerHTML = `<div class="grid">
-      <div class="panel c12"><div class="ph"><h3>SIM <small>模拟盘</small></h3><div class="r"><div class="seg rw pv" id="acctSeg"><button data-a="me" class="${S.acct === 'me' ? 'on' : ''}">我的模拟盘</button><button data-a="ai" class="${S.acct === 'ai' ? 'on' : ''}">AI自动盘</button></div>
-        <span class="rw row"><input class="in" id="simCode" placeholder="代码" style="width:90px;height:22px"><button class="btn sm buy" id="simNew">下单</button><button class="btn sm" id="simReset">重置</button></span></div></div>
+      <div class="panel c12"><div class="ph"><h3>SIM <small>模拟盘</small></h3><div class="r">${acctSeg()}
+        <span class="rw row">${P ? '' : '<input class="in" id="simCode" placeholder="代码" style="width:90px;height:22px"><button class="btn sm buy" id="simNew">下单</button>'}<button class="btn sm" id="simReset">${P ? '重新设定' : '重置'}</button></span></div></div>
         <div class="summary"><div><div class="l">总资产</div><div class="v">${yuan(a.equity)}</div></div><div><div class="l">可用现金</div><div class="v">${yuan(a.cash)}</div></div>
           <div><div class="l">持仓市值</div><div class="v">${yuan(a.market_value)}</div></div><div><div class="l">今日盈亏</div><div class="v ${cls(a.today_pnl)}">${sgn(a.today_pnl)}</div></div>
           <div><div class="l">累计盈亏</div><div class="v ${cls(a.total_pnl)}">${sgn(a.total_pnl)}</div></div><div><div class="l">累计收益率</div><div class="v ${cls(a.total_pct)}">${pct(a.total_pct)}</div></div></div>
         ${a.margin ? `<div class="summary" style="border-top:1px solid var(--line)"><div><div class="l">多头市值</div><div class="v">${yuan(a.margin.long_mv)}</div></div><div><div class="l">融券市值（空头）</div><div class="v down">${yuan(a.margin.short_mv)}</div></div>
           <div><div class="l">融资负债</div><div class="v ${a.margin.borrowed ? 'down' : ''}">${yuan(a.margin.borrowed)}</div></div><div><div class="l">杠杆（总敞口/净资产）</div><div class="v">${a.margin.leverage == null ? '--' : num(a.margin.leverage) + ' 倍'}</div></div>
           <div><div class="l">维持担保比例</div><div class="v ${a.margin.maint_ratio != null && a.margin.maint_ratio < 1.5 ? 'down' : ''}">${a.margin.maint_ratio == null ? '--' : num(a.margin.maint_ratio * 100, 0) + '%'}</div></div><div><div class="l">净资产</div><div class="v">${yuan(a.margin.equity)}</div></div></div>` : ''}
-        ${S.acct === 'ai' ? '<div class="pb" id="hfBox"><div class="loading">载入</div></div>' : ''}</div>
+        ${S.acct === 'ai' ? '<div class="pb" id="hfBox"><div class="loading">载入</div></div>' : ''}${P ? planBox(P, a) : ''}</div>
       ${panel('POSITIONS <small>持仓</small>', a.positions.length ? `<div class="scroll"><table class="t"><tr><th>股票</th><th>数量/可卖</th><th>成本</th><th>现价</th><th>盈亏</th><th>止损</th><th>止盈①</th><th class="hide-m">持有</th><th></th></tr>
         ${a.positions.map(p => `<tr><td class="click" data-c="${p.code}">${p.side === 'short' ? '<span class="chip d">空</span> ' : S.acct === 'ai' ? '<span class="chip u">多</span> ' : ''}${nameCell(p.name, p.code)}</td><td>${p.qty}/<span class="muted">${p.avail}</span></td><td>${num(p.cost, 3)}</td><td class="${cls(p.pct)}">${num(p.price)}</td>
           <td class="${cls(p.pnl)}">${sgn(p.pnl)}<br><small>${pct(p.pnl_pct)}</small></td><td class="down">${num(p.stop)}<br><small>${pct(p.to_stop, 1)}</small></td><td class="up">${num(p.target1)}<br><small>${pct(p.to_target, 1)}</small></td>
@@ -924,8 +935,9 @@
           <td class="${cls(t.pnl)}">${t.pnl == null ? '' : sgn(t.pnl)}</td><td class="l hide-m nm">${esc(t.reason || '')} <span class="chip">${esc(t.emotion || '')}</span></td>
           <td>${S.acct === 'me' && t.side === 'sell' && (!STATIC || (S.priv && S.priv.ai && S.priv.ai.trades[t.id])) ? `<button class="btn sm" data-tr="${t.id}">AI复盘</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="8" class="muted">暂无</td></tr>'}</table></div>`, { cls: 'c12', np: true })}
     </div>`;
-    $$('#acctSeg button').forEach(b => b.onclick = () => { S.acct = b.dataset.a; renderSim(); });
+    $$('#acctSeg button').forEach(b => b.onclick = () => { S.acct = b.dataset.a; S.planEdit = false; renderSim(); });
     if (S.acct === 'ai') loadHF();
+    if (P) bindPlan(P);
     $$('#p-sim [data-tr]').forEach(b => b.onclick = async () => {
       if (STATIC) return mdModal('AI 交易复盘', S.priv.ai.trades[b.dataset.tr]);
       b.disabled = true; b.textContent = '复盘中…';
@@ -939,10 +951,10 @@
       ah.disabled = false; ah.textContent = 'AI 持仓体检';
     };
     $$('#p-sim [data-c]').forEach(e => e.onclick = () => go('anly', e.dataset.c));
-    $$('#p-sim [data-sl]').forEach(b => b.onclick = () => { const o = JSON.parse(b.dataset.sl); if (S.acct === 'ai') return toast('AI自动盘由系统按计划操作', 1); openOrder(o); });
+    $$('#p-sim [data-sl]').forEach(b => b.onclick = () => { const o = JSON.parse(b.dataset.sl); if (S.acct !== 'me') return toast(S.acct === 'plan' ? '计划模拟由 AI 按策略操作' : 'AI自动盘由系统按计划操作', 1); openOrder(o); });
     $$('#p-sim [data-cx]').forEach(b => b.onclick = async () => { await api('sim/cancel', { id: +b.dataset.cx }); renderSim(); });
     $$('#p-sim [data-ed]').forEach(b => b.onclick = () => editExit(a.positions.find(p => p.code === b.dataset.ed)));
-    $('#simNew').onclick = async () => {
+    if ($('#simNew')) $('#simNew').onclick = async () => {
       if (S.acct === 'ai') return toast('AI自动盘由系统按计划操作，请切换到「我的模拟盘」', 1);
       const v = $('#simCode').value.trim(); if (!v) return toast('先输入股票代码', 1);
       try { const r = await api('search?q=' + encodeURIComponent(v)); if (!r.length) throw new Error('找不到该股票');
@@ -950,9 +962,64 @@
         openOrder({ code: an.code, name: an.name, price: an.quote.price, stop: p.stop, target1: p.target1, target2: p.target2 });
       } catch (e) { toast(e.message, 1); }
     };
-    $('#simReset').onclick = async () => { if (!confirm(`确定把「${a.name}」重置为初始资金？所有持仓和记录会清空。`)) return; await api('sim/reset', { acct: S.acct }); toast('已重置'); renderSim(); };
+    $('#simReset').onclick = async () => { if (P) { S.planEdit = true; return renderSim(); } if (!confirm(`确定把「${a.name}」重置为初始资金？所有持仓和记录会清空。`)) return; await api('sim/reset', { acct: S.acct }); toast('已重置'); renderSim(); };
     const eq = a.equity_curve;
     Charts.lines($('#eqC'), eq.map(e => e.date), [{ values: eq.map(e => e.equity), color: Charts.C.amber, width: 1.6 }], { base: a.init, fmt: v => (v / 1e4).toFixed(2) + '万' });
+  }
+  // ---- 计划模拟：设定初始资金、开局买入、初始持仓；AI 按初始条件自己选策略
+  function planBox(P, a) {
+    const mo = Object.entries(P.modes).map(([k, m]) => `<option value="${k}" ${P.cfg.mode === k ? 'selected' : ''}>锁定：${esc(m.name)}</option>`).join('');
+    const b = P.baseline || {};
+    return `<div class="pb" id="planBox"><div class="row"><span class="hint">当前策略</span><span class="chip a" style="font-size:13px">${esc(P.mode_name || '选择中…')}</span>
+        <span class="chip">${P.cfg.mode === 'auto' ? 'AI 自选' : '已锁定'}</span><span class="chip">风格 ${esc(P.cfg.risk)}</span>${P.active ? '' : '<span class="chip d">已暂停</span>'}<span class="sp"></span>
+        <select class="in rw" id="plModeSel" style="width:auto;height:24px"><option value="auto" ${P.cfg.mode === 'auto' ? 'selected' : ''}>策略：AI 自选</option>${mo}</select>
+        <button class="btn sm rw" id="plToggle">${P.active ? '暂停' : '恢复'}</button></div>
+      <div class="hint" style="margin-top:4px">${esc(P.reason || 'AI 正在分析持仓和大盘…')}${P.updated ? ` <span class="mono">（${esc(P.updated.slice(5, 16))}）</span>` : ''}</div>
+      <div class="row hint mono" style="margin-top:6px"><span>计划收益 <b class="${cls(a.total_pct)}">${pct(a.total_pct)}</b></span><span>一直不动 <b class="${cls(b.pct)}">${pct(b.pct)}</b></span>
+        <span>超额 <b class="${cls(P.excess)}">${pct(P.excess)}</b></span><span>初始总值 ${yuan(P.cfg.init_total)}</span><span>开始 ${esc((P.cfg.started || '').slice(0, 16))}</span></div>
+      <div class="modechips" style="margin-top:6px">${Object.entries(P.stats).map(([k, s]) => `<span class="chip ${k === P.mode ? 'on' : ''}">${esc(s.name)} · ${s.n} 笔${s.win == null ? '' : ' · 胜率 ' + num(s.win * 100, 0) + '%'}${s.n ? ' · ' + sgn(s.pnl, 0) : ''}</span>`).join('')}</div>
+      ${P.history.length ? `<details class="fx"><summary>策略切换记录（${P.history.length}）</summary>${P.history.map(h => `<div style="font-size:12px;margin:4px 0"><span class="mono">${esc(h.time.slice(5, 16))}</span> ${esc(h.from ? P.modes[h.from].name : '开始')} → <b>${esc(P.modes[h.to].name)}</b><div class="hint">${esc(h.reason)}</div></div>`).join('')}</details>` : ''}
+      <details class="note"><summary>AI 怎么选策略</summary><div class="hint">${Object.values(P.modes).map(m => `<b>${esc(m.name)}</b>：${esc(m.desc)}`).join('<br>')}<br>每天开盘、大盘立场变化、每次选股前都会重新判断；某个策略在本计划已平仓 ≥5 笔且胜率 &lt;35% 时自动降级到更稳的策略。计划模拟盘按真实 A 股规则：T+1、100 股一手、不融资融券、涨跌停限制、真实手续费。「一直不动」= 初始持仓和开局买入的股票一直拿着、现金不动的对照收益。</div></details></div>`;
+  }
+  function bindPlan(P) {
+    const ms = $('#plModeSel'); if (ms) ms.onchange = async () => { try { const r = await api('plan/mode', { mode: ms.value }); toast('策略：' + (P.modes[r.mode] ? P.modes[r.mode].name : '已更新')); } catch (e) { toast(e.message, 1); } renderSim(); };
+    const tg = $('#plToggle'); if (tg) tg.onclick = async () => { if (P.active && !confirm('暂停后 AI 不再交易，到价止损止盈也会停，持仓和记录保留。确定暂停？')) return; try { await api(P.active ? 'plan/stop' : 'plan/resume', {}); } catch (e) { toast(e.message, 1); } renderSim(); };
+  }
+  function planSetup(P) {
+    const c = (P.exists && P.cfg) || {};
+    const mo = Object.entries(P.modes).map(([k, m]) => `<option value="${k}" ${c.mode === k ? 'selected' : ''}>锁定：${esc(m.name)} — ${esc(m.desc)}</option>`).join('');
+    $('#p-sim').innerHTML = `<div class="grid"><div class="panel c12"><div class="ph"><h3>SIM <small>模拟盘</small></h3><div class="r">${acctSeg()}</div></div></div>
+      ${panel('PLAN <small>计划模拟 · 设定初始条件，AI 自己选策略交易</small>', `<div class="planform">
+        <label>初始资金（元）<input class="in" id="plCash" inputmode="decimal" value="${c.cash ?? 500000}"></label>
+        <label>风格<select class="in" id="plRisk">${P.risks.map(r => `<option ${r === (c.risk || '均衡') ? 'selected' : ''}>${r}</option>`).join('')}</select></label>
+        <label class="full">策略<select class="in" id="plMode"><option value="auto">AI 根据初始条件自己选（推荐）</option>${mo}</select></label>
+        <div class="full"><div class="row"><b>开局买入</b><span class="hint">开始时从初始资金里买入，按金额折算成整手</span><span class="sp"></span><button class="btn sm" id="plAddB">+ 添加</button></div><div class="planrows" id="plBuys"></div></div>
+        <div class="full"><div class="row"><b>初始持仓</b><span class="hint">你已经拿着的股票，不占初始资金，填数量和成本价</span><span class="sp"></span><button class="btn sm" id="plAddH">+ 添加</button></div><div class="planrows" id="plHolds"></div></div>
+      </div>
+      <p class="hint">按真实 A 股规则：T+1、100 股一手、不融资融券。风格决定单票仓位和持仓只数（稳健 12%/5 只、均衡 18%/6 只、积极 25%/8 只）。AI 根据现金占比、持仓强弱、大盘立场在「进攻跟随 / 波段轮动 / 持仓做T / 防守减仓」之间切换，每次切换都写进日志。${P.exists ? '<b class="down">重新设定会清空当前计划模拟盘的持仓和记录。</b>' : ''}</p>
+      <div class="row"><span class="sp"></span>${P.exists ? '<button class="btn" id="plCancel">取消</button>' : ''}<button class="btn pri" id="plGo">开始计划模拟</button></div>`, { cls: 'c12', nofold: true })}</div>`;
+    $$('#acctSeg button').forEach(b => b.onclick = () => { S.acct = b.dataset.a; S.planEdit = false; renderSim(); });
+    const rowB = (x = {}) => `<div class="prow b2"><input class="in" data-f="code" placeholder="代码或名称" value="${esc(x.name || x.code || '')}" data-code="${esc(x.code || '')}"><input class="in" data-f="amount" inputmode="decimal" placeholder="金额（元）" value="${x.amount || ''}"><button class="btn sm" data-del>×</button></div>`;
+    const rowH = (x = {}) => `<div class="prow"><input class="in" data-f="code" placeholder="代码或名称" value="${esc(x.name || x.code || '')}" data-code="${esc(x.code || '')}"><input class="in" data-f="qty" inputmode="numeric" placeholder="数量（股）" value="${x.qty || ''}"><input class="in" data-f="cost" inputmode="decimal" placeholder="成本价" value="${x.cost || ''}"><button class="btn sm" data-del>×</button></div>`;
+    const add = (box, html) => { box.insertAdjacentHTML('beforeend', html); const r = box.lastElementChild;
+      $('[data-del]', r).onclick = () => r.remove(); $('[data-f="code"]', r).oninput = e => { e.target.dataset.code = ''; }; };
+    (c.buys || []).forEach(x => add($('#plBuys'), rowB(x))); (c.holdings || []).forEach(x => add($('#plHolds'), rowH(x)));
+    if (!(c.buys || []).length) add($('#plBuys'), rowB());
+    $('#plAddB').onclick = () => add($('#plBuys'), rowB()); $('#plAddH').onclick = () => add($('#plHolds'), rowH());
+    const cc = $('#plCancel'); if (cc) cc.onclick = () => { S.planEdit = false; renderSim(); };
+    const resolve = async inp => { if (inp.dataset.code) return inp.dataset.code; const v = inp.value.trim(); if (!v) return '';
+      if (/^(sh|sz)?\d{6}$/i.test(v)) return v; const r = await api('search?q=' + encodeURIComponent(v)); if (!r.length) throw new Error('找不到股票：' + v); return r[0].code; };
+    $('#plGo').onclick = async () => {
+      const b = $('#plGo'); b.disabled = true;
+      try {
+        const read = async (box, keys) => { const out = []; for (const r of $$('.prow', box)) { const code = await resolve($('[data-f="code"]', r)); if (!code) continue;
+          const o = { code }; keys.forEach(k => o[k] = +($(`[data-f="${k}"]`, r).value || 0)); out.push(o); } return out; };
+        const body = { cash: +$('#plCash').value || 0, risk: $('#plRisk').value, mode: $('#plMode').value,
+          buys: await read($('#plBuys'), ['amount']), holdings: await read($('#plHolds'), ['qty', 'cost']) };
+        if (P.exists && !confirm('重新设定会清空当前计划模拟盘的持仓和记录，确定？')) { b.disabled = false; return; }
+        const r = await api('plan/start', body); toast(r.message || '计划已建立'); S.planEdit = false; renderSim();
+      } catch (e) { toast(e.message, 1); b.disabled = false; }
+    };
   }
   async function loadHF() {
     const box = $('#hfBox'); if (!box) return;
@@ -1010,7 +1077,7 @@
     $('#p-learn').innerHTML = `<div class="grid">
       ${panel('HOW <small>系统怎么“自己变聪明”</small>', `<div class="row" style="gap:18px;align-items:flex-start">
         ${[['① 记录', `每次选股把前150只候选的因子值存为样本（已存 <b class="amber">${L.samples}</b> 个）`], ['② 回填', `收盘后自动回填这些股票之后 1/3/5 日的真实涨跌（已回填 <b class="amber">${L.evaluated}</b> 个）`],
-           ['③ 评估', `计算每个因子的 Rank IC（因子高的股票后来是不是真的涨得多），统计每个策略的实战胜率`], ['④ 调整', `有效的因子加权、失效的降权（每次最多移动30%，有上下限，防止过拟合）；样本≥${L.min_model}后训练概率模型并做时间外检验`]]
+           ['③ 评估', `计算每个因子的 Rank IC（因子高的股票后来是不是真的涨得多），统计每个策略的实战胜率`], ['④ 调整', `有效的因子加权、失效的降权（IC 越稳定调得越快，每次 20%~50%，有上下限）；近期样本权重更大（15 天减半）；第二天就用 1 日收益先反馈，午间 11:35 再快速迭代一次；样本≥${L.min_model}后训练概率模型并做时间外检验`]]
           .map(([t, d]) => `<div style="flex:1;min-width:180px"><div class="amber mono" style="font-weight:700">${t}</div><div class="hint">${d}</div></div>`).join('')}
         <div class="rw" style="display:flex;flex-direction:column;gap:6px"><button class="btn pri" id="lrRun">▶ 立即学习</button><button class="btn" id="lrBoot">历史冷启动</button></div></div>
         <div class="hint mono" id="bootMsg" style="margin-top:6px">${L.boot.running ? `冷启动中：${esc(L.boot.msg)} ${L.boot.progress}/${L.boot.total}` : `历史回放样本 ${L.history_samples} 个（在历史K线上“回到过去”计算因子，再看之后的真实涨跌，让系统第一天就能学习）`}</div>`, { cls: 'c12' })}
@@ -1018,18 +1085,18 @@
           return `<div class="fbar" style="grid-template-columns:52px 1fr 100px"><span>${L.labels[k]}</span><div class="bar"><i style="width:${w / 0.3 * 100}%;background:var(--amber)"></i><em style="left:${d / 0.3 * 100}%;background:var(--hi)"></em></div><span class="mono">${num(w * 100, 1)}% <small class="${cls(w - d)}">${sgn((w - d) * 100, 1)}</small></span></div>`; }).join('') +
         '<div class="hint">白线 = 初始权重。IC：因子与未来3日收益的相关性，>0.03 说明有用，<0 说明反向。</div>' +
         `<table class="t" style="margin-top:6px"><tr><th>因子</th><th>最近IC</th><th>IR</th></tr>${Object.keys(L.weights).map(k => `<tr><td>${L.labels[k]}</td><td class="${cls(ic[k])}">${num(ic[k], 3)}</td><td>${num(last ? (last.ic.ir || {})[k] : null, 2)}</td></tr>`).join('')}</table>`, { cls: 'c4' })}
-      ${panel('STRATEGIES <small>策略实战表现（3日）</small>', `<table class="t"><tr><th class="l">策略</th><th>样本</th><th>胜率</th><th>均收益</th><th>权重</th></tr>${L.strategies.map(s => { const x = strat[s.id] || {};
+      ${panel('STRATEGIES <small>策略实战表现（3日，含实盘平仓）</small>', `<table class="t"><tr><th class="l">策略</th><th>样本</th><th>胜率</th><th>均收益</th><th>权重</th></tr>${L.strategies.map(s => { const x = strat[s.id] || {};
           return `<tr title="${esc(s.desc)}"><td class="l">${esc(s.name)}</td><td>${x.n ?? 0}</td><td>${x.win == null ? '--' : num(x.win * 100, 0) + '%'}</td><td class="${cls(x.avg)}">${x.avg == null ? '--' : pct(x.avg)}</td><td class="amber">${num(x.weight ?? 1, 2)}</td></tr>`; }).join('')}</table>
-          <div class="hint" style="margin-top:6px">某策略样本≥10后才调整权重：胜率高、收益好→权重升（最高1.5），反之降（最低0.5）。</div>
+          <div class="hint" style="margin-top:6px">贝叶斯收缩：样本少时权重靠近 1.0、随样本增加逐步放开；胜率高、收益好→升（最高1.5），反之降（最低0.5）。AI 自动盘和计划模拟盘的真实平仓按 2 倍权重计入。</div>
           <details class="fx"><summary>查看每个策略的数学条件</summary>${L.strategies.map(s => `<div><b>${esc(s.name)}</b>：<code>${esc(s.formula || '')}</code></div>`).join('')}
-          <div><b>权重迭代</b>：<code>目标权重ᵢ = 默认权重ᵢ·clip(1 + 4·ICᵢ, 0.3, 2)；新权重 = 0.7·旧 + 0.3·目标，限制 2%~30% 后归一化；ICᵢ = Spearman(因子ᵢ, 3日收益)</code></div>
-          <div><b>策略权重</b>：<code>w = clip(0.5 + 胜率 + 平均收益/5, 0.5, 1.5)</code></div>
+          <div><b>权重迭代</b>：<code>目标权重ᵢ = 默认权重ᵢ·clip(1 + 4·ICᵢ, 0.3, 2)；新权重 = (1−αᵢ)·旧 + αᵢ·目标，αᵢ = clip(0.2 + 0.3·|IRᵢ|, 0.2, 0.5)，限制 2%~30% 后归一化；ICᵢ = Σ wₜ·Spearman(因子ᵢ, 收益) / Σ wₜ，wₜ = 0.5^(天数/15)，3日收益未出时用1日收益×0.6</code></div>
+          <div><b>策略权重</b>：<code>胜率' = (胜率·n + 0.5·4)/(n + 4)；均值' = 均值·n/(n + 6)；w = clip(0.5 + 胜率' + 均值'/5, 0.5, 1.5)；n 为时间衰减后的有效样本数</code></div>
           <div><b>概率模型</b>：<code>P(3日上涨) = σ(β₀ + Σβᵢ·因子ᵢ + Σγⱼ·策略ⱼ)，按时间切分检验 AUC ≥ 0.55 才启用</code></div></details>`, { cls: 'c4' })}
       ${panel('SESSIONS <small>分场次策略迭代 · 早盘 / 尾盘 / 手动</small>', (() => { const bs = (strat && strat._by_session) || {}; const names = Object.fromEntries(L.strategies.map(x => [x.id, x.name]));
           const sess = [['auction', '竞价选股'], ['close', '尾盘选股'], ['manual', '手动']];
           const rows = L.strategies.map(st => `<tr><td class="l">${esc(st.name)}</td>${sess.map(([k]) => { const x = (bs[k] || {})[st.id]; return x ? `<td>${x.n}</td><td class="${x.win >= 0.5 ? 'up' : 'down'}">${num(x.win * 100, 0)}%</td><td class="amber">${num(x.weight, 2)}</td>` : '<td class="muted">0</td><td>--</td><td class="muted">1.00</td>'; }).join('')}</tr>`).join('');
           return `<div class="scroll"><table class="t"><tr><th class="l" rowspan="2">策略</th>${sess.map(([, n]) => `<th colspan="3">${n}</th>`).join('')}</tr><tr>${sess.map(() => '<th>样本</th><th>胜率</th><th>权重</th>').join('')}</tr>${rows}</table></div>
-            <div class="hint" style="padding:6px 10px">同一个策略在早盘和尾盘的表现往往不同：每个场次单独统计 3 日胜率和收益，样本 ≥10 后该场次用自己的权重（0.5~1.5）。</div>`; })(), { cls: 'c8', np: true })}
+            <div class="hint" style="padding:6px 10px">同一个策略在早盘和尾盘的表现往往不同：每个场次单独统计 3 日胜率和收益，样本 ≥5 后该场次用自己的权重（0.5~1.5）。</div>`; })(), { cls: 'c8', np: true })}
       ${panel('T STRATEGIES <small>盘中做T策略 · 自动统计胜率</small>', '<div id="tStats" class="loading">载入</div>', { cls: 'c4', np: true })}
       ${panel('FORECAST <small>预判 vs 实际 · 早盘判断和盘前信号对不对</small>', '<div id="fcBox" class="loading">载入</div>', { cls: 'c12', np: true })}
       ${panel('SCORECARD <small>选股成绩单</small>', `<dl class="kv"><dt>次日胜率</dt><dd>${st(pk.d1)}</dd><dt>3日胜率</dt><dd>${st(pk.d3)}</dd><dt>5日胜率</dt><dd>${st(pk.d5)}</dd></dl><div class="sep"></div>
@@ -1077,9 +1144,21 @@
   }
 
   // ================================================================== F7 日志
+  // 日志分类：默认只展开大盘异动、资讯新闻；其他点标题展开，展开状态记在本机
+  const LOG_CATS = [['market', '大盘异动', ['market']], ['news', '资讯新闻', ['announce', 'news']], ['alert', '个股提醒', ['alert']],
+    ['pick', '选股', ['pick']], ['trade', '交易成交', ['trade']], ['plan', '计划模拟', ['plan']], ['learn', '学习迭代', ['learn']],
+    ['ai', 'AI 报告', ['ai']], ['system', '系统运行', ['system', 'publish', 'notify']]];
+  const LOG_OPEN = new Set(['market', 'news']);
   async function renderLog() {
-    const ev = await api('events?limit=200');
-    $('#p-log').innerHTML = panel('LOG <small>系统日志：选股、成交、提醒、学习</small>', ev.map(evHtml).join('') || '<div class="empty">暂无</div>', { np: true });
+    const ev = await api('events?per_kind=120&limit=400');
+    let open = {}; try { open = JSON.parse(lsGet('aq5_logopen') || '{}') || {}; } catch { open = {}; }
+    const known = new Set(LOG_CATS.flatMap(c => c[2]));
+    const groups = LOG_CATS.map(([k, name, kinds]) => [k, name, ev.filter(e => kinds.includes(e.kind) || (k === 'system' && !known.has(e.kind)))]);
+    const body = groups.map(([k, name, list]) => `<details class="logcat" data-k="${k}" ${(k in open ? open[k] : LOG_OPEN.has(k)) ? 'open' : ''}>
+        <summary><b>${name}</b><span class="chip">${list.length}</span><span class="sp"></span><span class="hint mono">${list[0] ? esc(list[0].time.slice(5, 16)) : '暂无'}</span></summary>
+        <div class="scroll" style="max-height:60vh">${list.map(evHtml).join('') || '<div class="empty">暂无</div>'}</div></details>`).join('');
+    $('#p-log').innerHTML = panel('LOG <small>系统日志 · 按类型分类 · 点类型展开/收起</small>', body, { np: true, nofold: true });
+    $$('#p-log details.logcat').forEach(d => d.ontoggle = () => { open[d.dataset.k] = d.open; lsSet('aq5_logopen', JSON.stringify(open)); });
   }
 
   // ================================================================== F8 设置

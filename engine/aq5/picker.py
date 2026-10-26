@@ -272,6 +272,11 @@ def _run(session: str, top_n: int) -> dict:
             sim.auto_follow(out, session)
         except Exception as e:  # noqa: BLE001
             db.event("system", "AI自动盘跟单失败", str(e)[:200], "warn")
+        try:
+            from . import plan
+            plan.on_picks(out, session)
+        except Exception as e:  # noqa: BLE001
+            db.event("plan", "计划模拟跟单失败", str(e)[:200], "warn")
     explaining = False
     try:
         from . import ai

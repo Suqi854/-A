@@ -15,7 +15,7 @@ print("选股:", len(r["picks"]), "只", [p["name"] for p in r["picks"]])
 # 2 AI 自动盘应已跟随买入
 ai = sim.view("ai")
 print("AI持仓:", len(ai["positions"]), "现金", ai["cash"])
-assert len(ai["positions"]) == len(r["picks"])
+assert 0 < len(ai["positions"]) <= len(r["picks"])  # 资金用完后不再买（100万 × 仓位上限）
 # 3 手动下单 + T+1 校验
 code = r["picks"][0]["code"] if r["picks"] else "sh600008"
 o = sim.place("me", code, "buy", 300, emotion="逻辑驱动", reason="测试")

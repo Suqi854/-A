@@ -11,11 +11,11 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import ai, analysis, auth, backtest, backup, cloud, db, learn, market, notify, picker, publisher, scheduler, sim, vault, sectors, tunnel, signals, tracking, hf, marketstate, announce
+from . import ai, analysis, auth, backtest, backup, cloud, db, learn, market, notify, picker, publisher, scheduler, sim, vault, sectors, tunnel, signals, tracking, hf, marketstate, announce, plan
 from .config import DATA, MOCK, WEB, load_settings, now, public_settings, save_settings
 from .strategies import DESC, NAMES
 
-VERSION = "5.0.0"
+VERSION = "5.1.0"
 
 
 def lan_ip() -> str:
@@ -80,7 +80,7 @@ def api_overview(_q):
     except Exception:  # noqa: BLE001
         reg = {"state": "未知", "code": "unknown", "desc": "指数数据获取失败"}
     last = db.q1("SELECT id FROM pick_runs ORDER BY id DESC LIMIT 1")
-    accts = {k: sim.view(k, light=True) for k in sim.ACCOUNTS}
+    accts = {k: sim.view(k, light=True) for k in sim.existing()}
     for a in accts.values():
         a["positions"] = [{k: p[k] for k in ("code", "name", "qty", "price", "pct", "pnl", "pnl_pct", "to_stop",
                                              "to_target")} for p in a["positions"]]
@@ -160,6 +160,9 @@ def api_settings(_q):
 
 
 def api_events(q):
+    if q.get("per_kind"):  # 日志页：每种类型各取最近 N 条，避免高频成交把其他类型挤掉
+        return db.q("SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY kind ORDER BY id DESC) AS rn FROM events) "
+                    "WHERE rn <= ? ORDER BY id DESC", (min(300, int(q["per_kind"][0])),))
     return db.q("SELECT * FROM events ORDER BY id DESC LIMIT ?", (int(q.get("limit", ["100"])[0]),))
 
 
@@ -319,6 +322,7 @@ GET = {"/api/ai/status": api_ai_status, "/api/ai/comment": api_ai_comment, "/api
        "/api/market/state": lambda q: marketstate.state(),
        "/api/market/accuracy": lambda q: marketstate.accuracy(),
        "/api/hf/status": lambda q: hf.status(),
+       "/api/plan": lambda q: plan.view(),
        "/api/watch/signals": lambda q: signals.latest(),
        "/api/watch/signal": lambda q: {"latest": signals.latest(q["code"][0]), "phases": signals.phases(q["code"][0])},
        "/api/track": lambda q: tracking.track(int((q.get("days") or [20])[0])),
@@ -362,6 +366,8 @@ def p_exit(b):
 
 
 def p_reset(b):
+    if b.get("acct") == "plan":
+        raise ValueError("计划模拟请用「重新设定」")
     sim.reset(b.get("acct", "me"))
     return {"ok": True}
 
@@ -449,6 +455,10 @@ POST = {"/api/picks/run": p_pick_run, "/api/sim/order": p_order, "/api/sim/cance
         "/api/ai/mode": lambda b: save_settings({"pick": {"ai_mode": "high" if b.get("mode") == "high" else "low"}})["pick"]["ai_mode"],
         "/api/hf/scan": lambda b: hf.quick_scan(force=True),
         "/api/sim/follow": lambda b: _follow(int(b["run_id"])),
+        "/api/plan/start": lambda b: plan.start(b),
+        "/api/plan/stop": lambda b: plan.stop(),
+        "/api/plan/resume": lambda b: plan.resume(),
+        "/api/plan/mode": lambda b: plan.set_mode(b.get("mode", "auto")),
         "/api/hf/step": lambda b: hf.step(),
         "/api/watch/plan": lambda b: signals.plan(b["code"]),
         "/api/ai/pick": lambda b: ai.pick_review(int(b["id"])),

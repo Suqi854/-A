@@ -101,32 +101,90 @@ def fill_outcomes() -> dict:
 
 
 # ----------------------------------------------------------------------------- 权重迭代
+HALF_LIFE = 15        # 样本按日期衰减：15 天前的样本权重减半，近期表现说话更多
+D1_WEIGHT = 0.6       # 只有 1 日收益（3 日还没出来）的样本组也参与，权重打六折：第二天就能反馈
+PRIOR_N = 4           # 策略胜率的贝叶斯先验（相当于 4 个 50% 胜率的虚拟样本）：样本少也能动，但不会被一两次结果带偏
+
+
+def _age_w(d: str, ref: str) -> float:
+    from datetime import date
+    try:
+        age = (date.fromisoformat(ref) - date.fromisoformat(d[:10])).days
+    except ValueError:
+        return 0.5
+    return 0.5 ** (max(0, age) / HALF_LIFE)
+
+
+def _label(r) -> tuple[float | None, float]:
+    """优先用 3 日收益；3 日还没出来时用 1 日收益（权重打折）。"""
+    if r.get("ret_3d") is not None:
+        return r["ret_3d"], 1.0
+    if r.get("ret_1d") is not None:
+        return r["ret_1d"], D1_WEIGHT
+    return None, 0.0
+
+
+def _strat_stat(hits: list[tuple[float, float]]) -> dict:
+    """hits: [(收益%, 权重)] → 收缩后的胜率、均值和策略权重。"""
+    n = sum(w for _, w in hits)
+    if not hits or n <= 0:
+        return {"n": 0, "n_eff": 0.0, "win": None, "avg": None, "weight": 1.0}
+    win = sum(w for x, w in hits if x > 0) / n
+    avg = sum(x * w for x, w in hits) / n
+    win_post = (win * n + 0.5 * PRIOR_N) / (n + PRIOR_N)
+    avg_post = avg * n / (n + PRIOR_N + 2)
+    return {"n": len(hits), "n_eff": round(n, 1), "win": round(win, 3), "avg": round(avg, 3),
+            "weight": round(max(0.5, min(1.5, 0.5 + win_post + avg_post / 5)), 3)}
+
+
+def _realized() -> list[dict]:
+    """AI 自动盘 / 计划模拟盘的真实平仓：按买入时选股记录里的策略归因，实战结果权重加倍。"""
+    rows = db.q("SELECT t.time, t.pnl, t.qty, t.price, p.strategies, p.session FROM trades t JOIN picks p ON p.id=t.pick_id "
+                "WHERE t.side='sell' AND t.pnl IS NOT NULL AND t.account IN ('ai','plan') ORDER BY t.id DESC LIMIT 2000")
+    out = []
+    for r in rows:
+        amt = (r["qty"] or 0) * (r["price"] or 0)
+        if amt <= 0:
+            continue
+        ids = [x["id"] if isinstance(x, dict) else x for x in (db.loads(r["strategies"], []) or [])]
+        out.append({"date": r["time"][:10], "ret": r["pnl"] / amt * 100, "ids": ids, "session": r["session"]})
+    return out
+
+
 def iterate(force: bool = False) -> dict:
     from .factors import DEFAULT_WEIGHTS, KEYS, current_weights
     from .strategies import STRATEGIES
-    rows = db.q("SELECT date, session, factors, strategies, ret_3d FROM samples WHERE ret_3d IS NOT NULL "
-                "ORDER BY id DESC LIMIT 6000")
+    ref = now().strftime("%Y-%m-%d")
+    rows = db.q("SELECT date, session, factors, strategies, ret_1d, ret_3d FROM samples "
+                "WHERE ret_3d IS NOT NULL OR ret_1d IS NOT NULL ORDER BY id DESC LIMIT 8000")
     if len(rows) < MIN_IC_SAMPLES and not force:
         return {"changed": False, "reason": f"有效样本 {len(rows)} 个，少于 {MIN_IC_SAMPLES}，权重保持不变"}
     groups = {}
     for r in rows:
         groups.setdefault((r["date"], r["session"]), []).append(r)
-    ic = {k: [] for k in KEYS}
-    for g in groups.values():
-        if len(g) < 8:
+    ic = {k: [] for k in KEYS}   # [(ic, 权重)]
+    for (d, _), g in groups.items():
+        lab = []
+        for x in g:
+            y, hw = _label(x)
+            if y is not None:
+                lab.append((y, hw, x))
+        if len(lab) < 8:
             continue
-        y = [x["ret_3d"] for x in g]
-        fs = [db.loads(x["factors"], {}) for x in g]
+        gw = _age_w(d, ref) * min(t[1] for t in lab)
+        y = [t[0] for t in lab]
+        fs = [db.loads(t[2]["factors"], {}) for t in lab]
         for k in KEYS:
             v = spearman([f.get(k, 0) for f in fs], y)
             if v is not None:
-                ic[k].append(v)
-    ic_mean = {k: (sum(v) / len(v) if v else 0.0) for k, v in ic.items()}
-    ic_ir = {}
+                ic[k].append((v, gw))
+    ic_mean, ic_ir = {}, {}
     for k, v in ic.items():
-        if len(v) > 2:
-            m = sum(v) / len(v)
-            sd = math.sqrt(sum((x - m) ** 2 for x in v) / (len(v) - 1)) or 1e-9
+        W = sum(w for _, w in v)
+        m = sum(x * w for x, w in v) / W if W else 0.0
+        ic_mean[k] = m
+        if len(v) > 2 and W:
+            sd = math.sqrt(sum(w * (x - m) ** 2 for x, w in v) / W) or 1e-9
             ic_ir[k] = m / sd
         else:
             ic_ir[k] = 0.0
@@ -134,38 +192,41 @@ def iterate(force: bool = False) -> dict:
     target = {k: DEFAULT_WEIGHTS[k] * max(0.3, min(2.0, 1 + 4 * ic_mean[k])) for k in KEYS}
     tsum = sum(target.values())
     target = {k: v / tsum for k, v in target.items()}
-    new = {k: 0.7 * old[k] + 0.3 * target[k] for k in KEYS}  # 平滑，单次变化有限
+    # 自适应步长：IC 越稳定（|IR| 大）的因子调得越快，最多一次走 50%；不稳定的只走 20%
+    alpha = {k: max(0.2, min(0.5, 0.2 + 0.3 * min(1.0, abs(ic_ir[k])))) for k in KEYS}
+    new = {k: (1 - alpha[k]) * old[k] + alpha[k] * target[k] for k in KEYS}
     new = {k: min(0.30, max(0.02, v)) for k, v in new.items()}
     s = sum(new.values())
     new = {k: round(v / s, 4) for k, v in new.items()}
 
+    real = _realized()
+
+    def stat_for(rs, rl, key):
+        hits = []
+        for r in rs:
+            if key in (db.loads(r["strategies"], []) or []):
+                y, hw = _label(r)
+                if y is not None:
+                    hits.append((y, hw * _age_w(r["date"], ref)))
+        hits += [(x["ret"], 2.0 * _age_w(x["date"], ref)) for x in rl if key in x["ids"]]
+        return _strat_stat(hits)
+
     strat = {}
     for key, name, *_ in STRATEGIES:
-        hit = [r["ret_3d"] for r in rows if key in (db.loads(r["strategies"], []) or [])]
-        if len(hit) >= 10:
-            win = sum(1 for x in hit if x > 0) / len(hit)
-            avg = sum(hit) / len(hit)
-            w = max(0.5, min(1.5, 0.5 + win + avg / 5))
-        else:
-            win, avg, w = None, None, 1.0
-        strat[key] = {"name": name, "n": len(hit), "win": None if win is None else round(win, 3),
-                      "avg": None if avg is None else round(avg, 3), "weight": round(w, 3)}
+        strat[key] = {"name": name, **stat_for(rows, real, key)}
     # 分场次（竞价 / 尾盘 / 手动）各自统计策略表现：早盘和尾盘的策略分开迭代
     by_session = {}
     for sess in ("auction", "close", "manual"):
         rs = [r for r in rows if r["session"] == sess]
-        d = {}
-        for key, name, *_ in STRATEGIES:
-            hit = [r["ret_3d"] for r in rs if key in (db.loads(r["strategies"], []) or [])]
-            if hit:
-                win = sum(1 for x in hit if x > 0) / len(hit)
-                avg = sum(hit) / len(hit)
-                d[key] = {"n": len(hit), "win": round(win, 3), "avg": round(avg, 3),
-                          "weight": round(max(0.5, min(1.5, 0.5 + win + avg / 5)), 3) if len(hit) >= 10 else 1.0}
-        by_session[sess] = d
+        rl = [x for x in real if x["session"] == sess]
+        d = {key: stat_for(rs, rl, key) for key, *_ in STRATEGIES}
+        by_session[sess] = {k: v for k, v in d.items() if v["n"]}
     strat["_by_session"] = by_session
+    strat["_meta"] = {"realized": len(real), "half_life": HALF_LIFE, "alpha": {k: round(v, 2) for k, v in alpha.items()}}
     moved = sorted(KEYS, key=lambda k: -abs(new[k] - old[k]))[:3]
     note = "；".join(f"{k} {old[k]:.3f}→{new[k]:.3f}（IC {ic_mean[k]:+.3f}）" for k in moved)
+    if real:
+        note += f"；实战平仓 {len(real)} 笔参与策略评估"
     with db.tx() as c:
         c.execute("INSERT INTO weights(created, weights, ic, strat, note) VALUES(?,?,?,?,?)",
                   (now().strftime("%Y-%m-%d %H:%M"), db.dumps(new),
@@ -173,6 +234,30 @@ def iterate(force: bool = False) -> dict:
                    db.dumps(strat), note))
     db.event("learn", "因子权重已迭代", note)
     return {"changed": True, "weights": new, "ic": ic_mean, "strat": strat, "note": note}
+
+
+def tune_hf() -> dict:
+    """高频阈值自调：按当天高频平仓的胜率收紧或放宽进场门槛（委比 imb、2分钟动量 mom），有上下限。"""
+    from .config import load_settings, save_settings
+    rows = db.q("SELECT pnl FROM trades WHERE account='ai' AND reason LIKE '高频·平%' AND pnl IS NOT NULL AND time LIKE ?",
+                (now().strftime("%Y-%m-%d") + "%",))
+    n = len(rows)
+    if n < 15:
+        return {"changed": False, "reason": f"今日高频平仓 {n} 笔，少于 15 笔不调整"}
+    win = sum(1 for r in rows if r["pnl"] > 0) / n
+    hf = {"imb": 0.15, "mom": 0.12}
+    hf.update({k: v for k, v in load_settings().get("hf", {}).items() if k in hf})
+    if win < 0.4:
+        k, why = 1.1, "胜率偏低，收紧进场门槛"
+    elif win > 0.55 and n < 60:
+        k, why = 0.95, "胜率较高且笔数不多，略放宽门槛"
+    else:
+        return {"changed": False, "reason": f"今日高频 {n} 笔、胜率 {win:.0%}，阈值合适"}
+    new = {"imb": round(min(0.4, max(0.08, hf["imb"] * k)), 3), "mom": round(min(0.4, max(0.06, hf["mom"] * k)), 3)}
+    save_settings({"hf": new})
+    msg = f"今日高频平仓 {n} 笔、胜率 {win:.0%}：{why}，委比 {hf['imb']}→{new['imb']}，2分钟动量 {hf['mom']}→{new['mom']}%"
+    db.event("learn", "高频阈值已自动调整", msg)
+    return {"changed": True, "note": msg, **new}
 
 
 # ----------------------------------------------------------------------------- 逻辑回归模型
@@ -330,6 +415,22 @@ def daily() -> dict:
     a = fill_outcomes()
     b = iterate()
     c = train()
+    try:
+        h = tune_hf()
+    except Exception as e:  # noqa: BLE001
+        h = {"error": str(e)}
+    return {"outcomes": a, "iterate": b, "model": c, "hf": h}
+
+
+def quick() -> dict:
+    """午间快速迭代：回填昨天样本的 1 日收益并更新权重（模型维度变了才重训），下午就用上新权重。"""
+    from .factors import KEYS
+    from .strategies import STRATEGIES
+    a = fill_outcomes()
+    b = iterate()
+    m = db.q1("SELECT coef FROM models ORDER BY version DESC LIMIT 1")
+    dim = len((db.loads(m["coef"], {}) or {}).get("w", [])) if m else 0
+    c = train() if m and dim != len(KEYS) + len(STRATEGIES) else {"trained": False, "reason": "午间不重训"}
     return {"outcomes": a, "iterate": b, "model": c}
 
 

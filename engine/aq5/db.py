@@ -45,6 +45,9 @@ CREATE TABLE IF NOT EXISTS trades(id INTEGER PRIMARY KEY AUTOINCREMENT, account 
 CREATE TABLE IF NOT EXISTS equity(account TEXT, date TEXT, equity REAL, PRIMARY KEY(account, date));
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT, level TEXT, kind TEXT,
   title TEXT, body TEXT, read INTEGER DEFAULT 0);
+CREATE INDEX IF NOT EXISTS ix_events_kind ON events(kind, id);
+CREATE TABLE IF NOT EXISTS plan(id INTEGER PRIMARY KEY CHECK(id=1), created TEXT, cfg TEXT, mode TEXT, reason TEXT,
+  updated TEXT, stance TEXT, history TEXT, active INTEGER DEFAULT 1);
 """
 
 _local = threading.local()
