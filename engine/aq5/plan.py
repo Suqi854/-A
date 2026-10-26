@@ -66,12 +66,15 @@ def _clean_items(items, keys) -> list[dict]:
     return out
 
 
-def start(b: dict) -> dict:
-    """b: {cash, buys:[{code, amount}], holdings:[{code, qty, cost}], risk, mode('auto' 或某个策略)}"""
-    cash = float(b.get("cash") or 0)
+def _parse(b: dict) -> dict:
+    """校验并解析设定：取现价和名称，开局买入折算成整手。b 见 start()。"""
+    try:
+        cash = float(b.get("cash") or 0)
+    except (TypeError, ValueError):
+        raise ValueError("初始资金要填数字")
     if cash < 0:
         raise ValueError("初始资金不能为负")
-    buys = _clean_items(b.get("buys"), ("amount",))
+    buys = _clean_items(b.get("buys"), ("amount", "qty"))
     holds = _clean_items(b.get("holdings"), ("qty", "cost"))
     if cash <= 0 and not holds:
         raise ValueError("至少要有初始资金或初始持仓")
@@ -81,8 +84,13 @@ def start(b: dict) -> dict:
         h["qty"] = int(h["qty"])
         if h["qty"] <= 0:
             raise ValueError(f"{h['code']} 的持仓数量要大于 0")
-    if sum(x["amount"] for x in buys) > cash + 1e-6:
-        raise ValueError("开局买入的金额合计超过了初始资金")
+    seen = set()
+    for x in buys:
+        if x["code"] in seen:
+            raise ValueError(f"{x['code']} 在开局买入里重复了")
+        seen.add(x["code"])
+    if seen & {h["code"] for h in holds}:
+        raise ValueError("同一只股票不要同时出现在「开局买入」和「初始持仓」里：已持有的写在初始持仓，加仓交给 AI")
     codes = list({x["code"] for x in buys + holds})
     qs = market.quotes(codes) if codes else {}
     for x in buys + holds:
@@ -91,12 +99,65 @@ def start(b: dict) -> dict:
             raise ValueError(f"取不到 {x['code']} 的行情，请检查代码")
         x["name"] = q.get("name") or x["code"]
         x["price"] = q["price"]
+        x["pct"] = q.get("pct")
     for h in holds:
         if h["cost"] <= 0:
             h["cost"] = h["price"]
-    hold_val = sum(h["qty"] * h["cost"] for h in holds)
+    for x in buys:  # 填了股数按股数，否则按金额折算成整手
+        if x["qty"] > 0:
+            x["qty"] = int(x["qty"] // 100 * 100)
+        else:
+            x["qty"] = int(x["amount"] / (x["price"] * 1.003) / 100) * 100
+        x["est"] = round(x["qty"] * x["price"] + sim.fees("buy", x["qty"] * x["price"]), 2) if x["qty"] else 0.0
+        if x["qty"] < 100:
+            amt, px = x["amount"], x["price"]
+            raise ValueError(f"{x['name']}：" + ("股数不足 100 股" if amt <= 0 else f"金额 {amt:.0f} 元不够买一手（现价 {px:.2f}）"))
+    spend = sum(x["est"] for x in buys)
+    if spend > cash + 1e-6:
+        raise ValueError(f"开局买入约需 {spend:,.0f} 元，超过了初始资金 {cash:,.0f} 元")
+    hold_cost = sum(h["qty"] * h["cost"] for h in holds)
+    hold_mv = sum(h["qty"] * h["price"] for h in holds)
+    return {"cash": cash, "buys": buys, "holdings": holds, "risk": risk, "mode": lock, "spend": round(spend, 2),
+            "hold_cost": round(hold_cost, 2), "hold_mv": round(hold_mv, 2), "init_total": round(cash + hold_cost, 2)}
+
+
+def preview(b: dict) -> dict:
+    """设定页实时预览：解析结果、资金合计、AI 会先选哪个策略（不保存）。"""
+    try:
+        d = _parse(b)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    from . import marketstate
+    try:
+        ms = marketstate.state()
+    except Exception:  # noqa: BLE001
+        ms = {}
+    stocks = d["buys"] + d["holdings"]
+    sc = _scores([x["code"] for x in stocks][:12])
+    for x in stocks:
+        x["score"] = sc.get(x["code"])
+    eq = d["cash"] + d["hold_mv"]
+    cash_after = d["cash"] - d["spend"]
+    n = len(stocks)
+    weak = sum(1 for x in stocks if (x.get("score") or 100) < 50)
+    cr = cash_after / eq if eq else 1.0
+    mode, more = _decide(cr, n, weak, ms, d["risk"], d["mode"], None)
+    why = [f"开局后现金占比 {cr:.0%}", f"持股 {n} 只" + (f"（{weak} 只评分<50）" if weak else ""), f"大盘「{ms.get('stance') or '中性'}」"]
+    why = more + why if more and more[0] == "你锁定了策略" else why + more
+    rk = RISK[d["risk"]]
+    return {"ok": True, **d, "cash_after": round(cash_after, 2), "equity": round(eq, 2),
+            "cash_ratio": round(cash_after / eq, 3) if eq else None, "mode_guess": mode, "mode_name": MODES[mode][0],
+            "reason": "；".join(why) + f" → {MODES[mode][0]}：{MODES[mode][1]}", "stance": ms.get("stance"),
+            "risk_cfg": {"pos_pct": rk["pos_pct"], "max_pos": rk["max_pos"]}}
+
+
+def start(b: dict) -> dict:
+    """b: {cash, buys:[{code, amount 或 qty}], holdings:[{code, qty, cost}], risk, mode('auto' 或某个策略)}"""
+    d = _parse(b)
+    cash, buys, holds, risk, lock = d["cash"], d["buys"], d["holdings"], d["risk"], d["mode"]
+    hold_val = d["hold_cost"]
     ts = now().strftime("%Y-%m-%d %H:%M:%S")
-    cfg = {"cash": cash, "buys": buys, "holdings": holds, "risk": risk, "mode": lock, "init_total": round(cash + hold_val, 2),
+    cfg = {"cash": cash, "buys": buys, "holdings": holds, "risk": risk, "mode": lock, "init_total": d["init_total"],
            "started": ts}
     with _lock, db.tx() as c:
         for t in ("positions", "orders", "trades", "equity"):
@@ -110,12 +171,8 @@ def start(b: dict) -> dict:
         c.execute("INSERT OR REPLACE INTO plan(id, created, cfg, mode, reason, updated, stance, history, active) "
                   "VALUES(1,?,?,?,?,?,?,?,1)", (ts, db.dumps(cfg), None, "", ts, None, "[]"))
     for x in buys:
-        qty = int(x["amount"] / (x["price"] * 1.003) / 100) * 100
-        if qty < 100:
-            db.event("plan", f"计划模拟：{x['name']} 金额不够一手，跳过", f"计划 {x['amount']:.0f} 元，现价 {x['price']:.2f}", "warn")
-            continue
         try:
-            sim.place(ACCT, x["code"], "buy", qty, reason="计划·开局买入", emotion="计划内")
+            sim.place(ACCT, x["code"], "buy", x["qty"], reason="计划·开局买入", emotion="计划内")
         except ValueError as e:
             db.event("plan", f"计划模拟：开局买入 {x['name']} 失败", str(e), "warn")
     db.event("plan", "计划模拟已建立",
@@ -201,6 +258,32 @@ def _scores(codes) -> dict:
     return out
 
 
+def _decide(cash_ratio: float, n: int, weak: int, ms: dict, risk: str | None, lock: str, st: dict | None) -> tuple[str, list[str]]:
+    """策略选择规则（choose 和 preview 共用）。返回 (策略, 额外理由)。"""
+    stance = ms.get("stance") or "中性"
+    why = []
+    if lock in MODES:
+        return lock, ["你锁定了策略"]
+    if ms.get("risk_off") or stance == "防守" or (n and weak * 2 >= n and stance in ("谨慎", "防守")):
+        mode = "defense"
+    elif n and cash_ratio < 0.25:
+        mode = "t_trade"
+    elif cash_ratio >= 0.6 and stance != "谨慎":
+        mode = "attack"
+    else:
+        mode = "rotate"
+    if risk == "稳健" and mode == "attack" and stance != "顺势做多":
+        mode = "rotate"
+        why.append("风格稳健：大盘不够强时不全力进攻")
+    seen = set()
+    while st and st[mode]["n"] >= 5 and (st[mode]["win"] or 0) < 0.35 and mode not in seen:
+        seen.add(mode)
+        nxt = FALLBACK[mode]
+        why.append(f"「{MODES[mode][0]}」本计划已平仓 {st[mode]['n']} 笔、胜率 {st[mode]['win']:.0%}，降级为「{MODES[nxt][0]}」")
+        mode = nxt
+    return mode, why
+
+
 def choose(force: bool = False) -> dict:
     """根据现金比例、持仓强弱、大盘立场、本计划各策略战绩，选出当前策略。"""
     r = _row()
@@ -216,34 +299,17 @@ def choose(force: bool = False) -> dict:
         return {"mode": r["mode"], "reason": r["reason"]}
     v = sim.view(ACCT, light=True)
     eq = v["equity"] or 1
-    cash_ratio = max(0.0, v["cash"]) / eq
-    sc = _scores([p["code"] for p in v["positions"]])
+    pend = db.q("SELECT code, qty, price FROM orders WHERE account=? AND status='pending' AND side='buy'", (ACCT,))
+    pq = market.quotes(list({o["code"] for o in pend})) if pend else {}
+    committed = sum(o["qty"] * (o["price"] or (pq.get(o["code"]) or {}).get("price") or 0) for o in pend)  # 挂着的买单视同已用资金
+    cash_ratio = max(0.0, v["cash"] - committed) / eq
+    codes = list(dict.fromkeys([p["code"] for p in v["positions"]] + [o["code"] for o in pend]))
+    sc = _scores(codes)
     weak = [c for c, s in sc.items() if s < 50]
-    n = len(v["positions"])
+    n = len(codes)
     why = [f"现金占比 {cash_ratio:.0%}", f"持仓 {n} 只" + (f"（{len(weak)} 只评分<50）" if weak else ""), f"大盘「{stance}」"]
-    lock = r["cfg"].get("mode", "auto")
-    if lock in MODES:
-        mode = lock
-        why.insert(0, "你锁定了策略")
-    elif ms.get("risk_off") or stance == "防守" or (n and len(weak) * 2 >= n and stance in ("谨慎", "防守")):
-        mode = "defense"
-    elif n and cash_ratio < 0.25:
-        mode = "t_trade"
-    elif cash_ratio >= 0.6 and stance != "谨慎":
-        mode = "attack"
-    else:
-        mode = "rotate"
-    if r["cfg"].get("risk") == "稳健" and mode == "attack" and stance not in ("顺势做多",):
-        mode = "rotate"
-        why.append("风格稳健：大盘不够强时不全力进攻")
-    if lock not in MODES:
-        st = mode_stats()
-        seen = set()
-        while st[mode]["n"] >= 5 and (st[mode]["win"] or 0) < 0.35 and mode not in seen:
-            seen.add(mode)
-            nxt = FALLBACK[mode]
-            why.append(f"「{MODES[mode][0]}」本计划已平仓 {st[mode]['n']} 笔、胜率 {st[mode]['win']:.0%}，降级为「{MODES[nxt][0]}」")
-            mode = nxt
+    mode, more = _decide(cash_ratio, n, len(weak), ms, r["cfg"].get("risk"), r["cfg"].get("mode", "auto"), mode_stats())
+    why = more[:1] + why + more[1:] if more and more[0] == "你锁定了策略" else why + more
     reason = "；".join(why) + f" → {MODES[mode][0]}：{MODES[mode][1]}"
     ts = now().strftime("%Y-%m-%d %H:%M:%S")
     hist = r["history"]
@@ -405,7 +471,8 @@ def view() -> dict:
         return {"exists": False, "modes": {k: {"name": v[0], "desc": v[1]} for k, v in MODES.items()}, "risks": list(RISK)}
     acct = sim.view(ACCT)
     base = baseline(r["cfg"])
-    return {"exists": True, "active": bool(r["active"]), "cfg": r["cfg"], "mode": r["mode"],
+    pend = [o for o in acct.get("orders", []) if o["status"] == "pending"]
+    return {"exists": True, "active": bool(r["active"]), "cfg": r["cfg"], "mode": r["mode"], "pending": pend,
             "mode_name": MODES[r["mode"]][0] if r["mode"] else None, "reason": r["reason"], "updated": r["updated"],
             "stance": r["stance"], "history": r["history"][::-1], "stats": mode_stats(), "baseline": base,
             "excess": round(acct["total_pct"] - base["pct"], 2) if base else None,

@@ -187,13 +187,19 @@ details.logcat > summary b { color: var(--amber); }
 /* ---------- 计划模拟 ---------- */
 .planform { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
 .planform .full { grid-column: 1 / -1; }
-.planrows .prow { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1.4fr) minmax(0, 1.4fr) auto; gap: 6px; margin-bottom: 6px; }
-.planrows .prow.b2 { grid-template-columns: minmax(0, 2fr) minmax(0, 2fr) auto; }
+.planform label { display: flex; flex-direction: column; gap: 4px; }
+.plstep { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 14px 0 6px; padding-top: 8px; border-top: 1px dashed var(--line2); }
+.plstep b { color: var(--amber); }
+.planrows .prow { margin-bottom: 8px; }
+.planrows .pin { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1.3fr) minmax(0, 1.3fr) auto; gap: 6px; }
+.planrows .pinfo { margin-top: 3px; min-height: 0; }
+.plcode { position: relative; display: block; min-width: 0; }
+.plcode .in { width: 100%; }
+.plcode .suggest { top: 100%; left: 0; right: auto; min-width: 100%; }
 .modechips { display: flex; flex-wrap: wrap; gap: 6px; }
 .modechips .chip.on { border-color: var(--amber); color: var(--amber); }
 @media (max-width: 600px) {
   .planform { grid-template-columns: minmax(0, 1fr); }
-  .planrows .prow { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-  .planrows .prow > :first-child { grid-column: 1 / -1; }
-  .planrows .prow.b2 { grid-template-columns: minmax(0, 1fr) auto; }
+  .planrows .pin { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; }
+  .planrows .pin > .plcode { grid-column: 1 / -1; }
 }

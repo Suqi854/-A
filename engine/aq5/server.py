@@ -456,6 +456,7 @@ POST = {"/api/picks/run": p_pick_run, "/api/sim/order": p_order, "/api/sim/cance
         "/api/hf/scan": lambda b: hf.quick_scan(force=True),
         "/api/sim/follow": lambda b: _follow(int(b["run_id"])),
         "/api/plan/start": lambda b: plan.start(b),
+        "/api/plan/preview": lambda b: plan.preview(b),
         "/api/plan/stop": lambda b: plan.stop(),
         "/api/plan/resume": lambda b: plan.resume(),
         "/api/plan/mode": lambda b: plan.set_mode(b.get("mode", "auto")),

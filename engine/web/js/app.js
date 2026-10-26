@@ -901,7 +901,7 @@
     let P = null;
     if (S.acct === 'plan') {
       P = await api('plan').catch(e => ({ error: e.message }));
-      if (P.error) { $('#p-sim').innerHTML = `<div class="empty">${esc(P.error)}</div>`; return; }
+      if (P.error) return planError(P.error);
       if (!P.exists || S.planEdit) return planSetup(P);
     }
     const a = P ? P.account : await api('sim?acct=' + S.acct).catch(e => ({ error: e.message }));
@@ -967,14 +967,28 @@
     Charts.lines($('#eqC'), eq.map(e => e.date), [{ values: eq.map(e => e.equity), color: Charts.C.amber, width: 1.6 }], { base: a.init, fmt: v => (v / 1e4).toFixed(2) + '万' });
   }
   // ---- 计划模拟：设定初始资金、开局买入、初始持仓；AI 按初始条件自己选策略
+  function planError(msg) {
+    const old = /not found|404/i.test(msg);
+    $('#p-sim').innerHTML = `<div class="grid"><div class="panel c12"><div class="ph"><h3>SIM <small>模拟盘</small></h3><div class="r">${acctSeg()}</div></div></div>
+      ${panel('PLAN <small>计划模拟</small>', old ? `<div class="empty"><b>电脑上运行的引擎还是旧版本，没有「计划模拟」功能</b><br><br>网页已经是 5.1，但引擎要重启一次才会加载新代码（大约 10 秒）。<br><br>
+          <button class="btn pri rw" id="plRestart">立即重启引擎</button><br><br><small class="muted">也可以双击 stop.cmd 再双击 launch.cmd</small></div>` : `<div class="empty">${esc(msg)}</div>`, { cls: 'c12', nofold: true })}</div>`;
+    $$('#acctSeg button').forEach(b => b.onclick = () => { S.acct = b.dataset.a; S.planEdit = false; renderSim(); });
+    const rb = $('#plRestart'); if (rb) rb.onclick = async () => {
+      rb.disabled = true; rb.textContent = '重启中…';
+      try { await api('admin/restart', {}); } catch (e) { if (/本机/.test(e.message)) { rb.disabled = false; rb.textContent = '立即重启引擎'; return toast('只能在电脑本机重启：请在电脑上打开页面点这个按钮，或双击 stop.cmd 再双击 launch.cmd', 1); } }
+      for (let i = 0; i < 30; i++) { await new Promise(r => setTimeout(r, 2000)); try { const p = await api('plan'); if (p && !p.error) { toast('引擎已重启，计划模拟可以用了'); return renderSim(); } } catch { } }
+      rb.disabled = false; rb.textContent = '立即重启引擎'; toast('重启后还没连上，请稍等再刷新，或手动双击 launch.cmd', 1);
+    };
+  }
   function planBox(P, a) {
     const mo = Object.entries(P.modes).map(([k, m]) => `<option value="${k}" ${P.cfg.mode === k ? 'selected' : ''}>锁定：${esc(m.name)}</option>`).join('');
-    const b = P.baseline || {};
+    const b = P.baseline || {}, pend = P.pending || [];
     return `<div class="pb" id="planBox"><div class="row"><span class="hint">当前策略</span><span class="chip a" style="font-size:13px">${esc(P.mode_name || '选择中…')}</span>
         <span class="chip">${P.cfg.mode === 'auto' ? 'AI 自选' : '已锁定'}</span><span class="chip">风格 ${esc(P.cfg.risk)}</span>${P.active ? '' : '<span class="chip d">已暂停</span>'}<span class="sp"></span>
         <select class="in rw" id="plModeSel" style="width:auto;height:24px"><option value="auto" ${P.cfg.mode === 'auto' ? 'selected' : ''}>策略：AI 自选</option>${mo}</select>
         <button class="btn sm rw" id="plToggle">${P.active ? '暂停' : '恢复'}</button></div>
-      <div class="hint" style="margin-top:4px">${esc(P.reason || 'AI 正在分析持仓和大盘…')}${P.updated ? ` <span class="mono">（${esc(P.updated.slice(5, 16))}）</span>` : ''}</div>
+      <div class="hint" style="margin-top:4px">${esc(P.reason || 'AI 正在分析持仓和大盘，几秒后刷新就能看到它选的策略…')}${P.updated ? ` <span class="mono">（${esc(P.updated.slice(5, 16))}）</span>` : ''}</div>
+      ${pend.length ? `<div class="row hint" style="margin-top:4px"><span class="amber">待成交</span>${pend.map(o => `<span class="chip">${esc(o.name)} ${o.side === 'buy' ? '买' : '卖'} ${o.qty} 股</span>`).join('')}<span>非交易时间下的单，开盘后按 A 股规则自动成交</span></div>` : ''}
       <div class="row hint mono" style="margin-top:6px"><span>计划收益 <b class="${cls(a.total_pct)}">${pct(a.total_pct)}</b></span><span>一直不动 <b class="${cls(b.pct)}">${pct(b.pct)}</b></span>
         <span>超额 <b class="${cls(P.excess)}">${pct(P.excess)}</b></span><span>初始总值 ${yuan(P.cfg.init_total)}</span><span>开始 ${esc((P.cfg.started || '').slice(0, 16))}</span></div>
       <div class="modechips" style="margin-top:6px">${Object.entries(P.stats).map(([k, s]) => `<span class="chip ${k === P.mode ? 'on' : ''}">${esc(s.name)} · ${s.n} 笔${s.win == null ? '' : ' · 胜率 ' + num(s.win * 100, 0) + '%'}${s.n ? ' · ' + sgn(s.pnl, 0) : ''}</span>`).join('')}</div>
@@ -984,40 +998,110 @@
   function bindPlan(P) {
     const ms = $('#plModeSel'); if (ms) ms.onchange = async () => { try { const r = await api('plan/mode', { mode: ms.value }); toast('策略：' + (P.modes[r.mode] ? P.modes[r.mode].name : '已更新')); } catch (e) { toast(e.message, 1); } renderSim(); };
     const tg = $('#plToggle'); if (tg) tg.onclick = async () => { if (P.active && !confirm('暂停后 AI 不再交易，到价止损止盈也会停，持仓和记录保留。确定暂停？')) return; try { await api(P.active ? 'plan/stop' : 'plan/resume', {}); } catch (e) { toast(e.message, 1); } renderSim(); };
+    if (!P.mode || !P.reason) setTimeout(() => { if (S.page === 'sim' && S.acct === 'plan' && !S.planEdit) renderSim(); }, 6000);  // 刚建立：等 AI 选完策略自动刷新
   }
   function planSetup(P) {
     const c = (P.exists && P.cfg) || {};
+    const RISKD = { '稳健': '单票 12%，最多 5 只', '均衡': '单票 18%，最多 6 只', '积极': '单票 25%，最多 8 只' };
+    let risk = c.risk || '均衡';
     const mo = Object.entries(P.modes).map(([k, m]) => `<option value="${k}" ${c.mode === k ? 'selected' : ''}>锁定：${esc(m.name)} — ${esc(m.desc)}</option>`).join('');
     $('#p-sim').innerHTML = `<div class="grid"><div class="panel c12"><div class="ph"><h3>SIM <small>模拟盘</small></h3><div class="r">${acctSeg()}</div></div></div>
-      ${panel('PLAN <small>计划模拟 · 设定初始条件，AI 自己选策略交易</small>', `<div class="planform">
-        <label>初始资金（元）<input class="in" id="plCash" inputmode="decimal" value="${c.cash ?? 500000}"></label>
-        <label>风格<select class="in" id="plRisk">${P.risks.map(r => `<option ${r === (c.risk || '均衡') ? 'selected' : ''}>${r}</option>`).join('')}</select></label>
-        <label class="full">策略<select class="in" id="plMode"><option value="auto">AI 根据初始条件自己选（推荐）</option>${mo}</select></label>
-        <div class="full"><div class="row"><b>开局买入</b><span class="hint">开始时从初始资金里买入，按金额折算成整手</span><span class="sp"></span><button class="btn sm" id="plAddB">+ 添加</button></div><div class="planrows" id="plBuys"></div></div>
-        <div class="full"><div class="row"><b>初始持仓</b><span class="hint">你已经拿着的股票，不占初始资金，填数量和成本价</span><span class="sp"></span><button class="btn sm" id="plAddH">+ 添加</button></div><div class="planrows" id="plHolds"></div></div>
-      </div>
-      <p class="hint">按真实 A 股规则：T+1、100 股一手、不融资融券。风格决定单票仓位和持仓只数（稳健 12%/5 只、均衡 18%/6 只、积极 25%/8 只）。AI 根据现金占比、持仓强弱、大盘立场在「进攻跟随 / 波段轮动 / 持仓做T / 防守减仓」之间切换，每次切换都写进日志。${P.exists ? '<b class="down">重新设定会清空当前计划模拟盘的持仓和记录。</b>' : ''}</p>
-      <div class="row"><span class="sp"></span>${P.exists ? '<button class="btn" id="plCancel">取消</button>' : ''}<button class="btn pri" id="plGo">开始计划模拟</button></div>`, { cls: 'c12', nofold: true })}</div>`;
+      ${panel('PLAN <small>计划模拟 · 设定初始条件，AI 自己选策略交易</small>', `
+        <div class="plstep"><b>① 资金与风格</b></div>
+        <div class="planform">
+          <label>初始资金（元）<input class="in" id="plCash" inputmode="decimal" value="${c.cash ?? 500000}">
+            <span class="row" style="margin-top:4px">${[100000, 300000, 500000, 1000000].map(v => `<button class="btn sm" data-cash="${v}" type="button">${v / 1e4} 万</button>`).join('')}</span></label>
+          <label>风格<div class="seg" id="plRisk">${P.risks.map(r => `<button type="button" data-r="${r}" class="${r === risk ? 'on' : ''}">${r}</button>`).join('')}</div><span class="hint" id="plRiskD">${RISKD[risk]}</span></label>
+          <label class="full">策略<select class="in" id="plMode"><option value="auto">AI 根据初始条件自己选（推荐）</option>${mo}</select></label>
+        </div>
+        <div class="plstep"><b>② 开局买入</b><span class="hint">开始时用初始资金买入，按金额或股数，自动按整手（100 股）下单</span><span class="sp"></span><button class="btn sm" id="plAddB" type="button">+ 添加股票</button></div>
+        <div class="planrows" id="plBuys"></div>
+        <div class="plstep"><b>③ 初始持仓</b><span class="hint">你已经拿着的股票：不占初始资金，填数量和成本价（成本不填按现价）</span><span class="sp"></span><button class="btn sm" id="plImport" type="button">从我的模拟盘导入</button><button class="btn sm" id="plAddH" type="button">+ 添加持仓</button></div>
+        <div class="planrows" id="plHolds"></div>
+        <div class="plstep"><b>④ 预览</b><span class="hint">按现价估算，AI 会先选什么策略</span></div>
+        <div id="plPrev" class="hint">填好后这里会显示资金合计和 AI 的策略预判</div>
+        <p class="hint" style="margin-top:8px">按真实 A 股规则：T+1、100 股一手、不融资融券、涨跌停限制、真实手续费。AI 根据现金占比、持仓强弱、大盘立场在「进攻跟随 / 波段轮动 / 持仓做T / 防守减仓」之间切换，每次切换都写进日志。${P.exists ? '<b class="down">重新设定会清空当前计划模拟盘的持仓和记录。</b>' : ''}</p>
+        <div class="row"><span class="sp"></span>${P.exists ? '<button class="btn" id="plCancel" type="button">取消</button>' : ''}<button class="btn pri" id="plGo" type="button">开始计划模拟</button></div>`, { cls: 'c12', nofold: true })}</div>`;
     $$('#acctSeg button').forEach(b => b.onclick = () => { S.acct = b.dataset.a; S.planEdit = false; renderSim(); });
-    const rowB = (x = {}) => `<div class="prow b2"><input class="in" data-f="code" placeholder="代码或名称" value="${esc(x.name || x.code || '')}" data-code="${esc(x.code || '')}"><input class="in" data-f="amount" inputmode="decimal" placeholder="金额（元）" value="${x.amount || ''}"><button class="btn sm" data-del>×</button></div>`;
-    const rowH = (x = {}) => `<div class="prow"><input class="in" data-f="code" placeholder="代码或名称" value="${esc(x.name || x.code || '')}" data-code="${esc(x.code || '')}"><input class="in" data-f="qty" inputmode="numeric" placeholder="数量（股）" value="${x.qty || ''}"><input class="in" data-f="cost" inputmode="decimal" placeholder="成本价" value="${x.cost || ''}"><button class="btn sm" data-del>×</button></div>`;
+    $$('[data-cash]').forEach(b => b.onclick = () => { $('#plCash').value = b.dataset.cash; prev(); });
+    $$('#plRisk button').forEach(b => b.onclick = () => { risk = b.dataset.r; $$('#plRisk button').forEach(x => x.classList.toggle('on', x === b)); $('#plRiskD').textContent = RISKD[risk]; prev(); });
+    $('#plMode').onchange = () => prev(); $('#plCash').oninput = () => prev();
+    const codeIn = x => `<span class="plcode"><input class="in" data-f="code" placeholder="代码 / 名称 / 拼音" autocomplete="off" value="${esc(x.name || x.code || '')}" data-code="${esc(x.code || '')}"><div class="suggest"></div></span>`;
+    const rowB = (x = {}) => `<div class="prow"><div class="pin">${codeIn(x)}<select class="in" data-f="unit"><option value="amount" ${x.qty && !x.amount ? '' : 'selected'}>按金额（元）</option><option value="qty" ${x.qty && !x.amount ? 'selected' : ''}>按股数</option></select>
+        <input class="in" data-f="val" inputmode="decimal" placeholder="例如 100000" value="${x.amount || x.qty || ''}"><button class="btn sm" data-del type="button" title="删除">×</button></div><div class="pinfo hint"></div></div>`;
+    const rowH = (x = {}) => `<div class="prow"><div class="pin">${codeIn(x)}<input class="in" data-f="qty" inputmode="numeric" placeholder="数量（股）" value="${x.qty || ''}">
+        <input class="in" data-f="cost" inputmode="decimal" placeholder="成本价" value="${x.cost || ''}"><button class="btn sm" data-del type="button" title="删除">×</button></div><div class="pinfo hint"></div></div>`;
+    const bindCode = r => {
+      const inp = $('[data-f="code"]', r), box = $('.suggest', r); let list = [], idx = 0, t;
+      const draw = () => { if (!list.length) { box.style.display = 'none'; return; }
+        box.innerHTML = list.map((s, i) => `<div class="${i === idx ? 'on' : ''}" data-i="${i}"><span>${esc(s.name)} <small class="muted">${short(s.code)}</small></span></div>`).join(''); box.style.display = 'block'; };
+      const pick = s => { if (!s) return; inp.value = s.name; inp.dataset.code = s.code; list = []; draw(); prev(); };
+      inp.oninput = () => { inp.dataset.code = ''; clearTimeout(t); const v = inp.value.trim(); if (!v) { list = []; return draw(); }
+        t = setTimeout(async () => { try { list = await api('search?q=' + encodeURIComponent(v)); } catch { list = []; } idx = 0; draw(); }, 150); };
+      inp.onkeydown = e => { if (e.key === 'ArrowDown') { idx = Math.min(list.length - 1, idx + 1); draw(); e.preventDefault(); } else if (e.key === 'ArrowUp') { idx = Math.max(0, idx - 1); draw(); e.preventDefault(); }
+        else if (e.key === 'Enter') { pick(list[idx]); e.preventDefault(); } else if (e.key === 'Escape') { list = []; draw(); } };
+      box.onmousedown = e => { const d = e.target.closest('[data-i]'); if (d) { e.preventDefault(); pick(list[+d.dataset.i]); } };
+      inp.onblur = () => setTimeout(() => { if (!inp.dataset.code && list.length && inp.value.trim()) pick(list[0]); box.style.display = 'none'; }, 150);
+    };
     const add = (box, html) => { box.insertAdjacentHTML('beforeend', html); const r = box.lastElementChild;
-      $('[data-del]', r).onclick = () => r.remove(); $('[data-f="code"]', r).oninput = e => { e.target.dataset.code = ''; }; };
+      $('[data-del]', r).onclick = () => { r.remove(); prev(); }; bindCode(r);
+      r.querySelectorAll('input:not([data-f="code"]), select').forEach(i => { i.oninput = () => prev(); i.onchange = () => prev(); }); return r; };
     (c.buys || []).forEach(x => add($('#plBuys'), rowB(x))); (c.holdings || []).forEach(x => add($('#plHolds'), rowH(x)));
     if (!(c.buys || []).length) add($('#plBuys'), rowB());
-    $('#plAddB').onclick = () => add($('#plBuys'), rowB()); $('#plAddH').onclick = () => add($('#plHolds'), rowH());
+    if (!(c.holdings || []).length) add($('#plHolds'), rowH());
+    $('#plAddB').onclick = () => $('[data-f="code"]', add($('#plBuys'), rowB())).focus();
+    $('#plAddH').onclick = () => $('[data-f="code"]', add($('#plHolds'), rowH())).focus();
+    $('#plImport').onclick = async () => {
+      try { const me = await api('sim?acct=me'); const ps = (me.positions || []).filter(p => p.qty > 0);
+        if (!ps.length) return toast('我的模拟盘现在是空仓', 1);
+        $$('.prow', $('#plHolds')).forEach(r => { if (!$('[data-f="code"]', r).value.trim()) r.remove(); });
+        ps.forEach(p => add($('#plHolds'), rowH({ code: p.code, name: p.name, qty: p.qty, cost: +num(p.cost, 3) }))); toast(`已导入 ${ps.length} 只持仓`); prev();
+      } catch (e) { toast(e.message, 1); }
+    };
     const cc = $('#plCancel'); if (cc) cc.onclick = () => { S.planEdit = false; renderSim(); };
-    const resolve = async inp => { if (inp.dataset.code) return inp.dataset.code; const v = inp.value.trim(); if (!v) return '';
-      if (/^(sh|sz)?\d{6}$/i.test(v)) return v; const r = await api('search?q=' + encodeURIComponent(v)); if (!r.length) throw new Error('找不到股票：' + v); return r[0].code; };
+    const codeOf = r => { const inp = $('[data-f="code"]', r); if (inp.dataset.code) return inp.dataset.code; const v = inp.value.trim(); return /^(sh|sz)?\d{6}$/i.test(v) ? v : ''; };
+    const body = (strict = false) => {  // 预览时跳过还没填完数量/金额的行；正式开始时全部校验
+      const buys = $$('.prow', $('#plBuys')).map(r => { const code = codeOf(r), v = +($('[data-f="val"]', r).value || 0), u = $('[data-f="unit"]', r).value;
+        return code && (strict || v > 0) ? { code, amount: u === 'amount' ? v : 0, qty: u === 'qty' ? v : 0 } : null; }).filter(Boolean);
+      const holdings = $$('.prow', $('#plHolds')).map(r => { const code = codeOf(r), q = +($('[data-f="qty"]', r).value || 0);
+        return code && (strict || q > 0) ? { code, qty: q, cost: +($('[data-f="cost"]', r).value || 0) } : null; }).filter(Boolean);
+      return { cash: +$('#plCash').value || 0, risk, mode: $('#plMode').value, buys, holdings };
+    };
+    let pt, seq = 0, last = null;
+    const showRows = d => {
+      const by = {}; [...(d.buys || []), ...(d.holdings || [])].forEach(x => by[x.code] = x);
+      $$('.prow', $('#plBuys')).forEach(r => { const x = by[normCode(codeOf(r))], el = $('.pinfo', r); const raw = $('[data-f="code"]', r).value.trim();
+        el.innerHTML = x ? `${esc(x.name)} 现价 <b class="${cls(x.pct)}">${num(x.price)}</b>（${pct(x.pct)}）→ 买 <b class="amber">${x.qty}</b> 股，约 ${yuan(x.est)} 元${x.score != null ? `，评分 <b>${num(x.score, 0)}</b>` : ''}` : raw && !codeOf(r) ? '<span class="up">请从下拉列表选一只股票</span>' : raw ? '填写金额或股数后计入预览' : ''; });
+      $$('.prow', $('#plHolds')).forEach(r => { const x = by[normCode(codeOf(r))], el = $('.pinfo', r); const raw = $('[data-f="code"]', r).value.trim();
+        el.innerHTML = x ? `${esc(x.name)} 现价 <b class="${cls(x.pct)}">${num(x.price)}</b> · 市值 ${yuan(x.qty * x.price)} · 浮盈 <b class="${cls(x.price - x.cost)}">${pct((x.price / x.cost - 1) * 100)}</b>${x.score != null ? ` · 评分 <b>${num(x.score, 0)}</b>` : ''}` : raw && !codeOf(r) ? '<span class="up">请从下拉列表选一只股票</span>' : raw ? '填写持股数量后计入预览' : ''; });
+    };
+    async function prev() {
+      clearTimeout(pt); pt = setTimeout(async () => {
+        const my = ++seq, el = $('#plPrev'); if (!el) return;
+        const b = body(); if (!b.cash && !b.holdings.length) { el.innerHTML = '填好初始资金或初始持仓后，这里会显示预览'; last = null; return; }
+        el.innerHTML = '<span class="loading">按现价估算中</span>';
+        let d; try { d = await api('plan/preview', b); } catch (e) { d = { ok: false, error: e.message }; }
+        if (my !== seq) return;
+        last = d;
+        if (!d.ok) { el.innerHTML = `<span class="up">⚠ ${esc(d.error)}</span>`; return; }
+        showRows(d);
+        el.innerHTML = `<div class="summary"><div><div class="l">初始资金</div><div class="v">${yuan(d.cash)}</div></div><div><div class="l">开局买入（约）</div><div class="v">${yuan(d.spend)}</div></div>
+            <div><div class="l">开局后现金</div><div class="v">${yuan(d.cash_after)}</div></div><div><div class="l">初始持仓市值</div><div class="v">${yuan(d.hold_mv)}</div></div>
+            <div><div class="l">初始总值（按成本）</div><div class="v">${yuan(d.init_total)}</div></div><div><div class="l">开局后现金占比</div><div class="v">${d.cash_ratio == null ? '--' : num(d.cash_ratio * 100, 0) + '%'}</div></div></div>
+          <div class="row" style="margin-top:6px"><span>AI 预判：</span><span class="chip a" style="font-size:13px">${esc(d.mode_name)}</span><span class="hint">${esc(d.reason)}</span></div>
+          <div class="hint">建立后会按实时行情再判断一次；之后每天开盘、大盘立场变化、每次选股前都会重新选。</div>`;
+      }, 500);
+    }
+    prev();
     $('#plGo').onclick = async () => {
       const b = $('#plGo'); b.disabled = true;
       try {
-        const read = async (box, keys) => { const out = []; for (const r of $$('.prow', box)) { const code = await resolve($('[data-f="code"]', r)); if (!code) continue;
-          const o = { code }; keys.forEach(k => o[k] = +($(`[data-f="${k}"]`, r).value || 0)); out.push(o); } return out; };
-        const body = { cash: +$('#plCash').value || 0, risk: $('#plRisk').value, mode: $('#plMode').value,
-          buys: await read($('#plBuys'), ['amount']), holdings: await read($('#plHolds'), ['qty', 'cost']) };
+        const bd = body(true);
+        const bad = [...$$('.prow', $('#plBuys')), ...$$('.prow', $('#plHolds'))].find(r => $('[data-f="code"]', r).value.trim() && !codeOf(r));
+        if (bad) throw new Error('有股票没从下拉列表里选中：' + $('[data-f="code"]', bad).value);
+        const chk = await api('plan/preview', bd); if (!chk.ok) throw new Error(chk.error);
         if (P.exists && !confirm('重新设定会清空当前计划模拟盘的持仓和记录，确定？')) { b.disabled = false; return; }
-        const r = await api('plan/start', body); toast(r.message || '计划已建立'); S.planEdit = false; renderSim();
+        const r = await api('plan/start', bd); toast(r.message || '计划已建立'); S.planEdit = false; renderSim();
       } catch (e) { toast(e.message, 1); b.disabled = false; }
     };
   }

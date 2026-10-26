@@ -20,9 +20,16 @@ for bad in ({"cash": 0}, {"cash": 1000, "buys": [{"code": "600519", "amount": 50
     except ValueError as e:
         print("拦截:", e)
 
-# 3 建立：现金 50 万、开局买两只、已有持仓一只
+# 3 建立：现金 50 万、开局买两只（一只按金额、一只按股数）、已有持仓一只
 snap = market.snapshot()
 codes = [r["code"] for r in snap if r.get("price") and 5 < r["price"] < 50][:3]
+pv = plan.preview({"cash": 500000, "buys": [{"code": codes[0], "amount": 100000}, {"code": codes[1], "qty": 1050}],
+                   "holdings": [{"code": codes[2], "qty": 3000}]})
+assert pv["ok"] and pv["buys"][1]["qty"] == 1000 and pv["buys"][0]["qty"] % 100 == 0, pv
+assert pv["mode_guess"] in plan.MODES and pv["cash_after"] < 500000, pv
+print("预览:", pv["mode_name"], "|", pv["reason"], "| 开局买入约", pv["spend"])
+assert not plan.preview({"cash": 1000, "buys": [{"code": codes[0], "amount": 50}]})["ok"]
+assert not plan.preview({"cash": 500000, "buys": [{"code": codes[0], "amount": 1000}], "holdings": [{"code": codes[0], "qty": 100}]})["ok"]
 r = plan.start({"cash": 500000, "risk": "均衡", "mode": "auto",
                 "buys": [{"code": codes[0], "amount": 100000}, {"code": codes[1], "amount": 80000}],
                 "holdings": [{"code": codes[2], "qty": 3000, "cost": 0}]})
