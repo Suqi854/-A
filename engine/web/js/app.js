@@ -73,18 +73,21 @@
     if (body !== undefined) { opt.method = 'POST'; opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
     let r;
     try { r = await fetch(S.remote.url + '/api/' + path, opt); }
-    catch (e) { S.remote = null; STATIC = true; document.body.classList.add('static'); setRemoteBadge(); toast('和电脑的连接断开了，已切回只读版', 1); return staticApi(path, body); }
+    catch (e) { S.remote = null; STATIC = true; document.body.classList.add('static'); setRemoteBadge(); toast('和电脑的连接断开了，已切回只读版（每分钟自动重连）', 1); return staticApi(path, body); }
     const j = await r.json().catch(() => ({ error: '电脑引擎没有响应' }));
     if (!r.ok || (j && j.error)) throw new Error(j.error || r.statusText);
     return j;
   }
   function setRemoteBadge() { const b = $('#unlockBtn'); if (!b) return; b.textContent = S.remote ? '已连电脑' : S.priv ? '已解锁' : '解锁个人'; b.classList.toggle('pri', !S.remote); }
-  async function connectRemote() {
-    const r = S.priv && S.priv.remote; if (!r || !r.url) return false;
+  async function connectRemote(quiet) {
+    const r = S.priv && S.priv.remote; if (!r || !r.url || S.remote) return !!S.remote;
+    const tryOnce = async url => { const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 15000);
+      try { return await fetch(url + '/api/auth/me', { headers: { Authorization: 'Bearer ' + r.token }, signal: ctl.signal, cache: 'no-store' }).then(x => x.json()); }
+      finally { clearTimeout(t); } };
     try {
-      const ctl = new AbortController(); setTimeout(() => ctl.abort(), 7000);
-      const m = await fetch(r.url + '/api/auth/me', { headers: { Authorization: 'Bearer ' + r.token }, signal: ctl.signal }).then(x => x.json());
-      if (!m.authorized) return false;
+      let m = null;  // 固定地址优先，连不上再试一次、再试隧道直连地址（网络抖动时常常第二次就通）
+      for (const u of [r.url, r.url, r.tunnel].filter(Boolean)) { try { m = await tryOnce(u); if (m && m.authorized) { r.url = u; break; } } catch { } }
+      if (!m || !m.authorized) { if (!quiet) toast('暂时连不上电脑：先显示网页版数据，每分钟会自动重试', 1); return false; }
       S.remote = { url: r.url, token: r.token }; STATIC = false; document.body.classList.remove('static'); document.body.classList.add('remote');
       setRemoteBadge(); restartPoll(); initAssistant(); toast('已连上你的电脑：现在是完整版，可以下单、改设置、用 AI');
       api('settings').then(s => syncLook(s.look)).catch(() => { }); return true;
@@ -1516,6 +1519,8 @@
     toast('个人数据已解锁（数据时间 ' + S.priv.time.slice(5, 16) + '）' + (S.priv.remote ? '，正在连接电脑…' : ''));
     await connectRemote();
     await poll(); const [p, a] = location.hash.slice(1).split('/'); show(PAGES.includes(p) ? p : 'mon', a);
+    clearInterval(S.timers.rc);  // 网页版：每分钟悄悄重连一次电脑，连上就自动切回完整版
+    S.timers.rc = setInterval(async () => { if (!S.remote && S.priv && S.priv.remote && !document.hidden && await connectRemote(true)) { poll(); const [p2, a2] = location.hash.slice(1).split('/'); show(PAGES.includes(p2) ? p2 : 'mon', a2); } }, 60000);
   }
   function showUnlock() {
     if (S.priv) { if (confirm('锁定并清除本机记住的密码？')) { S.priv = null; lsSet('aq5_pw', null); location.reload(); } return; }

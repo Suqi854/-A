@@ -6,7 +6,8 @@
               + settings.json；用「手机查看密码」加密（云端用 GitHub Secret AQ5_KEY 解密）
 
 规则：
-  - 电脑在线（固定地址 /__aq5/alive 能连到电脑）时，云端不跑；正在跑的云端发现电脑上线会存好状态后退出。
+  - 交易日 08:30-16:00 云端全程值守：电脑在线（固定地址 /__aq5/alive 能连到电脑）时只待命不交易；
+    电脑连续 3 分钟连不上才接手；接手后电脑上线，存好状态交还；单次运行快到 6 小时上限时自己接力下一次。
   - 电脑启动时：若云端正在跑，先等它交接（最多约 5 分钟）；若云端状态比本机新，导入云端状态再开始。
   - 电脑交易时段每 5 分钟、收盘后上传一次自己的状态，保证云端接手时是最新的。
 """
@@ -280,67 +281,118 @@ def status() -> dict:
     return {**STATE, "enabled": _cfg()["enabled"], "repo": _cfg()["repo"], "key": bool(_key())}
 
 
-# ----------------------------------------------------------------------------- 云端：一次代跑
-def run_cloud(max_minutes: int = 345) -> int:
-    """GitHub Actions 里执行：python -m aq5.cloud"""
+# ----------------------------------------------------------------------------- 云端：交易日值守
+WORKFLOW = "aq5-cloud.yml"
+OFFLINE_CONFIRM = 3      # 连续 3 次（约 3 分钟）连不上电脑才接手：隧道偶尔抖一下不会两边同时交易
+GUARD_START, GUARD_END = 830, 1600
+
+
+def dispatch_next(reason: str) -> bool:
+    """接力：用 Actions 自带的 GITHUB_TOKEN 触发下一次云端值守（workflow_dispatch 允许自触发）。"""
+    repo, tok = os.environ.get("GITHUB_REPOSITORY"), os.environ.get("GITHUB_TOKEN")
+    if not (repo and tok):
+        return False
+    body = json.dumps({"ref": os.environ.get("GITHUB_REF_NAME") or "main", "inputs": {"mode": "run"}}).encode()
+    req = urllib.request.Request(f"https://api.github.com/repos/{repo}/actions/workflows/{WORKFLOW}/dispatches", data=body,
+                                 method="POST", headers={"Authorization": "Bearer " + tok, "Accept": "application/vnd.github+json",
+                                                         "User-Agent": "aq5-cloud", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            ok = r.status in (200, 204)
+    except Exception as e:  # noqa: BLE001
+        print("接力失败：", e, flush=True)
+        return False
+    print(f"已接力下一次云端值守（{reason}）", flush=True)
+    return ok
+
+
+def _guard_hours() -> bool:
+    hm = now().hour * 100 + now().minute
+    return now().weekday() < 5 and hm < GUARD_END
+
+
+def run_cloud(max_minutes: int = 340) -> int:
+    """GitHub Actions 里执行：python -m aq5.cloud
+
+    交易日 08:30-16:00 值守：电脑在线就待命（每分钟看一次）；电脑确认离线（连续 3 分钟）就导入最新状态接手交易；
+    接手后电脑回来，存好状态交还并接力一个新的值守任务；单次快到 6 小时上限时也接力下一次，保证全天有人守着。
+    """
     from . import ai, hf, market, marketstate, picker, scheduler, sectors, signals, sim  # noqa: F401
-    print("== A量化 云端代跑 ==", now().strftime("%Y-%m-%d %H:%M:%S"), flush=True)
-    meta = remote_meta()
-    if not meta:
+    print("== A量化 云端值守 ==", now().strftime("%Y-%m-%d %H:%M:%S"), flush=True)
+    if not _guard_hours():
+        print("不在交易日值守时段（08:30-16:00），退出", flush=True)
+        return 0
+    if not remote_meta():
         print("还没有电脑上传的状态（state 分支为空），退出", flush=True)
         return 0
-    if pc_alive():
-        print("电脑在线，云端不需要接手", flush=True)
-        return 0
-    if meta.get("owner") == "cloud" and meta.get("active") and _age(meta.get("heartbeat")) < 400:
-        print("另一个云端任务正在运行，退出", flush=True)
-        return 0
-    hm = now().hour * 100 + now().minute
-    if now().weekday() >= 5 or hm < 840 or hm > 1600:
-        print("不在交易日运行时段（08:40-16:00），退出", flush=True)
-        return 0
     db.init()
-    from . import auth
-    for m in (auth, ai, sectors, signals, marketstate):
+    from . import announce, auth
+    for m in (auth, ai, sectors, signals, marketstate, announce):
         try:
             m.init()
         except Exception as e:  # noqa: BLE001
             print("init", m.__name__, e, flush=True)
+    while now().hour * 100 + now().minute < GUARD_START:  # 提前被触发：先等到 08:30
+        time.sleep(60)
+    try:
+        if not market.is_trading_day():
+            print("今天休市，退出", flush=True)
+            return 0
+    except Exception as e:  # noqa: BLE001
+        print("交易日判断失败，按交易日处理：", e, flush=True)
+    t0, last_up, misses, active, reason = time.time(), 0.0, 0, False, "到时"
+    while True:
+        hm = now().hour * 100 + now().minute
+        if hm >= GUARD_END:
+            reason = "收盘后结束"
+            break
+        if time.time() - t0 > max_minutes * 60:
+            reason = "单次运行接近 6 小时上限"
+            dispatch_next(reason)
+            break
+        alive = pc_alive()
+        misses = 0 if alive else misses + 1
+        if not active:
+            if misses >= OFFLINE_CONFIRM:
+                _take_over(sim, hf, scheduler)
+                active, last_up = True, time.time()
+            elif misses == 0 and int(time.time() - t0) % 1800 < 60:
+                print(now().strftime("%H:%M"), "电脑在线，云端待命", flush=True)
+        else:
+            if alive:
+                reason = "电脑上线，交还给电脑"
+                dispatch_next("交还后继续值守")
+                break
+            if time.time() - last_up > 300:
+                last_up = time.time()
+                res = upload(active=True)
+                print(now().strftime("%H:%M"), "状态已上传" if res.get("ok") else res, flush=True)
+        time.sleep(60)
+    if active:
+        db.event("system", f"云端代跑结束（{reason}）", "", "info")
+        res = upload(active=False, final=True)
+        print("结束：", reason, res, flush=True)
+    else:
+        print("值守结束：", reason, "（期间电脑一直在线，云端没有交易）", flush=True)
+    return 0
+
+
+def _take_over(sim, hf, scheduler) -> None:
+    """电脑确认离线：导入电脑最后上传的状态，开始交易和发布。"""
     blob = _gh_raw("state.bin")
+    meta = remote_meta() or {}
     r = unpack(blob, take_settings=True)
-    print(f"已导入状态：{meta.get('owner')} {meta.get('updated')}，{r['tables']} 张表", flush=True)
-    # 云端：不开隧道、不推私有备份；发布到 GitHub 网页照常
-    save_settings({"remote": {"enabled": False}, "backup": {"enabled": False}})
+    print(now().strftime("%H:%M"), f"电脑离线，云端接手。导入状态：{meta.get('owner')} {meta.get('updated')}，{r['tables']} 张表", flush=True)
+    save_settings({"remote": {"enabled": False}, "backup": {"enabled": False}})  # 云端：不开隧道、不推私有备份；发布网页照常
     sec = {"mobile_password": os.environ.get("AQ5_KEY", "")}
     if os.environ.get("AQ5_AI_KEY"):
         sec["ai_key"] = os.environ["AQ5_AI_KEY"]
     vault.set_many(sec)
     sim.ensure_accounts()
-    if not market.is_trading_day():
-        print("今天休市，退出", flush=True)
-        upload(active=False)
-        return 0
-    db.event("system", "云端代跑开始", "电脑离线，GitHub 云端接手：自动选股、AI 自动盘、自选信号、发布网页", "info")
+    db.event("system", "云端代跑开始", "电脑离线超过 3 分钟，GitHub 云端接手：自动选股、AI 自动盘、计划模拟、自选信号、发布网页", "info")
     upload(active=True)
     hf.start()
     scheduler.start()
-    t0, last_up, reason = time.time(), time.time(), "到时"
-    while True:
-        time.sleep(60)
-        hm = now().hour * 100 + now().minute
-        if pc_alive():
-            reason = "电脑上线"
-            break
-        if time.time() - t0 > max_minutes * 60 or hm >= 1600:
-            break
-        if time.time() - last_up > 300:
-            last_up = time.time()
-            res = upload(active=True)
-            print(now().strftime("%H:%M"), "状态已上传" if res.get("ok") else res, flush=True)
-    db.event("system", f"云端代跑结束（{reason}）", "", "info")
-    res = upload(active=False, final=True)
-    print("结束：", reason, res, flush=True)
-    return 0
 
 
 def diag() -> int:

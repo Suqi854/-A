@@ -135,8 +135,8 @@ def _reader(p):
         STATE["log"] = (STATE["log"] + [t[-200:]])[-30:]
         if "Registered tunnel connection" in t:
             STATE.update(connected=True, error=None)
-        elif "Unregistered tunnel connection" in t or ("ERR" in t and "connIndex=0" in t):
-            STATE["connected"] = False
+        elif "Unregistered tunnel connection" in t or "Connection terminated" in t or "connection with edge closed" in t:
+            STATE["connected"] = False  # 只有真正断线才算断开；单个请求出错（request ended abruptly 等）不算
             if "quic" in t.lower():
                 STATE["error"] = "QUIC(UDP) 连不上 Cloudflare，已改用 http2(TCP)"
         m = pat.search(t)
@@ -247,18 +247,50 @@ def status() -> dict:
                                                             "log": STATE["log"][-6:], "exe": str(EXE)}
 
 
+def _self_check() -> bool:
+    """从外网绕一圈（固定地址 → 隧道 → 本机）确认手机能连上电脑。"""
+    url = relay_url() or STATE["url"]
+    if not url:
+        return False
+    try:
+        req = urllib.request.Request(url.rstrip("/") + "/api/auth/me?selfcheck=" + str(int(time.time())), headers={"User-Agent": "aq5"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return r.status == 200 and b"has_user" in r.read(2000)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def watchdog() -> None:
-    """后台守护：开启状态下隧道进程退出就 30 秒后重启。"""
+    """后台守护：开启状态下隧道进程退出就 30 秒后重启；每 2 分钟从外网自检一次，
+    连不上先重新告诉中转当前地址，连续 3 次连不上就重建隧道（代理/网络抖动后自动恢复）。"""
     def loop():
+        fails, last_check = 0, 0.0
         while True:
             try:
                 if load_settings().get("remote", {}).get("enabled") and installed():
                     p = _proc["p"]
                     if not p or p.poll() is not None:
                         start(only_if_enabled=True)
-                    elif STATE.get("connected") and relay_url() and time.time() - _last_push["t"] > 300:
-                        _last_push["t"] = time.time()
-                        push_relay()
+                        fails = 0
+                    else:
+                        if relay_url() and STATE.get("url") and time.time() - _last_push["t"] > 300:
+                            _last_push["t"] = time.time()
+                            push_relay()
+                        if STATE.get("url") and time.time() - last_check > 120:
+                            last_check = time.time()
+                            if _self_check():
+                                fails = 0
+                                STATE.update(connected=True, checked=now().strftime("%H:%M:%S"))
+                            else:
+                                fails += 1
+                                STATE.update(connected=False, error=f"外网自检连不上（第 {fails} 次）")
+                                push_relay()
+                                if fails >= 3:
+                                    db.event("system", "手机远程通道连不上，已自动重建", "连续 3 次外网自检失败（约 6 分钟）", "warn")
+                                    stop()
+                                    time.sleep(3)
+                                    start(only_if_enabled=True)
+                                    fails = 0
             except Exception as e:  # noqa: BLE001
                 STATE["error"] = str(e)[:200]
             time.sleep(30)
