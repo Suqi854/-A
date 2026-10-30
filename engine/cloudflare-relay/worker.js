@@ -38,7 +38,7 @@ const REPO = "Suqi854/-A", WF = "aq5-cloud.yml";
 
 async function gh(env, path, init = {}) {
   return fetch("https://api.github.com/repos/" + REPO + path, { ...init, headers: { "User-Agent": "aq5-relay",
-    "Accept": "application/vnd.github+json", "Authorization": "Bearer " + env.GH_TOKEN, ...(init.headers || {}) } });
+    "Accept": "application/vnd.github+json", "Authorization": "Bearer " + String(env.GH_TOKEN || "").trim(), ...(init.headers || {}) } });
 }
 
 async function kickCloud(env, force = false) {
@@ -48,7 +48,7 @@ async function kickCloud(env, force = false) {
   else if (!force && (wd === 0 || wd === 6 || hm < 815 || hm >= 1550)) out = { ok: true, msg: "不在值守时段" };
   else {
     const r = await gh(env, `/actions/workflows/${WF}/runs?per_page=10`);
-    if (!r.ok) out = { ok: false, msg: "查询运行记录失败 " + r.status };
+    if (!r.ok) out = { ok: false, msg: "查询运行记录失败 " + r.status + (r.status === 401 ? "：GitHub 令牌无效或已过期，请重新运行 设置云端自动启动.cmd" : "") };
     else {
       const runs = (await r.json()).workflow_runs || [];
       const live = runs.find(x => x.status !== "completed");
