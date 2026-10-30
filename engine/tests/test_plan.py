@@ -145,3 +145,33 @@ print("高频自调:", learn.tune_hf())
 sw = strategies.strategy_weights("close")
 assert all(0.5 <= w <= 1.5 for w in sw.values()), sw
 print("ALL OK")
+
+# 14 （5.1.3）大盘立场去抖：新立场持续 10 分钟才采用，「防守」立即生效
+import time as _tm  # noqa: E402
+plan._stance_seen.update(stance=None, since=0.0)
+assert plan._steady_stance("谨慎", "中性") == "中性"          # 刚出现：先不变
+plan._stance_seen["since"] = _tm.time() - 601
+assert plan._steady_stance("谨慎", "中性") == "谨慎"          # 持续 10 分钟：采用
+assert plan._steady_stance("防守", "中性") == "防守"          # 风险立场立即生效
+# 现金多就进攻（谨慎也进攻，只是仓位减半）
+assert plan._decide(0.9, 0, 0, {"stance": "谨慎"}, "均衡", "auto", None)[0] == "attack"
+print("5.1.3 去抖与进攻规则 OK")
+
+# 15 （5.1.3）盘中机会：候选回到买入区就买（每轮最多一只）
+plan.set_mode("attack")
+_r = plan._row(); _r["cfg"]["risk"] = "积极"  # 前面的测试已买满「均衡」的 6 只，换成「积极」（最多 8 只）
+with db.tx() as _c:
+    _c.execute("UPDATE plan SET cfg=? WHERE id=1", (db.dumps(_r["cfg"]),))
+    _c.execute("UPDATE accounts SET cash=cash+300000 WHERE id='plan'")
+before = len(db.q("SELECT id FROM orders WHERE account='plan' AND reason LIKE '%盘中机会%'"))
+cand = [x for x in snap if x.get("price") and 5 < x["price"] < 40 and x["code"] not in {p["code"] for p in plan.view()["account"]["positions"]}][0]
+plan._scan.update(t=0.0, cands=[{"code": cand["code"], "name": cand.get("name"), "score": 80, "tier": "B", "id": None}])
+real_plan = signals.plan
+signals.plan = lambda code, phase=None, acct="me", save=True: {"name": cand.get("name"), "actions": ["买入"], "score": 80, "rating": "买入",
+                                                              "price": cand["price"], "summary": "测试", "levels": {"stop": cand["price"] * 0.93,
+                                                              "target1": cand["price"] * 1.1, "target2": cand["price"] * 1.2}}
+plan._scan_entries("attack")
+signals.plan = real_plan
+after = len(db.q("SELECT id FROM orders WHERE account='plan' AND reason LIKE '%盘中机会%'"))
+assert after == before + 1, (before, after)
+print("盘中机会买入 OK")

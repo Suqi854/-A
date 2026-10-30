@@ -15,7 +15,7 @@ from . import ai, analysis, auth, backtest, backup, cloud, db, learn, market, no
 from .config import DATA, MOCK, WEB, load_settings, now, public_settings, save_settings
 from .strategies import DESC, NAMES
 
-VERSION = "5.1.2"
+VERSION = "5.1.3"
 
 
 def lan_ip() -> str:

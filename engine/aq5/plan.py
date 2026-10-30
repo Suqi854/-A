@@ -268,8 +268,8 @@ def _decide(cash_ratio: float, n: int, weak: int, ms: dict, risk: str | None, lo
         mode = "defense"
     elif n and cash_ratio < 0.25:
         mode = "t_trade"
-    elif cash_ratio >= 0.6 and stance != "谨慎":
-        mode = "attack"
+    elif cash_ratio >= 0.6:
+        mode = "attack"   # 大盘「谨慎」时仍然进攻，但仓位减半（见 _size_k）
     else:
         mode = "rotate"
     if risk == "稳健" and mode == "attack" and stance != "顺势做多":
@@ -284,6 +284,22 @@ def _decide(cash_ratio: float, n: int, weak: int, ms: dict, risk: str | None, lo
     return mode, why
 
 
+STEADY_SEC = 600
+_stance_seen: dict = {"stance": None, "since": 0.0}
+
+
+def _steady_stance(raw: str, cur: str | None) -> str:
+    """大盘立场每分钟都在变：新立场连续保持 10 分钟才采用（风险立场「防守」立即生效）。"""
+    import time as _t
+    if cur is None or raw == cur or raw == "防守":
+        _stance_seen.update(stance=raw, since=_t.time())
+        return raw
+    if _stance_seen["stance"] != raw:
+        _stance_seen.update(stance=raw, since=_t.time())
+        return cur
+    return raw if _t.time() - _stance_seen["since"] >= STEADY_SEC else cur
+
+
 def choose(force: bool = False) -> dict:
     """根据现金比例、持仓强弱、大盘立场、本计划各策略战绩，选出当前策略。"""
     r = _row()
@@ -294,7 +310,10 @@ def choose(force: bool = False) -> dict:
         ms = marketstate.state()
     except Exception:  # noqa: BLE001
         ms = {}
-    stance = ms.get("stance") or "中性"
+    raw = ms.get("stance") or "中性"
+    stance = _steady_stance(raw, r["stance"] if (r["updated"] or "")[:10] == today() else None)
+    if stance != raw:
+        ms = {**ms, "stance": stance, "risk_off": False if stance != "防守" else ms.get("risk_off")}
     if not force and r["mode"] and r["stance"] == stance and (r["updated"] or "")[:10] == today():
         return {"mode": r["mode"], "reason": r["reason"]}
     v = sim.view(ACCT, light=True)
@@ -354,6 +373,15 @@ def _buy(p: dict, budget: float, why: str, mode: str) -> bool:
         return False
 
 
+C_MIN_SCORE = 65
+
+
+def _size_k() -> float:
+    """大盘「谨慎」时仓位减半。"""
+    r = _row()
+    return 0.5 if (r or {}).get("stance") == "谨慎" else 1.0
+
+
 def on_picks(picks: list[dict], session: str) -> None:
     """竞价/尾盘选股后调用：按当前策略决定买卖。"""
     if not active():
@@ -363,6 +391,7 @@ def on_picks(picks: list[dict], session: str) -> None:
         rk = _risk()
         v = sim.view(ACCT, light=True)
         held = {p["code"] for p in v["positions"]}
+        _note_candidates(picks)
         pend = {o["code"] for o in db.q("SELECT code FROM orders WHERE account=? AND status='pending'", (ACCT,))}
         eq, cash = v["equity"], v["cash"]
         tag = "竞价" if session == "auction" else "尾盘"
@@ -382,16 +411,19 @@ def on_picks(picks: list[dict], session: str) -> None:
                     if _sell(pos["code"], pos["avail"], f"持仓评分降到 {s:.0f}（<50），换入更强的候选", mode):
                         cash += pos["avail"] * (pos["price"] or pos["cost"]) * 0.998
                         held.discard(pos["code"])
-        tiers = ("A", "B") if mode == "attack" else ("A",)
+        tiers = ("A", "B")
         limit = 3 if mode == "attack" else 2
-        bought = 0
-        for p in picks:
+        cands = [p for p in picks if p.get("tier", "A") in tiers]
+        if mode == "attack" and not cands:  # 这次没有 A/B 级：综合分够高的 C 级小仓位试错，不让资金一直闲着
+            cands = [p for p in picks if (p.get("score") or 0) >= C_MIN_SCORE][:1]
+        bought, sk = 0, _size_k()
+        for p in cands:
             if bought >= limit or len(held) >= rk["max_pos"]:
                 break
-            if p.get("tier", "A") not in tiers or p["code"] in held or p["code"] in pend:
+            if p["code"] in held or p["code"] in pend:
                 continue
             k = sim.TIER_SIZE.get(p.get("tier", "A"), 0.4)
-            budget = min(eq * rk["pos_pct"] * k, cash * 0.98)
+            budget = min(eq * rk["pos_pct"] * k * sk, cash * 0.98)
             sig = p["signals"][0]["name"] if p.get("signals") else "综合评分"
             if _buy(p, budget, f"{tag}选股 {p.get('tier', '?')} 级第 {p.get('rank', '?')} 名，{sig}，评分 {p['score']}", mode):
                 held.add(p["code"])
@@ -409,12 +441,14 @@ def tick() -> None:
         if mode not in ("t_trade", "rotate", "attack"):
             return
         hm = now().hour * 100 + now().minute
+        if mode in ("attack", "rotate") and hm < 1450:
+            _scan_entries(mode)
         for p in db.q("SELECT * FROM positions WHERE account=?", (ACCT,)):
             code = p["code"]
             sold = _t_qty(code, "sell")
             back = _t_qty(code, "buy")
             if hm >= 1450:
-                if mode == "t_trade" and sold > back:  # 做T收尾：把高抛的接回，保持持股数量
+                if sold > back:  # 做T收尾（任何策略）：把当天高抛的接回，保持持股数量
                     _t_order(code, "buy", sold - back, "做T收尾：尾盘接回高抛的仓位", p, mode)
                 continue
             try:
@@ -430,6 +464,50 @@ def tick() -> None:
                     _t_order(code, "sell", q, f"做T高抛：{names}（价 {lv['price']}，高抛位 {lv['t_high']}）", p, mode)
             elif "buy" in sides and sold > back:
                 _t_order(code, "buy", sold - back, f"做T低吸接回：{names}（价 {lv['price']}，低吸位 {lv['t_low']}）", p, mode)
+
+
+_scan = {"t": 0.0, "cands": []}
+
+
+def _note_candidates(picks: list[dict]) -> None:
+    """记下最近一次选股的候选（盘中机会扫描用）。"""
+    _scan["cands"] = [{k: p.get(k) for k in ("code", "name", "score", "tier", "id")} for p in picks
+                      if (p.get("score") or 0) >= 60][:12]
+
+
+def _scan_entries(mode: str) -> None:
+    """盘中每 10 分钟：在最近一次选股的候选里找买点（价格回到买入区、评级为买入），出现就按仓位买入。"""
+    import time as _t
+    if _t.time() - _scan["t"] < 600:
+        return
+    _scan["t"] = _t.time()
+    from . import signals
+    rk = _risk()
+    v = sim.view(ACCT, light=True)
+    eq, cash = v["equity"], v["cash"]
+    if eq <= 0 or cash / eq < (0.3 if mode == "rotate" else 0.15) or len(v["positions"]) >= rk["max_pos"]:
+        return
+    if not _scan["cands"]:
+        r = db.q1("SELECT id FROM pick_runs WHERE date=? ORDER BY id DESC LIMIT 1", (today(),))
+        if r:
+            _scan["cands"] = [dict(x) for x in db.q("SELECT id, code, name, score, tier FROM picks WHERE run_id=? AND score>=60 "
+                                                    "ORDER BY score DESC LIMIT 12", (r["id"],))]
+    held = {p["code"] for p in v["positions"]}
+    pend = {o["code"] for o in db.q("SELECT code FROM orders WHERE account=? AND status='pending'", (ACCT,))}
+    for c in [x for x in _scan["cands"] if x["code"] not in held and x["code"] not in pend][:8]:
+        try:
+            sig = signals.plan(c["code"], "intra", acct=ACCT, save=False)
+        except Exception:  # noqa: BLE001
+            continue
+        if "买入" not in sig.get("actions", []):
+            continue
+        k = 1.0 if (sig.get("score") or 0) >= 75 else 0.6  # 高分全仓位，其余六成
+        budget = min(eq * rk["pos_pct"] * k * _size_k(), cash * 0.98)
+        lv = sig.get("levels") or {}
+        p = {"code": c["code"], "name": sig.get("name") or c["name"], "price": sig.get("price"), "id": c.get("id"),
+             "plan": {"stop": lv.get("stop"), "target1": lv.get("target1"), "target2": lv.get("target2")}}
+        if _buy(p, budget, f"盘中机会：{c['name']} 回到买入区（评分 {sig.get('score', 0):.0f}，{sig.get('rating', '')}），{sig.get('summary', '')}", mode):
+            return  # 每轮最多买一只
 
 
 def _t_qty(code: str, side: str) -> int:

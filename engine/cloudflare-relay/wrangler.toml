@@ -6,3 +6,7 @@ workers_dev = true
 [[kv_namespaces]]
 binding = "KV"
 id = "REPLACE_ME"
+
+# 云端值守的可靠触发：UTC 00:00-07:55 = 北京时间 08:00-15:55，每 5 分钟（代码里只在 08:15-15:50 生效）
+[triggers]
+crons = ["*/5 0-7 * * 1-5"]
