@@ -29,7 +29,21 @@
     if (body !== undefined) throw new Error('这是公开只读版：下单、选股、设置等操作请在电脑端进行');
     const [p, qs] = path.split('?'); const q = new URLSearchParams(qs || ''); const code = normCode(q.get('code'));
     switch (p) {
-      case 'overview': { const o = await sj('latest.json'); if (S.priv) { o.watchlist = S.priv.watchlist; const m = S.priv.me; o.accounts = { me: { ...m, positions: m.positions || [] }, ...o.accounts }; } return o; }
+      case 'overview': {
+        const o = await sj('latest.json');
+        if (S.priv) await refreshPrivate(o);
+        const priv = S.priv;
+        if (priv) {
+          o.watchlist = priv.watchlist;
+          o.accounts = { me: { ...priv.me, positions: priv.me.positions || [] }, ...o.accounts };
+          const a = priv.plan?.account;
+          if (a) o.accounts.plan = { ...a, positions: a.positions || [] };
+          o.private_time = priv.time;
+          o.private_refresh_failed = !!(S.privateSession?.error ||
+            (o.private_pack_sha256 && S.privateSession?.marker !== o.private_pack_sha256));
+        }
+        return o;
+      }
       case 'picks/runs': return sj('runs.json');
       case 'picks/candidates': { const r = (await sj('runs.json')).find(x => String(x.id) === q.get('run')); return r ? r.cand_list || [] : []; }
       case 'picks/state': return { running: false };
@@ -42,8 +56,13 @@
         const k = await Lite.klines(code, 'day', 320); return { code, rows: k.rows, source: k.source }; }
       case 'intraday': return sj('intraday/' + code + '.json').catch(() => Lite.intraday(code));
       case 'sim': return (q.get('acct') === 'me' && S.priv) ? S.priv.me : sj('ai.json');
-      case 'plan': { const p = S.priv && S.priv.plan; if (p) return { ...p, static_time: S.priv.time };
-        return { exists: false, static: true, error: S.priv ? '电脑上还没有建立计划模拟（在电脑或连上电脑后设定）' : '解锁个人数据后可以看计划模拟' }; }
+      case 'plan': {
+        const p = S.priv?.plan, failed = !!S.privateSession?.error;
+        if (p) return { ...p, static_time: S.priv.time, static_refresh_failed: failed };
+        return { exists: false, static: true, error: S.priv
+          ? '个人快照中没有计划模拟（在电脑或连上电脑后设定）。' + privateStatus(S.priv.time, failed)
+          : '解锁个人数据后可以看计划模拟' };
+      }
       case 'learn': return sj('learn.json');
       case 'events': { const e = await sj('events.json'); return S.priv ? [...S.priv.events, ...e].sort((x, y) => y.time < x.time ? -1 : 1) : e; }
       case 'settings': return sj('settings.json');
@@ -80,13 +99,14 @@
   }
   function setRemoteBadge() { const b = $('#unlockBtn'); if (!b) return; b.textContent = S.remote ? '已连电脑' : S.priv ? '已解锁' : '解锁个人'; b.classList.toggle('pri', !S.remote); }
   async function connectRemote(quiet) {
-    const r = S.priv && S.priv.remote; if (!r || !r.url || S.remote) return !!S.remote;
+    const session = S.privateSession, r = session?.remote; if (!r || !r.url || S.remote) return !!S.remote;
     const tryOnce = async url => { const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 15000);
       try { return await fetch(url + '/api/auth/me', { headers: { Authorization: 'Bearer ' + r.token }, signal: ctl.signal, cache: 'no-store' }).then(x => x.json()); }
       finally { clearTimeout(t); } };
     try {
       let m = null;  // 固定地址优先，连不上再试一次、再试隧道直连地址（网络抖动时常常第二次就通）
       for (const u of [r.url, r.url, r.tunnel].filter(Boolean)) { try { m = await tryOnce(u); if (m && m.authorized) { r.url = u; break; } } catch { } }
+      if (S.privateSession !== session) return false;
       if (!m || !m.authorized) { if (!quiet) toast('暂时连不上电脑：先显示网页版数据，每分钟会自动重试', 1); return false; }
       S.remote = { url: r.url, token: r.token }; STATIC = false; document.body.classList.remove('static'); document.body.classList.add('remote');
       setRemoteBadge(); restartPoll(); initAssistant(); toast('已连上你的电脑：现在是完整版，可以下单、改设置、用 AI');
@@ -322,11 +342,24 @@
   }
 
   async function poll() {
+    if (S.polling) return;
+    S.polling = true;
+    const wasStatic = STATIC, remote = S.remote;
     try {
       const ov = await api('overview');
+      if (wasStatic !== STATIC || remote !== S.remote) return;
+      const old = S.ov;
       S.ov = ov; header(ov);
       if (S.page === 'mon') updateMon(ov);
-    } catch (e) { $('#lastUpd').textContent = '连接中断'; }
+      if (STATIC && !S.priv && !S.unlocking) autoUnlock(ov);
+      if (STATIC && S.page === 'sim' && S.acct === 'plan' && S.priv &&
+          (old?.private_time !== ov.private_time || old?.private_refresh_failed !== ov.private_refresh_failed ||
+            old?.private_pack_sha256 !== ov.private_pack_sha256)) {
+        await renderSim();
+      }
+    } catch (e) {
+      if (wasStatic === STATIC && remote === S.remote) $('#lastUpd').textContent = '连接中断';
+    } finally { S.polling = false; }
   }
   function restartPoll() { clearInterval(S.timers.poll); const sec = STATIC ? +(lsGet('aq5_refresh') || 60) : 5; S.timers.poll = setInterval(() => { if (!document.hidden) poll(); }, sec * 1000); }
   restartPoll();
@@ -478,9 +511,10 @@
     } else if (b && b.error) $('#breadth').innerHTML = `<div class="empty">全市场快照获取失败<br><small>${esc(b.error)}</small></div>`;
     // 最新选股
     const lr = ov.last_run, mp = $('#monPick'); mp.className = '';
+    const pq = (STATIC ? ov.pick_quotes : S.pq) || {};
     if (!lr) mp.innerHTML = `<div class="empty">还没有选股记录<br><br>交易日 09:26 / 14:45 自动运行<br><br><button class="btn pri" onclick="location.hash='pick'">去手动选股</button></div>`;
     else mp.innerHTML = `<div class="row"><span class="chip a">${SESSION[lr.session] || lr.session}</span><span class="mono muted">${lr.date} ${lr.finished || ''}</span><span class="sp"></span><span class="mono muted">扫描${lr.scanned}·精评${lr.candidates}</span></div>
-        ${lr.items.length ? `<table class="t" style="margin-top:6px"><tr><th>股票</th><th>评分</th><th class="hide-m">选出价</th><th>现价</th><th class="hide-m">涨幅</th><th>较选出</th><th>止损</th><th>目标</th></tr>${lr.items.map(p => { const lq = (S.pq || {})[p.code] || {}; const since = lq.price && p.price ? (lq.price / p.price - 1) * 100 : null;
+        ${lr.items.length ? `<table class="t" style="margin-top:6px"><tr><th>股票</th><th>评分</th><th class="hide-m">选出价</th><th>现价</th><th class="hide-m">涨幅</th><th>较选出</th><th>止损</th><th>目标</th></tr>${lr.items.map(p => { const lq = pq[p.code] || {}; const since = lq.price && p.price ? (lq.price / p.price - 1) * 100 : null;
           const rel = v => v && p.price ? (v / p.price - 1) * 100 : null;
           return `<tr class="click" data-c="${p.code}"><td>${p.tier ? `<span class="tier t${p.tier}">${p.tier}</span>` : ''}${nameCell(p.name, p.code)}</td><td class="amber">${num(p.score, 1)}</td><td class="hide-m muted">${num(p.price)}</td>
           <td class="${cls(lq.pct)}">${num(lq.price)}</td><td class="hide-m ${cls(lq.pct)}">${pct(lq.pct)}</td><td class="${cls(since)}"><b>${pct(since)}</b></td>
@@ -488,10 +522,11 @@
           <div class="hint" style="margin-top:4px">较选出 = 现价相对选出价的涨跌；止损、目标也按相对选出价的百分比显示（电脑上鼠标悬停可看价格）</div>`
         : `<div class="nopick" style="margin-top:8px"><b>宁缺毋滥</b><span class="hint">本次没有达到门槛的机会，今天先观望</span></div>`}`;
     mp.querySelectorAll('[data-c]').forEach(tr => tr.onclick = () => go('anly', tr.dataset.c));
-    if (lr && lr.items.length && (!S.pqT || Date.now() - S.pqT > 4000)) { S.pqT = Date.now();
+    if (!STATIC && lr && lr.items.length && (!S.pqT || Date.now() - S.pqT > 4000)) { S.pqT = Date.now();
       api('quotes?codes=' + lr.items.map(p => p.code).join(',')).then(r => { S.pq = { ...(S.pq || {}), ...r }; }).catch(() => { }); }
     // 账户
-    $('#monAcct').innerHTML = Object.values(ov.accounts).map(a => `<div style="margin-bottom:10px"><div class="row"><b>${esc(a.name)}</b><span class="sp"></span><span class="mono">${yuan(a.equity)}</span></div>
+    const privateNote = ov.private_time ? `<div class="hint">${esc(privateStatus(ov.private_time, ov.private_refresh_failed))}</div>` : '';
+    $('#monAcct').innerHTML = privateNote + Object.values(ov.accounts).map(a => `<div style="margin-bottom:10px"><div class="row"><b>${esc(a.name)}</b><span class="sp"></span><span class="mono">${yuan(a.equity)}</span></div>
       <div class="row hint mono"><span>今日 <b class="${cls(a.today_pnl)}">${sgn(a.today_pnl)}</b></span><span>累计 <b class="${cls(a.total_pnl)}">${sgn(a.total_pnl)} (${pct(a.total_pct)})</b></span><span class="sp"></span><span>持仓 ${a.positions.length}</span></div>
       ${a.positions.slice(0, 4).map(p => `<div class="row mono" style="font-size:12px;cursor:pointer" data-c="${p.code}"><span>${esc(p.name)}</span><span class="sp"></span><span class="${cls(p.pnl_pct)}">${pct(p.pnl_pct)}</span><span class="muted">距止损 ${pct(p.to_stop, 1)}</span></div>`).join('')}</div>`).join('<div class="sep"></div>');
     $('#monAcct').querySelectorAll('[data-c]').forEach(r => r.onclick = () => go('anly', r.dataset.c));
@@ -1004,7 +1039,7 @@
         <span class="chip">${P.cfg.mode === 'auto' ? 'AI 自选' : '已锁定'}</span><span class="chip">风格 ${esc(P.cfg.risk)}</span>${P.active ? '' : '<span class="chip d">已暂停</span>'}<span class="sp"></span>
         <select class="in rw" id="plModeSel" style="width:auto;height:24px"><option value="auto" ${P.cfg.mode === 'auto' ? 'selected' : ''}>策略：AI 自选</option>${mo}</select>
         <button class="btn sm rw" id="plToggle">${P.active ? '暂停' : '恢复'}</button></div>
-      ${P.static_time ? `<div class="hint" style="margin-bottom:4px">网页版只读：数据来自电脑或云端代跑最近一次发布（${esc(P.static_time.slice(5, 16))}），改策略、暂停、重新设定请在电脑上或连上电脑后操作</div>` : ''}
+      ${P.static_time ? `<div class="hint" style="margin-bottom:4px">网页版只读。${esc(privateStatus(P.static_time, P.static_refresh_failed))}。改策略、暂停、重新设定请在电脑上或连上电脑后操作</div>` : ''}
       <div class="hint" style="margin-top:4px">${esc(P.reason || 'AI 正在分析持仓和大盘，几秒后刷新就能看到它选的策略…')}${P.updated ? ` <span class="mono">（${esc(P.updated.slice(5, 16))}）</span>` : ''}</div>
       ${pend.length ? `<div class="row hint" style="margin-top:4px"><span class="amber">待成交</span>${pend.map(o => `<span class="chip">${esc(o.name)} ${o.side === 'buy' ? '买' : '卖'} ${o.qty} 股</span>`).join('')}<span>非交易时间下的单，开盘后按 A 股规则自动成交</span></div>` : ''}
       <div class="row hint mono" style="margin-top:6px"><span>计划收益 <b class="${cls(a.total_pct)}">${pct(a.total_pct)}</b></span><span>一直不动 <b class="${cls(b.pct)}">${pct(b.pct)}</b></span>
@@ -1322,7 +1357,7 @@
     const refresh = +(lsGet('aq5_refresh') || 60), rem = !!lsGet('aq5_pw');
     $('#p-set').innerHTML = `<div class="grid">${lookPanel()}
       ${panel('PHONE <small>手机设置 · 只保存在这台手机</small>', `<dl class="kv"><dt>个人数据</dt><dd>${p ? '<b class="down">已解锁</b> · 数据时间 ' + esc(p.time.slice(5, 16)) : '<b class="up">未解锁</b>'}</dd>
-        <dt>连接电脑</dt><dd>${!p ? '解锁后自动尝试' : p.remote ? '<span class="amber">电脑远程已开启，但现在连不上（电脑可能关机或休眠）</span> <button class="btn sm" id="phRe">重试</button>' : '<span class="muted">电脑端没开「手机远程」</span>'}</dd></dl>
+        <dt>连接电脑</dt><dd>${!p ? '解锁后自动尝试' : S.privateSession?.remote ? '<span class="amber">电脑远程已开启，但现在连不上（电脑可能关机或休眠）</span> <button class="btn sm" id="phRe">重试</button>' : '<span class="muted">电脑端没开「手机远程」</span>'}</dd></dl>
         <div class="ticket"><label>自动刷新<select class="in" id="phRef">${[30, 60, 120, 300].map(x => `<option value="${x}" ${x === refresh ? 'selected' : ''}>${x < 60 ? x + ' 秒' : x / 60 + ' 分钟'}</option>`).join('')}</select></label>
           <label>解锁密码<select class="in" id="phRem"><option value="1" ${rem ? 'selected' : ''}>记住（自动解锁）</option><option value="0" ${rem ? '' : 'selected'}>不记住</option></select></label></div>
         <div class="row" style="margin-top:8px"><button class="btn ${p ? '' : 'pri'}" id="phLock">${p ? '锁定并清除密码' : '解锁个人数据'}</button><span class="sp"></span><button class="btn" id="phClear">清除本机缓存</button></div>
@@ -1339,7 +1374,7 @@
     bindLook();
     $('#phRef').onchange = e => { lsSet('aq5_refresh', e.target.value); restartPoll(); toast('已保存'); };
     $('#phRem').onchange = e => { if (e.target.value === '0') lsSet('aq5_pw', null); else if (!S.priv) toast('下次解锁时勾选「记住」即可'); toast('已保存'); };
-    $('#phLock').onclick = () => { if (S.priv) { S.priv = null; lsSet('aq5_pw', null); location.reload(); } else showUnlock(); };
+    $('#phLock').onclick = () => { if (S.priv) { S.priv = null; S.privateSession = null; lsSet('aq5_pw', null); location.reload(); } else showUnlock(); };
     $('#phClear').onclick = () => { if (!confirm('清除这台手机上保存的密码和设置？')) return; ['aq5_pw', 'aq5_refresh', 'aq5_chat'].forEach(k => lsSet(k, null)); location.reload(); };
   }
   async function renderSet() {
@@ -1479,22 +1514,46 @@
   }
 
   // ------------------------------------------------------------------ 公开网页：用密码在浏览器本地解密个人数据
-  async function unlockPrivate(pw) {
-    const r = await fetch('data/private.enc?t=' + Date.now());
+  function privateStatus(time, failed) {
+    return '个人数据时间 ' + time + (failed ? ' · 刷新失败，显示上次快照' : '');
+  }
+  async function refreshPrivate(ov) {
+    const session = S.privateSession, marker = ov.private_pack_sha256 || ov.time;
+    if (!session || !marker || marker === session.marker || ov.time < session.overviewTime) return;
+    if (session.pending) return session.pending;
+    session.overviewTime = ov.time;
+    session.pending = unlockPrivate(session.key, ov.private_pack_sha256).then(priv => {
+      if (S.privateSession !== session) return;
+      if (priv.time < S.priv.time || (!ov.private_pack_sha256 && priv.time < ov.time)) throw new Error('个人快照早于当前发布');
+      S.priv = priv;
+      if (priv.remote) session.remote = priv.remote;  // 云端包不带电脑连接信息，保留本次会话已知的连接
+      session.marker = marker;
+      session.error = false;
+    }).catch(() => {
+      if (S.privateSession === session) session.error = true;
+    }).finally(() => { session.pending = null; });
+    return session.pending;
+  }
+  async function unlockPrivate(key, expectedHash) {
+    const r = await fetch('data/private.enc?t=' + Date.now(),
+      { cache: 'no-store', signal: globalThis.AbortSignal?.timeout?.(15000) });
     if (!r.ok) throw new Error('还没有加密的个人数据：请在电脑端「设置 → 密钥保险箱」设置「手机查看密码」，等 1–2 分钟发布完成再试');
-    if (!window.crypto || !crypto.subtle || typeof DecompressionStream === 'undefined') throw new Error('这个浏览器不支持本地解密，请换用系统自带浏览器或 Chrome（需 https 地址）');
     const buf = new Uint8Array(await r.arrayBuffer());
+    if (expectedHash) {
+      const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', buf));
+      const actualHash = Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('');
+      if (actualHash !== expectedHash) throw new Error('个人数据正在发布，请稍后重试');
+    }
     if (new TextDecoder().decode(buf.slice(0, 5)) !== 'AQ5w1') throw new Error('文件格式不对');
     const salt = buf.slice(5, 21), nonce = buf.slice(21, 37), tag = buf.slice(37, 69), ct = buf.slice(69);
     const cs = crypto.subtle, te = new TextEncoder();
-    const base = await cs.importKey('raw', te.encode(pw), 'PBKDF2', false, ['deriveBits']);
-    const bits = new Uint8Array(await cs.deriveBits({ name: 'PBKDF2', salt, iterations: 200000, hash: 'SHA-256' }, base, 512));
+    const bits = new Uint8Array(await cs.deriveBits({ name: 'PBKDF2', salt, iterations: 200000, hash: 'SHA-256' }, key, 512));
     const hk = k => cs.importKey('raw', k, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
     const ek = await hk(bits.slice(0, 32)), mk = await hk(bits.slice(32));
     const head = te.encode('AQ5w1'), msg = new Uint8Array(head.length + 32 + ct.length);
     msg.set(head, 0); msg.set(salt, 5); msg.set(nonce, 21); msg.set(ct, 37);
     const t2 = new Uint8Array(await cs.sign('HMAC', mk, msg));
-    if (t2.some((b, i) => b !== tag[i])) throw new Error('密码不对');
+    if (t2.some((b, i) => b !== tag[i])) throw Object.assign(new Error('密码不对'), { code: 'PRIVATE_PASSWORD' });
     const n = Math.ceil(ct.length / 32), ks = new Uint8Array(n * 32);
     for (let i = 0; i < n; i += 256) {
       const jobs = [];
@@ -1510,20 +1569,36 @@
   }
   function lsGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
   function lsSet(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch { } }
-  async function doUnlock(pw, remember) {
-    S.priv = await unlockPrivate(pw);
+  function autoUnlock(ov) {
+    const pw = lsGet('aq5_pw');
+    if (pw) doUnlock(pw, false, ov).catch(e => {
+      if (e.code === 'PRIVATE_PASSWORD') lsSet('aq5_pw', null);
+    });
+  }
+  async function doUnlock(pw, remember, overview) {
+    if (S.unlocking) throw new Error('正在解锁，请稍候');
+    if (!window.crypto || !crypto.subtle || typeof DecompressionStream === 'undefined') throw new Error('这个浏览器不支持本地解密，请换用系统自带浏览器或 Chrome（需 https 地址）');
+    S.unlocking = true;
+    try {
+      const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveBits']);
+      const ov = overview || await sj('latest.json');
+      const priv = await unlockPrivate(key, ov.private_pack_sha256);
+      if (!ov.private_pack_sha256 && priv.time < ov.time) throw new Error('个人数据正在发布，请稍后重试');
+      S.privateSession = { key, marker: ov.private_pack_sha256 || ov.time, overviewTime: ov.time, remote: priv.remote };
+      S.priv = priv;
+      if (remember) lsSet('aq5_pw', pw);
+    } finally { S.unlocking = false; }
     document.body.classList.add('unlocked');
-    if (remember) lsSet('aq5_pw', pw);
     syncLook(S.priv.look);
     const b = $('#unlockBtn'); if (b) b.textContent = '已解锁 ' + (S.priv.profile.nickname || '');
     toast('个人数据已解锁（数据时间 ' + S.priv.time.slice(5, 16) + '）' + (S.priv.remote ? '，正在连接电脑…' : ''));
     await connectRemote();
     await poll(); const [p, a] = location.hash.slice(1).split('/'); show(PAGES.includes(p) ? p : 'mon', a);
     clearInterval(S.timers.rc);  // 网页版：每分钟悄悄重连一次电脑，连上就自动切回完整版
-    S.timers.rc = setInterval(async () => { if (!S.remote && S.priv && S.priv.remote && !document.hidden && await connectRemote(true)) { poll(); const [p2, a2] = location.hash.slice(1).split('/'); show(PAGES.includes(p2) ? p2 : 'mon', a2); } }, 60000);
+    S.timers.rc = setInterval(async () => { if (!S.remote && S.priv && !document.hidden && await connectRemote(true)) { poll(); const [p2, a2] = location.hash.slice(1).split('/'); show(PAGES.includes(p2) ? p2 : 'mon', a2); } }, 60000);
   }
   function showUnlock() {
-    if (S.priv) { if (confirm('锁定并清除本机记住的密码？')) { S.priv = null; lsSet('aq5_pw', null); location.reload(); } return; }
+    if (S.priv) { if (confirm('锁定并清除本机记住的密码？')) { S.priv = null; S.privateSession = null; lsSet('aq5_pw', null); location.reload(); } return; }
     const m = document.createElement('div'); m.className = 'modal';
     m.innerHTML = `<div class="box" style="max-width:380px">${panel('UNLOCK <small>解锁个人数据</small>', `<p class="hint">输入电脑端设置的「手机查看密码」。自选股、我的模拟盘只在你的浏览器里解密，GitHub 上只有密文。</p>
       <div class="ticket"><label class="full">密码<input class="in" id="ulP" type="password" autocomplete="current-password"></label>
@@ -1605,8 +1680,6 @@
     if (STATIC && !$('#unlockBtn')) {
       const b = document.createElement('button'); b.className = 'btn sm pri'; b.id = 'unlockBtn'; b.textContent = '解锁个人';
       b.onclick = showUnlock; $('.status').prepend(b);
-      const pw = lsGet('aq5_pw');
-      if (pw) doUnlock(pw, true).catch(() => lsSet('aq5_pw', null));
     }
     if (!STATIC) {
       const me = await fetch('/api/auth/me').then(r => r.json()).catch(() => ({}));
