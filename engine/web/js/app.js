@@ -1626,7 +1626,17 @@
     try {
       const d = await api('diag/sources'); box.className = '';
       const rows = Object.entries(d.stats || {});
+      const tdx = d.tdx || {}, tdxStates = { ready: '可用', connected: '已连接', ok: '最近取数成功',
+        idle: '等待报价', disabled: '已关闭', unavailable: '不可用', cooldown: '等待重试',
+        fallback: '使用其它行情源', error: '请求失败', mock: '模拟行情模式',
+        waiting_metadata: '等待同日证券资料', no_eligible_quotes: '数据未通过校验，使用现有源',
+        warming_or_timeout: '连接预热或超时，使用现有源' };
+      const tdxState = tdx.enabled === false ? '已关闭' : tdx.available === false ? '组件不可用，使用其它行情源'
+        : tdxStates[tdx.state] || '等待报价';
       box.innerHTML = `<table class="t"><tr><th class="l">数据源</th><th>成功</th><th>失败</th><th>最近成功</th><th class="l">最近错误</th></tr>${rows.map(([k, v]) => `<tr><td class="l">${esc(k)}</td><td class="down">${v.ok}</td><td class="${v.fail ? 'up' : 'muted'}">${v.fail}</td><td class="muted">${esc(v.last_ok || '--')}</td><td class="l nm hint" title="${esc(v.last_err || '')}">${esc((v.last_err || '').slice(0, 40))}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">本次启动后还没有请求</td></tr>'}</table>
+        <div class="sep"></div><div class="hint"><b>通达信</b> · ${esc(tdxState)} · 组件${tdx.available === true ? '可用' : tdx.available === false ? '不可用' : '状态未知'}</div>
+        <div class="hint">最近成功：${esc(tdx.last_ok || '--')} · 失败次数：${num(tdx.failures || 0, 0)}${tdx.last_error ? ' · 最近一次通达信请求失败' : ''}${Number.isFinite(tdx.fallbacks) ? ' · 回退次数：' + num(tdx.fallbacks, 0) : ''}</div>
+        <div class="hint">通达信与现有行情源共同取数，失败时使用其它源。行情日期或时间无法核实时保留未知；接收时间不等于行情更新时间。</div>
         <div class="hint" style="margin-top:6px">全市场快照：${esc((d.snap || {}).source || '--')} ${esc((d.snap || {}).time || '')}${Object.keys(d.blocked || {}).length ? ' · 暂停中：' + Object.entries(d.blocked).map(([h, t]) => `${h}（${Math.round(t / 60)}分钟）`).join('、') : ''}</div>
         <div class="hint">K线：腾讯 → 同花顺 → 东财 → 新浪；周/月K：腾讯 → 同花顺；分钟K：腾讯 → 新浪；分时：腾讯 → 同花顺；主力资金：东财 → 新浪。个股页会用腾讯和同花顺交叉校验收盘价。</div>
         <div id="srcProbeR"></div>`;
@@ -1718,7 +1728,7 @@
         <p class="hint">打开后点浏览器菜单「添加到主屏幕」，就像 App 一样使用。若打不开，请在 Windows 防火墙允许 Python 访问专用网络。</p>`, { cls: 'c4' })}
       ${panel('CLOUD <small>云端代跑 · 电脑关机时 GitHub 接着跑</small>', '<div id="cloudBox" class="loading">载入</div>', { cls: 'c6' })}
       ${panel('REMOTE <small>手机远程连电脑 · 外网也能下单/改设置</small>', '<div id="rmBox" class="loading">载入</div>', { cls: 'c6' })}
-      ${panel('SOURCES <small>数据源 · 腾讯 / 同花顺 / 新浪 / 东财 自动切换</small>', '<div id="srcBox" class="loading">载入</div>', { cls: 'c6', right: '<button class="btn sm" id="srcProbe">全面体检</button>' })}
+      ${panel('SOURCES <small>数据源 · 通达信 / 腾讯 / 同花顺 / 新浪 / 东财</small>', `<div class="row"><label class="hint"><input type="checkbox" id="tdxEnabled" ${(s.net || {}).tdx_enabled !== false ? 'checked' : ''}> 启用通达信补充行情</label><span class="sp"></span><button class="btn sm" id="tdxSave">保存行情设置</button></div><div id="srcBox" class="loading">载入</div>`, { cls: 'c6', right: '<button class="btn sm" id="srcProbe">全面体检</button>' })}
       ${panel('PICK <small>自动选股</small>', `<div class="ticket">${f('sT1', '竞价选股时间', s.pick.times[0])}${f('sT2', '尾盘选股时间', s.pick.times[1])}
         ${f('sMin', 'A级门槛（分）', s.pick.min_score, '≥门槛且有可靠信号为A级，差8分内为B级')}${f('sMax', '每次取前 N 名', s.pick.top_n || 10)}
         ${f('sAmt', '最低成交额(亿)', s.pick.min_amount_yi)}${f('sPos', 'AI盘单票仓位', s.pick.position_pct, '0.2=20%')}
@@ -1749,7 +1759,7 @@
       try {
         await api('settings', { pick: { times: [v('sT1'), v('sT2')], min_score: n('sMin'), top_n: n('sMax'), min_amount_yi: n('sAmt'), position_pct: n('sPos'), auto_trade: $('#sAuto').checked },
           risk: { stop_atr: n('rAtr'), max_stop_pct: n('rMax'), rr_1: n('rR1'), rr_2: n('rR2'), max_hold_days: n('rDays') }, init_cash: n('sCash'),
-          indices: list('lIdx'), overseas: list('lOv'), publish: { remote: v('pRemote'), branch: v('pBranch'), interval_min: n('pInt'), enabled: $('#pOn').checked, push: $('#pPush').checked }, notify: { pushplus_token: v('nPP'), serverchan_key: v('nSC'), enabled: $('#nOn').checked } });
+          indices: list('lIdx'), overseas: list('lOv'), net: { tdx_enabled: $('#tdxEnabled').checked }, publish: { remote: v('pRemote'), branch: v('pBranch'), interval_min: n('pInt'), enabled: $('#pOn').checked, push: $('#pPush').checked }, notify: { pushplus_token: v('nPP'), serverchan_key: v('nSC'), enabled: $('#nOn').checked } });
         toast('已保存'); S.settings = null; poll();
       } catch (e) { toast(e.message, 1); }
     };
@@ -1757,6 +1767,12 @@
     const aiCfg = () => api('ai/config', { provider: $('#aiProv').value, model: $('#aiModel').value.trim(), base_url: $('#aiBase').value.trim(), format: $('#aiFmt').value, daily_limit: +$('#aiLimit').value || 300, auto_review: $('#aiAutoRev').checked, auto_sentiment: $('#aiAutoSen').checked, auto_explain: $('#aiAutoExp').checked, auto_brief: $('#aiAutoBrief').checked });
     loadRemote(); loadSources(); loadCloud();
     $('#srcProbe').onclick = () => loadSources(true);
+    $('#tdxSave').onclick = async () => {
+      const button = $('#tdxSave'); button.disabled = true;
+      try { await api('settings', { net: { tdx_enabled: $('#tdxEnabled').checked } });
+        S.settings = null; toast('行情设置已保存'); await loadSources();
+      } catch (e) { toast(e.message, 1); } finally { button.disabled = false; }
+    };
     $('#aiProv').onchange = () => { const p = ((S.aiStatus && S.aiStatus.presets) || {})[$('#aiProv').value]; if (p) { $('#aiModel').value = p.model; $('#aiBase').value = ''; $('#aiFmt').value = ''; } $('#aiModelSel').style.display = 'none'; };
     $('#aiPull').onclick = async () => {
       const b = $('#aiPull'); b.disabled = true; b.textContent = '…';

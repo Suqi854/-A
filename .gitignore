@@ -1,5 +1,6 @@
 engine/data/
 engine/data_demo/
+engine/temp/
 __pycache__/
 *.pyc
 *.tmp

@@ -1,0 +1,4 @@
+# Linux x86_64 CPython 3.10+ ABI3 wheel; personal research quote adapter.
+# Kept optional for normal duty; the diagnostic job requires it to succeed.
+eltdx==3.3.5 \
+    --hash=sha256:108bdf709d981339627f36b444725b18aba447a28a872440304639fa2da97731

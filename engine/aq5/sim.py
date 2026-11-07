@@ -163,6 +163,8 @@ def try_fill(oid: int, qd: dict | None = None) -> str:
     qd = qd or market.quotes([o["code"]]).get(o["code"])
     if not qd or not qd.get("price") or qd.get("suspended"):
         return "停牌或无行情，暂不成交"
+    if not market.tdx_trade_eligible(qd):
+        return "通达信行情已过期或缺少有效涨跌停信息，暂不成交"
     px = qd["price"]
     slip = load_settings()["slippage"]
     up, dn = qd.get("up_limit"), qd.get("dn_limit")

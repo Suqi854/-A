@@ -1,6 +1,6 @@
-"""行情数据层：腾讯（报价/日K/分时）+ 东方财富（全市场快照/主力资金）。
+"""行情数据层：腾讯/通达信（报价）+ 多源K线及东方财富快照/资金。
 
-所有接口均为公开网页接口；失败时自动重试/切换，并把日K缓存进 SQLite。
+通达信为可选的个人研究补充源；失败时自动切换，并把日K缓存进 SQLite。
 AQ5_MOCK=1 时使用内置模拟行情（离线测试、演示用）。
 """
 from __future__ import annotations
@@ -17,13 +17,81 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
-from . import db
+from . import db, tdx
 from .config import MOCK, load_settings, now, today
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36"
 _pool = ThreadPoolExecutor(max_workers=8)
 _cache: dict[str, tuple[float, object]] = {}
 _cache_lock = threading.Lock()
+_TENCENT_META: dict[str, dict] = {}
+
+
+def _remember_tencent(rows):
+    received = now().isoformat(timespec="milliseconds")
+    rows = {code: {**q, "source": "腾讯", "received_at": received, "time_basis": "tencent_quote_timestamp"}
+            for code, q in rows.items()}
+    with _cache_lock:
+        _TENCENT_META.update({code: dict(q) for code, q in rows.items() if tdx.supported(code)})
+        if len(_TENCENT_META) > 6000:
+            _TENCENT_META.clear()
+            _TENCENT_META.update({code: dict(q) for code, q in rows.items() if tdx.supported(code)})
+    return rows
+
+
+def tdx_status():
+    enabled = load_settings().get("net", {}).get("tdx_enabled", True) is True and not MOCK
+    info = tdx.status()
+    return {**info, "enabled": enabled, "state": info["state"] if enabled else ("mock" if MOCK else "disabled")}
+
+
+def tdx_trade_eligible(q, asof=None):
+    """Recheck an optional-source quote at use time, including after cache reuse."""
+    if q.get("source") != "通达信":
+        return True
+    try:
+        stamp = datetime.fromisoformat(q["quote_time"])
+        received = datetime.fromisoformat(q["received_at"])
+        t = asof or now()
+        return (q.get("time_basis") == tdx.TIME_BASIS and stamp.tzinfo is not None and received.tzinfo is not None
+                and stamp <= received <= t and tdx.fresh(stamp, t)
+                and q["time"] == stamp.strftime("%Y%m%d%H%M%S")
+                and 0 < q["dn_limit"] <= q["price"] <= q["up_limit"]
+                and q.get("metadata_source") == "腾讯（同交易日证券名称及涨跌停价）")
+    except (ValueError, TypeError, KeyError):
+        return False
+
+
+def _tdx_quotes(codes):
+    if MOCK or load_settings().get("net", {}).get("tdx_enabled", True) is not True:
+        return {}
+    with _cache_lock:
+        metadata = {c: dict(_TENCENT_META[c]) for c in codes if c in _TENCENT_META}
+    rows = tdx.quotes(codes, metadata)
+    selected = {c: q for c, q in rows.items() if c in codes and tdx_trade_eligible(q)}
+    if selected:
+        _stat("通达信", True)
+    return selected
+
+
+def _quote_cached(key, ttl, load):
+    rows = _cached(key, ttl, load)
+    enabled = load_settings().get("net", {}).get("tdx_enabled", True) is True
+    invalid = [c for c, q in rows.items()
+               if not tdx_trade_eligible(q) or (q.get("source") == "通达信" and not enabled)]
+    if invalid:
+        with _cache_lock:
+            _cache.pop(key, None)
+        # Other symbols may have spent time in HTTP retries. Refresh only the
+        # now-expired symbols directly, avoiding recursive multi-source reloads.
+        rows = {c: q for c, q in rows.items() if c not in invalid}
+        for i in range(0, len(invalid), 60):
+            try:
+                raw = http_get("https://qt.gtimg.cn/q=" + ",".join(invalid[i:i+60]), timeout=2, retries=0)
+                rows.update(_remember_tencent(_parse_tencent(raw.decode("gbk", "ignore"))))
+            except RuntimeError:
+                pass
+    return {c: q for c, q in rows.items() if tdx_trade_eligible(q)}
 
 
 def _cached(key: str, ttl: float, fn):
@@ -212,12 +280,16 @@ def quotes(codes: list[str]) -> dict:
                 return {}
         for part in _pool.map(one, batches):
             res.update(part)
+        res = _remember_tencent(res)
+        missing = [c for c in codes if c not in res]
+        if missing:
+            res.update(_tdx_quotes(missing))
         return res
-    return _cached(key, 2.0, load)
+    return _quote_cached(key, 2.0, load)
 
 
 def quotes_fast(codes: list[str]) -> dict:
-    """高频专用：走腾讯另一个行情域名 sqt.gtimg.cn，和全市场扫描分开限流，缓存仅 1 秒。"""
+    """优先有效的通达信报价，缺失/过期/不可用时逐代码回退腾讯；缓存 1 秒。"""
     codes = [norm_code(c) for c in codes if c]
     if not codes:
         return {}
@@ -228,16 +300,23 @@ def quotes_fast(codes: list[str]) -> dict:
     def load():
         res = {}
         for i in range(0, len(codes), 60):
+            res.update(_tdx_quotes(codes[i:i + 60]))
+        missing = [c for c in codes if c not in res]
+        for i in range(0, len(missing), 60):
             try:
-                res.update(_parse_tencent(http_get("https://sqt.gtimg.cn/q=" + ",".join(codes[i:i + 60]), retries=1)
-                                          .decode("gbk", "ignore")))
+                batch = _remember_tencent(_parse_tencent(http_get("https://sqt.gtimg.cn/q=" + ",".join(missing[i:i + 60]), retries=1)
+                                                         .decode("gbk", "ignore")))
+                res.update(batch)
+                absent = [c for c in missing[i:i + 60] if c not in batch]
+                if absent:
+                    res.update(quotes(absent))
             except RuntimeError:
-                res.update(quotes(codes[i:i + 60]))
+                res.update(quotes(missing[i:i + 60]))
         t = time.time()
         for k, v in res.items():
             _LAST[k] = (t, v)
         return res
-    return _cached(key, 1.0, load)
+    return _quote_cached(key, 1.0, load)
 
 
 _LAST: dict[str, tuple] = {}
@@ -249,7 +328,8 @@ def quotes_recent(codes: list[str], max_age: float = 3.0) -> dict:
     out, miss = {}, []
     for c in codes:
         x = _LAST.get(c)
-        if x and t - x[0] <= max_age:
+        if (x and t - x[0] <= max_age and tdx_trade_eligible(x[1])
+                and (x[1].get("source") != "通达信" or load_settings().get("net", {}).get("tdx_enabled", True) is True)):
             out[c] = x[1]
         else:
             miss.append(c)

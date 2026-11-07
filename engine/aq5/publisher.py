@@ -200,7 +200,8 @@ def _quote_assets(d: Path, runs: list[dict], ov: dict) -> None:
     previous = prev.get("quotes") or {}
     fields = ("code", "price", "pct", "date", "time", "source")
     public = {p["code"] for r in runs for p in r.get("items", []) + r.get("cand_list", [])}
-    quotes = {code: {k: previous[code].get(k) for k in fields}
+    quotes = {code: {**{k: previous[code].get(k) for k in fields},
+                     **{k: previous[code][k] for k in ("received_at", "time_basis") if k in previous[code]}}
               for code in public if code in previous and valid(previous[code])}
     try:
         snap = market.snapshot() if public else []
@@ -223,6 +224,7 @@ def _quote_assets(d: Path, runs: list[dict], ov: dict) -> None:
     for code, row, source in incoming:
         if not valid(row):
             continue
+        source = row.get("source") or source
         observed = _quote_stamp(row)
         old_observed = _quote_stamp(quotes.get(code, {}))
         if old_observed and (not observed or observed < old_observed):
@@ -236,7 +238,8 @@ def _quote_assets(d: Path, runs: list[dict], ov: dict) -> None:
                         "pct": change if type(change) in (int, float) and math.isfinite(change) else None,
                         "date": observed[:10] if observed else None,
                         "time": observed[:19].replace("T", " ") if observed else None,
-                        "source": source}
+                        "source": source,
+                        **{k: row[k] for k in ("received_at", "time_basis") if k in row}}
     changed = any(previous.get(code) != q for code, q in quotes.items())
     _w(path, {"time": now().strftime("%Y-%m-%d %H:%M:%S") if changed else prev.get("time"), "quotes": quotes})
 

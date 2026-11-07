@@ -21,7 +21,7 @@ import time
 from collections import deque
 
 from . import db, market
-from .config import load_settings, now, today
+from .config import MOCK, load_settings, now, today
 
 STATE = {"last_scan": None, "last_tick": None, "ticks": 0, "candidates": [], "shorts": [], "log": [], "latency_ms": None,
          "orders_today": 0, "scanning": False}
@@ -103,9 +103,16 @@ def scan() -> None:
 
 
 # ----------------------------------------------------------------------------- 特征
+_buf_sources: dict[str, str] = {}
+
+
 def _feat(code: str, q: dict) -> dict:
     t = time.time()
     b = _buf.setdefault(code, deque(maxlen=400))
+    source = q.get("source") or ("模拟" if MOCK else "腾讯")
+    if _buf_sources.get(code) not in (None, source):
+        b.clear()
+    _buf_sources[code] = source
     b.append((t, q["price"], q.get("outer") or 0, q.get("inner") or 0))
 
     def back(sec):

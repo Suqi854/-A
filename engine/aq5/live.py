@@ -72,7 +72,8 @@ def public_snapshot(quotes=None):
     recent = picker.runs(1)
     picks = recent[0].get('items', []) if recent else []
     def compact(q):
-        return {k: q.get(k) for k in ('code', 'name', 'price', 'pct', 'time', 'chg', 'amount')}
+        return {**{k: q.get(k) for k in ('code', 'name', 'price', 'pct', 'time', 'chg', 'amount')},
+                **{k: q[k] for k in ('source', 'received_at', 'time_basis') if k in q}}
     pqs = {p['code']: compact(qs[p['code']]) for p in picks[:40] if p['code'] in qs}
     indices = [compact(qs[c]) for c in s['indices'][:12] if c in qs]
     times = [q.get('time') for q in list(pqs.values()) + indices if q.get('time')]

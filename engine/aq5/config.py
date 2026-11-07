@@ -65,7 +65,7 @@ DEFAULTS = {
     # 个人数据加密备份到 GitHub 私有仓库（备份密码在本机保险箱）
     "backup": {"enabled": True, "remote": "", "time": "15:50", "keep_days": 7},
     "remote": {"enabled": False, "origins": ["https://suqi854.github.io"]},
-    "net": {"direct_cn": True},
+    "net": {"direct_cn": True, "tdx_enabled": True},
     "security": {"local_no_login": True},
     # AI 接口（Key 在本机保险箱）：provider 可选 DeepSeek / OpenAI / 通义千问 / Kimi / Claude / 自定义
     "ai": {"provider": "DeepSeek", "base_url": "", "model": "", "format": "", "daily_limit": 300,

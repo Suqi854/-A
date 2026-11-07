@@ -84,13 +84,15 @@ def api_overview(_q):
     last_run = runs[0] if runs else None
     pick_codes = {p["code"] for p in last_run["items"]} if last_run else set()
     pick_quotes = {
-        q["code"]: {"price": q["price"], "pct": q.get("pct")}
+        q["code"]: {"price": q["price"], "pct": q.get("pct"),
+                    **{k: q[k] for k in ("time", "source", "received_at", "time_basis") if k in q}}
         for q in snap if q["code"] in pick_codes and (q.get("price") or 0) > 0
     }
     # A failed or incomplete all-market snapshot must not erase selected-stock quotes.
     for code, quote in market.quotes_recent(sorted(pick_codes)).items():
         if (quote.get("price") or 0) > 0:
-            pick_quotes[code] = {k: quote.get(k) for k in ("code", "price", "pct", "time")}
+            pick_quotes[code] = {**{k: quote.get(k) for k in ("code", "price", "pct", "time")},
+                                 **{k: quote[k] for k in ("source", "received_at", "time_basis") if k in quote}}
     accts = {k: sim.view(k, light=True) for k in sim.existing()}
     for a in accts.values():
         a["positions"] = [{k: p[k] for k in ("code", "name", "qty", "price", "pct", "pnl", "pnl_pct", "to_stop",
@@ -339,7 +341,8 @@ GET = {"/api/ai/status": api_ai_status, "/api/ai/comment": api_ai_comment, "/api
        "/api/watch/signal": lambda q: {"latest": signals.latest(q["code"][0]), "phases": signals.phases(q["code"][0])},
        "/api/track": lambda q: tracking.track(int((q.get("days") or [20])[0])),
        "/api/t/stats": lambda q: {"stats": signals.t_stats(), "recent": db.q("SELECT * FROM t_signals ORDER BY id DESC LIMIT 60")},
-       "/api/diag/sources": lambda q: {"stats": market.SRC_STATS, "blocked": market.host_status(), "snap": market.SNAP_INFO},
+       "/api/diag/sources": lambda q: {"stats": market.SRC_STATS, "blocked": market.host_status(),
+                                       "snap": market.SNAP_INFO, "tdx": market.tdx_status()},
        "/api/diag/net": lambda q: {"probes": market.probe(q.get("raw", ["0"])[0] == "1",
                                                      {"1": True, "0": False}.get(q.get("direct", [""])[0]),
                                                      q.get("url"), int((q.get("n") or [600])[0])), "blocked": market.host_status(),
@@ -397,6 +400,9 @@ def p_boot(_b):
 
 def p_settings(b):
     b = dict(b)
+    net = b.get("net")
+    if isinstance(net, dict) and "tdx_enabled" in net and type(net["tdx_enabled"]) is not bool:
+        raise ValueError("通达信开关必须为 true 或 false")
     n = b.get("notify")
     if isinstance(n, dict):  # token 改存本机保险箱
         vault.set_many({k: n.pop(k) for k in ("pushplus_token", "serverchan_key") if n.get(k) and n.get(k) != "已设置"})

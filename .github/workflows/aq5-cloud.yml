@@ -27,11 +27,12 @@ permissions:
   actions: write   # 值守接力：触发下一次 workflow_dispatch
 
 concurrency:
-  group: aq5-cloud
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'diag' && 'aq5-cloud-diag' || 'aq5-cloud' }}
   cancel-in-progress: false
 
 jobs:
   cloud:
+    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'diag'
     runs-on: ubuntu-latest
     timeout-minutes: 358
     steps:
@@ -42,6 +43,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: 安装可选通达信 Linux 依赖
+        continue-on-error: true
+        env:
+          PIP_CACHE_DIR: ${{ runner.temp }}/pip-cache
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m pip install --disable-pip-version-check --no-cache-dir --only-binary=:all: --no-deps --require-hashes -r engine/requirements-cloud.txt
       - name: Git 身份
         env:
           GH_TOKEN: ${{ github.token }}
@@ -60,6 +67,45 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           PYTHONUNBUFFERED: "1"
         run: |
-          if [ "${{ inputs.mode }}" = "diag" ]; then python -m aq5.cloud diag; exit 0; fi
           if [ -z "$AQ5_KEY" ]; then echo "还没有设置 Secret AQ5_KEY（手机查看密码），跳过"; exit 0; fi
           python -m aq5.cloud
+
+  diagnostics:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'diag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    permissions:
+      contents: read
+    env:
+      AQ5_MOCK: "0"
+      AQ5_DATA: ${{ runner.temp }}/aq5-source-diagnostics
+      PIP_CACHE_DIR: ${{ runner.temp }}/pip-cache
+      ELTDX_DATA_DIR: ${{ runner.temp }}/eltdx
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装并校验 Linux 行情依赖
+        run: python -m pip install --disable-pip-version-check --no-cache-dir --only-binary=:all: --no-deps --require-hashes -r engine/requirements-cloud.txt
+      - name: 离线接入回归
+        working-directory: engine
+        run: |
+          python -B tests/test_tdx.py
+          python -B tests/test_source_diagnostics.py
+      - name: 公开行情源诊断（不读取账户状态）
+        working-directory: engine
+        run: python -B -m aq5.source_diagnostics --output "$RUNNER_TEMP/aq5-source-diagnostics.json"
+      - name: 保存诊断证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aq5-source-diagnostics-${{ github.sha }}
+          path: ${{ runner.temp }}/aq5-source-diagnostics.json
+          if-no-files-found: warn
+          retention-days: 7

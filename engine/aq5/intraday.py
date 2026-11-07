@@ -462,8 +462,16 @@ def _transition(conn, new, previous):
 def observe(code, quote, minutes, market_context, asof=None, *, source=None) -> dict:
     """Ingest and evaluate all versions against one snapshot; publish latest and append transitions."""
     t = _asof(asof)
+    quote = quote or {}
+    received = _stamp(quote["received_at"]) if "received_at" in quote else t
+    source = quote.get("source") or source
     with db.tx() as conn:
-        _ingest(conn, code, quote, t, source)
+        if received is None:
+            _coverage(conn, code, "missing", gap="quote_receipt_time_invalid")
+        elif received > t:
+            _coverage(conn, code, "stale", gap="quote_receipt_after_evaluation")
+        else:
+            _ingest(conn, code, quote, received, source)
         oldest = _iso(t - timedelta(minutes=3))
         samples = [json.loads(r["payload"]) for r in conn.execute(
             "SELECT payload FROM intraday_samples WHERE code=? AND quote_time>=? ORDER BY quote_time",
@@ -593,10 +601,11 @@ def runtime_tick(codes, *, return_quotes=False) -> dict:
     with _inputs_lock:
         context = dict(_backdrop["data"])
         feeds = {code: dict(_bars.get(code, {})) for code in codes}
-    source = "模拟" if MOCK else "腾讯"
-    signals = {code: observe(code, quotes.get(code), feeds[code], context, t, source=source) for code in codes}
+    quotes = {code: {**q, "source": "模拟" if MOCK else q.get("source") or "腾讯",
+                     "received_at": q.get("received_at", _iso(t))} for code, q in quotes.items()}
+    signals = {code: observe(code, quotes.get(code), feeds[code], context, t,
+                             source=(quotes.get(code) or {}).get("source")) for code in codes}
     if return_quotes:
-        return {"signals": signals, "quotes": {code: {**q, "source": source, "received_at": _iso(t)}
-                                                for code, q in quotes.items()}, "asof": _iso(t)}
+        return {"signals": signals, "quotes": quotes, "asof": _iso(t)}
     return signals
 
