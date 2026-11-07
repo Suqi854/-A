@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const { gzipSync } = require('node:zlib');
 
 const source = readFileSync(path.join(__dirname, '../web/js/app.js'), 'utf8');
-const functions = ['sj', 'staticApi', 'updateMon', 'poll', 'privateStatus', 'refreshPrivate', 'unlockPrivate', 'autoUnlock', 'loadResearchPreview', 'researchRun'];
+const functions = ['sj', 'staticApi', 'updateMon', 'poll', 'privateStatus', 'refreshPrivate', 'unlockPrivate', 'autoUnlock', 'loadResearchPreview', 'researchRun', 'staticQuotes', 'quoteValues'];
 const app = functions.map(name => source.match(new RegExp(`^  (?:async )?function ${name}\\(.*?^  }`, 'ms'))?.[0] || '').join('\n');
 const live = source.slice(source.indexOf('  const LIVE_AGE ='), source.indexOf('  // ================================================================== F1 监控'));
 const formatters = source.slice(source.indexOf('  const esc ='), source.indexOf('  const S ='));
@@ -19,7 +19,7 @@ const overview = (time = oldTime) => ({ time, watchlist: [], indices: [], overse
   accounts: { ai: account('AI自动盘') }, last_run: { items: [{ code: 'sh600000', price: 10, stop: 9, target1: 11 }] },
   pick_quotes: { sh600000: { price: 10.5, pct: 0 } } });
 
-function harness({ snapshot = overview(), encrypted, isStatic = true, relay, preview } = {}) {
+function harness({ snapshot = overview(), encrypted, isStatic = true, relay, preview, quotes, analysis } = {}) {
   const nodes = new Map();
   const $ = selector => {
     if (!nodes.has(selector)) nodes.set(selector, { children: [], dataset: {}, querySelectorAll: () => [] });
@@ -43,11 +43,13 @@ function harness({ snapshot = overview(), encrypted, isStatic = true, relay, pre
     lsSet: (_, value) => { remembered = value; },
     panel(title, body) { return title + body; },
     header() {}, async renderSim() { simRenders++; },
-    api(route) { requests.push(route); return context.staticApi(route); },
+    api(route) { requests.push(route); return !isStatic && route.startsWith('quotes?') ? Promise.resolve({}) : context.staticApi(route); },
     async fetch(url) {
       requests.push(url);
       if (url.startsWith('data/latest.json')) return Response.json(snapshot);
       if (url.startsWith('data/private.enc')) return new Response(encrypted);
+      if (url.startsWith('data/quotes.json') && quotes) return Response.json(quotes);
+      if (url.startsWith('data/analysis/') && analysis) return Response.json(analysis);
       if (url.startsWith('data/research.json')) return Response.json(preview);
       if (relay && url.startsWith(relayURL)) return relay(url);
       throw new Error('Unexpected request');
@@ -263,3 +265,58 @@ test('research preview displays missing quote time without creating a new run', 
   assert.equal(h.$('#researchPreview').hidden, true);
 });
 
+
+
+test('static pick quotes use published prices, preserve zero change, and filter requested codes', async () => {
+  const h = harness();
+  const qs = await h.context.staticApi('quotes?codes=sh600000,sz000001');
+  assert.equal(qs.sh600000.price, 10.5);
+  assert.equal(qs.sh600000.pct, 0);
+  assert.equal(qs.sz000001, undefined);
+});
+
+test('public quote snapshot supports historical picks and never replaces a newer quote with an older one', async () => {
+  const snapshot = overview();
+  snapshot.pick_quotes.sh600000.time = '20261028100200';
+  const h = harness({ snapshot, quotes: { quotes: {
+    sh600000: { price: 9, time: '20261028100100' },
+    sz000001: { price: 11, pct: -1, time: '20261028100100' },
+    sz000002: { price: 0 },
+  } } });
+  const qs = await h.context.staticApi('quotes?codes=sh600000,sz000001,sz000002');
+  assert.equal(qs.sh600000.price, 10.5);
+  assert.equal(qs.sz000001.price, 11);
+  assert.equal(qs.sz000002, undefined);
+  await h.context.staticApi('quotes?codes=sz000001');
+  assert.equal(h.requests.filter(x => x.startsWith('data/quotes.json')).length, 1);
+});
+
+test('relative return uses only an actual quote and a positive selection price', () => {
+  const h = harness();
+  assert.equal(h.context.quoteValues({ price: 10.5, pct: 0, time: '20261028100200' }, 10).relative.toFixed(1), '5.0');
+  assert.equal(h.context.quoteValues({ price: 10.5 }, 0).relative, null);
+  assert.equal(h.context.quoteValues(null, 10).price, null);
+  assert.equal(h.context.quoteValues({ price: -1 }, 10).relative, null);
+});
+
+test('published analysis and daily candles work with no direct browser market provider', async () => {
+  const h = harness({ analysis: { code: 'sh600000', score: 55, kline: [{ date: '2026-10-28', close: 10.5 }] } });
+  assert.equal((await h.context.staticApi('analyze?code=sh600000')).score, 55);
+  assert.equal((await h.context.staticApi('kline?code=sh600000')).rows.length, 1);
+});
+
+
+test('undated, future, or pre-selection quotes cannot create relative returns', () => {
+  const h = harness();
+  assert.equal(h.context.quoteValues({ price: 10.5 }, 10, oldTime).relative, null);
+  assert.equal(h.context.quoteValues({ price: 10.5, time: '20261028100200' }, 10, '').relative, null);
+  assert.equal(h.context.quoteValues({ price: 10.5, time: '20261028095900' }, 10, oldTime).relative, null);
+  assert.equal(h.context.quoteValues({ price: 10.5, time: '20261029100200' }, 10, oldTime).relative, null);
+});
+
+test('an incomplete private analysis cannot hide published daily candles', async () => {
+  const h = harness({ analysis: { code: 'sh600000', score: 55, kline: [{ date: '2026-10-28', close: 10.5 }] } });
+  h.S.priv = { analysis: { sh600000: { code: 'sh600000', kline: [] } } };
+  assert.equal((await h.context.staticApi('analyze?code=sh600000')).score, 55);
+  assert.equal((await h.context.staticApi('kline?code=sh600000')).rows.length, 1);
+});

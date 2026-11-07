@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import shutil
 import subprocess
 import threading
 import time
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from . import db, market, picker, sim, vault
 from .config import DATA, WEB, load_settings, now, today
@@ -65,8 +67,10 @@ def public_events(limit=100) -> list[dict]:
     return rows
 
 
-def _analysis_codes() -> list[str]:
-    codes = [r["code"] for r in db.q("SELECT DISTINCT code FROM picks WHERE date >= date(?, '-7 day')", (today(),))]
+def _analysis_codes(prioritize: list[str]) -> list[str]:
+    codes = list(prioritize)
+    codes += [r["code"] for r in db.q("SELECT code FROM picks WHERE date >= date(?, '-7 day') "
+                                      "GROUP BY code ORDER BY MAX(date) DESC, code", (today(),))]
     codes += [r["code"] for r in db.q("SELECT code FROM positions WHERE account='ai'")]
     seen, out = set(), []
     for c in codes:
@@ -76,17 +80,180 @@ def _analysis_codes() -> list[str]:
     return out[:80]
 
 
-def export(full: bool = True) -> dict:
-    """写出所有公开文件到 repo_dir。full=False 只更新行情总览（盘中高频）。"""
+def _read_public(path: Path, default):
+    try:
+        value = json.loads(path.read_text("utf-8"))
+    except (OSError, ValueError):
+        return default
+    return value if isinstance(value, type(default)) else default
+
+
+def _run_assets(d: Path, latest: dict | None, full: bool) -> list[dict]:
+    from . import ai
+
+    runs_file = d / "runs.json"
+    prior = _read_public(runs_file, [])
+    if full:
+        runs, refresh = picker.runs(60), True
+        update = runs
+    else:
+        runs, refresh = prior, False
+        update = []
+        if latest:
+            old = next((r for r in runs if r["id"] == latest["id"]), None)
+            if old is None or "cand_list" not in old:
+                update = [dict(latest)]
+                runs = sorted(update + [r for r in runs if r["id"] != latest["id"]],
+                              key=lambda r: (r["date"], r["id"]), reverse=True)[:60]
+                refresh = True
+    for r in update:
+        r["cand_list"] = picker.top_candidates(r["id"], 30)
+        n = ai.latest("run", str(r["id"]))
+        r["ai"] = {"content": n["content"], "created": n["created"]} if n else None
+    if refresh:
+        _w(runs_file, runs)
+    by_day = {}
+    for r in runs if full else runs[:1]:
+        by_day.setdefault(r["date"], [])
+    for day in by_day:
+        path = d / "picks" / f"{day}.json"
+        old_day = _read_public(path, [])
+        merged = {r["id"]: r for r in old_day} if not full else {}
+        merged.update((r["id"], r) for r in runs if r["date"] == day)
+        rows = sorted(merged.values(), key=lambda r: r["id"], reverse=True)
+        if rows != old_day:
+            _w(path, rows)
+    first = runs[0] if runs else None
+    latest_file = d / "picks" / "latest.json"
+    if full or first is not None and _read_public(latest_file, {}) != first:
+        _w(latest_file, first)
+    return runs
+
+
+def _usable_analysis_kline(rows, minimum_date: str = "") -> bool:
+    return isinstance(rows, list) and len(rows) >= 30 and all(
+        isinstance(r, dict) and isinstance(r.get("date"), str) and len(r["date"]) == 10
+        and type(r.get("close")) in (int, float) and math.isfinite(r["close"]) and r["close"] > 0
+        for r in rows[-30:]
+    ) and rows[-1]["date"] >= minimum_date
+
+
+def _analysis_assets(d: Path, latest: dict | None, full: bool, runs: list[dict]) -> int:
     from .analysis import analyze
+
+    path = d / "analysis" / "index.json"
+    current = {x["code"]: x for x in _read_public(path, [])}
+    allowed = {r["code"] for r in db.q("SELECT DISTINCT code FROM picks UNION SELECT code FROM positions WHERE account='ai' "
+                                       "UNION SELECT code FROM trades WHERE account='ai'")}
+    allowed.update(item["code"] for r in runs for item in r.get("items", []))
+    indexed = {code: item for code, item in current.items()
+               if code in allowed and (path.parent / f"{code}.json").is_file()}
+    latest_codes = list(dict.fromkeys(p["code"] for p in latest["items"])) if latest else []
+    codes = _analysis_codes(latest_codes) if full else latest_codes[:80]
+    cutoff = f"{latest['date']} {latest.get('finished') or latest.get('started') or '00:00:00'}" if latest else ""
+    generated = 0
+    for code in codes:
+        asset = d / "analysis" / f"{code}.json"
+        entry = indexed.get(code, {})
+        latest_date = latest["date"] if code in latest_codes else ""
+        if not full and asset.is_file() and (entry.get("pick_run_id") == latest["id"] or entry.get("time", "") >= cutoff):
+            if _usable_analysis_kline(_read_public(asset, {}).get("kline"), latest_date):
+                continue
+        try:
+            a = analyze(code)
+        except (RuntimeError, ValueError, KeyError, TypeError) as e:
+            db.event("publish", f"导出 {code} 分析失败", str(e), "warn")
+            continue
+        try:
+            rows = market.kline_with_live(code, 250)
+        except (RuntimeError, ValueError):
+            rows = []
+        if not _usable_analysis_kline(rows, latest_date):
+            db.event("publish", f"暂未补齐 {code} 分析", "缺少足够的新日期日K，保留已有分析并等待下次发布重试。", "warn")
+            continue
+        a["kline"] = rows
+        a["analysis_time"] = now().strftime("%Y-%m-%d %H:%M:%S")
+        _w(asset, a)
+        entry = {"code": code, "name": a.get("name"), "score": a["score"], "rating": a["rating"],
+                 "time": a["analysis_time"]}
+        if code in latest_codes:
+            entry["pick_run_id"] = latest["id"]
+        indexed[code] = entry
+        generated += 1
+    for stale in path.parent.glob("*.json"):
+        if stale != path and stale.stem not in allowed:
+            stale.unlink()
+    if not path.exists() or indexed != current:
+        _w(path, sorted(indexed.values(), key=lambda x: x["time"], reverse=True))
+    return generated
+
+
+def _quote_assets(d: Path, runs: list[dict], ov: dict) -> None:
+    from .research import _quote_stamp
+
+    def valid(row):
+        px = row.get("price")
+        return type(px) in (int, float) and math.isfinite(px) and px > 0
+
+    path = d / "quotes.json"
+    prev = _read_public(path, {})
+    previous = prev.get("quotes") or {}
+    fields = ("code", "price", "pct", "date", "time", "source")
+    public = {p["code"] for r in runs for p in r.get("items", []) + r.get("cand_list", [])}
+    quotes = {code: {k: previous[code].get(k) for k in fields}
+              for code in public if code in previous and valid(previous[code])}
+    try:
+        snap = market.snapshot() if public else []
+    except RuntimeError:
+        snap = []
+    primary = market.SNAP_INFO.get("source")
+    incoming = [(q["code"], q, "腾讯" if _quote_stamp(q) else "东财快照" if primary == "eastmoney" else "市场快照")
+                for q in snap if q["code"] in public]
+    incoming += [(code, q, "腾讯" if _quote_stamp(q) else "市场快照")
+                 for code, q in ov.get("pick_quotes", {}).items() if code in public]
+    recent = runs[0] if runs else {}
+    covered = {code for code, q, _ in incoming if valid(q) and
+               (_quote_stamp(q) or not _quote_stamp(quotes.get(code, {})))}
+    missing = sorted({p["code"] for p in recent.get("items", []) + recent.get("cand_list", [])} - covered)
+    if missing:
+        try:
+            incoming += [(code, q, "腾讯") for code, q in market.quotes(missing[:40]).items() if code in public]
+        except (RuntimeError, ValueError):
+            pass
+    for code, row, source in incoming:
+        if not valid(row):
+            continue
+        observed = _quote_stamp(row)
+        old_observed = _quote_stamp(quotes.get(code, {}))
+        if old_observed and (not observed or observed < old_observed):
+            continue
+        if market.MOCK:
+            source = "模拟行情"
+        elif not observed:
+            source += "（行情时间未提供）"
+        change = row.get("pct")
+        quotes[code] = {"code": code, "price": row["price"],
+                        "pct": change if type(change) in (int, float) and math.isfinite(change) else None,
+                        "date": observed[:10] if observed else None,
+                        "time": observed[:19].replace("T", " ") if observed else None,
+                        "source": source}
+    changed = any(previous.get(code) != q for code, q in quotes.items())
+    _w(path, {"time": now().strftime("%Y-%m-%d %H:%M:%S") if changed else prev.get("time"), "quotes": quotes})
+
+
+def export(full: bool = True) -> dict:
+    """盘中增量同步最新选股、公开报价及缺失分析；空目录先建立公开文件。"""
     from .server import api_learn, api_strategies
     root = repo_dir()
     d = root / "data"
     d.mkdir(parents=True, exist_ok=True)
+    full = full or not (d / "runs.json").is_file()
     _site(root)
     files = []
     ov = public_overview()
-    files.append("latest.json")
+    files += ["latest.json", "runs.json", "quotes.json"]
+    runs = _run_assets(d, ov.get("last_run"), full)
+    _quote_assets(d, runs, ov)
     try:
         from . import marketstate
         _w(d / "market.json", marketstate.state())
@@ -100,19 +267,6 @@ def export(full: bool = True) -> dict:
     if full:
         from . import research
         _w(d / "research.json", research.preview())
-        runs = picker.runs(60)
-        from . import ai
-        for r in runs:
-            r["cand_list"] = picker.top_candidates(r["id"], 30)
-            n = ai.latest("run", str(r["id"]))
-            r["ai"] = {"content": n["content"], "created": n["created"]} if n else None
-        _w(d / "runs.json", runs)
-        by_day = {}
-        for r in runs:
-            by_day.setdefault(r["date"], []).append(r)
-        for day, rs in by_day.items():
-            _w(d / "picks" / f"{day}.json", rs)
-        _w(d / "picks" / "latest.json", runs[0] if runs else None)
         _w(d / "ai.json", _ai_view())
         _w(d / "learn.json", api_learn({}))
         _w(d / "strategies.json", api_strategies({}))
@@ -135,31 +289,10 @@ def export(full: bool = True) -> dict:
                                  "risk": s["risk"], "emotions": sim.EMOTIONS, "static": True,
                                  "ai": {"provider": s.get("ai", {}).get("provider"), "model": s.get("ai", {}).get("model")},
                                  "look": s.get("look") or {}})  # 外观（皮肤等）各端同步，不含个人数据
-        idx = []
-        for code in _analysis_codes():
-            try:
-                a = analyze(code)
-                a["kline"] = market.kline_with_live(code, 250)
-                _w(d / "analysis" / f"{code}.json", a)
-                idx.append({"code": code, "name": a.get("name"), "score": a["score"], "rating": a["rating"],
-                            "time": now().strftime("%Y-%m-%d %H:%M")})
-            except (RuntimeError, ValueError) as e:
-                db.event("publish", f"导出 {code} 分析失败", str(e), "warn")
-        old = {}
-        p = d / "analysis" / "index.json"
-        if p.exists():
-            try:
-                old = {x["code"]: x for x in json.loads(p.read_text("utf-8"))}
-            except (ValueError, KeyError):
-                old = {}
-        allowed = {r["code"] for r in db.q("SELECT DISTINCT code FROM picks UNION SELECT code FROM positions WHERE account='ai' UNION SELECT code FROM trades WHERE account='ai'")}
-        old = {code: item for code, item in old.items() if code in allowed}
-        old.update({x["code"]: x for x in idx})
-        for stale in (d / "analysis").glob("*.json"):
-            if stale.stem != "index" and stale.stem not in allowed:
-                stale.unlink()
-        _w(p, sorted(old.values(), key=lambda x: x["time"], reverse=True))
-        files += ["runs.json", "ai.json", "learn.json", f"analysis/*.json({len(idx)})"]
+        files += ["ai.json", "learn.json"]
+    generated = _analysis_assets(d, ov.get("last_run"), full, runs)
+    if generated:
+        files.append(f"analysis/*.json({generated})")
     files += _private_pack(d, full)
     private_file = d / "private.enc"
     ov["private_pack_sha256"] = hashlib.sha256(private_file.read_bytes()).hexdigest() if private_file.exists() else None
@@ -304,6 +437,34 @@ def _git(args: list[str], cwd: Path, timeout=90) -> tuple[int, str]:
         return 124, "git 超时"
 
 
+def _inherit_public_branch(root: Path, cfg: dict) -> None:
+    """In a fresh publish directory, preserve the public artifacts already on the data branch."""
+    remote, branch = cfg.get("remote"), cfg["branch"]
+    if not cfg.get("push", True) or not remote:
+        return
+    root.mkdir(parents=True, exist_ok=True)
+    if (root / ".git").exists():
+        rc, _ = _git(["rev-parse", "--verify", "HEAD"], root)
+        if rc:
+            raise RuntimeError("本地公开发布基线不完整，停止本次推送")
+        return
+    if any(root.iterdir()):
+        return
+    rc, _ = _git(["ls-remote", "--exit-code", "--heads", "--", remote, f"refs/heads/{branch}"], root)
+    if rc == 2:  # The branch does not exist, so there is no previous publication to preserve.
+        return
+    if rc:
+        raise RuntimeError("无法确认远端公开发布基线，停止本次推送")
+    with TemporaryDirectory(dir=root.parent, prefix="public-baseline-") as staging:
+        clone = Path(staging) / "data-branch"
+        rc, _ = _git(["clone", "--depth=1", "--single-branch", "--branch", branch, "--", remote, str(clone)],
+                     Path(staging))
+        if rc:
+            raise RuntimeError("无法继承远端公开发布基线，停止本次推送")
+        root.rmdir()
+        clone.rename(root)
+
+
 def commit_push() -> dict:
     cfg = load_settings()["publish"]
     root = repo_dir()
@@ -345,6 +506,7 @@ def publish(full: bool = True, force: bool = False) -> dict:
         STATE["running"] = True
     try:
         t0 = time.time()
+        _inherit_public_branch(repo_dir(), cfg)
         ex = export(full)
         res = commit_push()
         STATE["last"] = now().strftime("%Y-%m-%d %H:%M:%S")

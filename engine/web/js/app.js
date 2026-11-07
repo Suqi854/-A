@@ -48,12 +48,16 @@
       case 'picks/candidates': { const r = (await sj('runs.json')).find(x => String(x.id) === q.get('run')); return r ? r.cand_list || [] : []; }
       case 'picks/state': return { running: false };
       case 'research/preview': return sj('research.json');
-      case 'analyze': if (S.priv && S.priv.analysis[code]) return S.priv.analysis[code];
-        try { return await sj('analysis/' + code + '.json'); } catch { const k = await Lite.klines(code, 'day', 320); S.liteCache = { code, rows: k.rows }; return Lite.analyze(code, k.rows, k.qt); }
+      case 'analyze': if (S.priv?.analysis?.[code]?.kline?.length) return S.priv.analysis[code];
+        try { return await sj('analysis/' + code + '.json'); } catch {
+          try { const k = await Lite.klines(code, 'day', 320); S.liteCache = { code, rows: k.rows }; return Lite.analyze(code, k.rows, k.qt); }
+          catch { throw new Error('此股的云端分析尚未就绪，浏览器行情源也暂不可用，请稍后刷新。'); }
+        }
       case 'kline': { const per = q.get('period') || 'day';
         if (per !== 'day') { const k = /^m(\d+)$/.test(per) ? await Lite.minutes(code, +per.slice(1), 320) : await Lite.klines(code, per, 320); return { code, rows: k.rows, source: k.source }; }
-        const x = (S.priv && S.priv.analysis[code]) || await sj('analysis/' + code + '.json').catch(() => null);
-        if (x && x.kline) return { code, rows: x.kline }; if (S.liteCache && S.liteCache.code === code) return { code, rows: S.liteCache.rows, source: '腾讯（浏览器直连）' };
+        const privateAnalysis = S.priv?.analysis?.[code];
+        const x = privateAnalysis?.kline?.length ? privateAnalysis : await sj('analysis/' + code + '.json').catch(() => null);
+        if (x?.kline?.length) return { code, rows: x.kline, source: '云端发布 · 日K截至 ' + (x.kline.at(-1)?.date || '未知') }; if (S.liteCache && S.liteCache.code === code) return { code, rows: S.liteCache.rows, source: '腾讯（浏览器直连）' };
         const k = await Lite.klines(code, 'day', 320); return { code, rows: k.rows, source: k.source }; }
       case 'intraday': return sj('intraday/' + code + '.json').catch(() => Lite.intraday(code));
       case 'sim': { const priv = privateForDisplay(); return q.get('acct') === 'me' && priv ? priv.me : sj('ai.json'); }
@@ -83,12 +87,39 @@
         const pos = S.priv && S.priv.me && (S.priv.me.positions || []).find(p => p.code === code);
         const d = await Lite.plan(code, a, pos || null); return { latest: d, phases: { [d.phase]: d }, lite: true }; }
       case 'sector': throw new Error('公开版只有板块排行，成分股请在电脑端或局域网完整版查看');
-      case 'quotes': return {};
+      case 'quotes': return staticQuotes((q.get('codes') || '').split(',').map(normCode));
       case 'search': { const v = (q.get('q') || '').toLowerCase(); try { const r = await Lite.search(v); if (r.length) return r; } catch { }
         const idx = [...(S.priv ? Object.values(S.priv.analysis).map(x => ({ code: x.code, name: x.name })) : []), ...await sj('analysis/index.json').catch(() => [])];
         return idx.filter(x => x.code.includes(v) || (x.name || '').toLowerCase().includes(v)).slice(0, 12); }
       default: throw new Error('公开只读版不支持此功能，请在电脑端使用');
     }
+  }
+  async function staticQuotes(codes) {
+    const minute = Math.floor(Date.now() / 60000);
+    if (S.publicQuotes?.minute !== minute) {
+      const data = await sj('quotes.json').catch(() => null);
+      S.publicQuotes = { minute, quotes: data?.quotes || S.publicQuotes?.quotes || {} };
+    }
+    const ov = S.ov || await sj('latest.json').catch(() => ({}));
+    const result = {};
+    const sources = [S.publicQuotes.quotes, ov.pick_quotes || {},
+      Object.fromEntries((privateForDisplay()?.watchlist || []).map(x => [x.code, x])), activePublic()?.pick_quotes || {}];
+    for (const source of sources) for (const code of codes) {
+      const quote = source[code];
+      if (!quote || !Number.isFinite(Number(quote.price)) || Number(quote.price) <= 0) continue;
+      const stamp = sourceStamp(quote.quote_time || quote.time), prior = sourceStamp(result[code]?.quote_time || result[code]?.time);
+      if (!result[code] || !Number.isFinite(prior) || (Number.isFinite(stamp) && stamp >= prior)) result[code] = quote;
+    }
+    return result;
+  }
+  function quoteValues(q, base, selectedAt) {
+    const price = q && Number.isFinite(Number(q.price)) && Number(q.price) > 0 ? Number(q.price) : null;
+    const stamp = sourceStamp(q?.quote_time || q?.time), selected = sourceStamp(selectedAt);
+    const comparable = Number.isFinite(stamp) && stamp <= Date.now() + 5000 && (selectedAt === undefined || Number.isFinite(selected) && stamp >= selected);
+    return { price, change: price === null ? null : q.pct,
+      relative: price !== null && comparable && Number(base) > 0 ? (price / Number(base) - 1) * 100 : null,
+      note: price === null ? '暂缺可用报价' : '行情时点 ' + sourceTime(q.quote_time || q.time) +
+        (q.source ? ' · ' + q.source : '') + (!comparable ? ' · 较选出暂无可比报价' : '') };
   }
   async function remoteApi(path, body) {
     const opt = { headers: { Authorization: 'Bearer ' + S.remote.token } };
@@ -829,8 +860,8 @@
     const cards = r.items.map(p => {
       const pl = { stop: p.stop, target1: p.target1, target2: p.target2 };
       return `<div class="pick${foldPicks ? ' fold' : ''}"><div class="hd" data-tg>${p.tier ? `<span class="tier t${p.tier}" title="${TIER[p.tier]}">${p.tier}</span><span class="muted mono" style="margin-right:6px">#${p.rank}</span>` : ''}<span class="nm">${esc(p.name)}</span><span class="cd">${short(p.code)}</span></div>
-        <div class="score"><b>${num(p.score, 1)}</b><small>综合评分 · ${p.prob_src === 'model' ? '3日毛收益&gt;1%估计' : '旧版／经验分'} ${probability(p.prob)}${p.eligible === false ? ' · 仅观察' : ''}</small></div>
-        <div class="row mono livep" data-lp="${p.code}" data-base="${p.price}" style="margin-top:6px"><span class="muted">现价</span><b class="lpx">--</b><b class="lpc">--</b><span class="muted">较选出</span><b class="lps">--</b></div>
+        <div class="score"><b>${num(p.score, 1)}</b></div>
+        <div class="row mono livep" data-lp="${p.code}" data-base="${p.price}" data-selected="${esc(r.finished ? r.date + ' ' + r.finished : '')}" style="margin-top:6px"><span class="muted">现价</span><b class="lpx">--</b><b class="lpc">--</b><span class="muted">较选出</span><b class="lps">--</b></div><div class="hint mono lpt" style="margin-top:3px">等待报价</div><div class="hint pk-score-note" style="font-size:10px">综合评分 · ${p.prob_src === 'model' ? '3日毛收益&gt;1%估计' : '旧版／经验分'} ${probability(p.prob)}${p.eligible === false ? ' · 仅观察' : ''}</div>
         <div class="pk-foot row"><span class="chip ${p.industry ? 'c' : ''} pk-mini">${esc(p.industry || (p.strategies[0] || {}).name || '')}</span><span class="sp"></span><button class="btn sm pk-tg" data-tg>${foldPicks ? '展开说明 ▾' : '收起 ▴'}</button><button class="btn sm pri" data-a="${p.code}">分析 ›</button></div>
         <div class="pk-body"><div class="row" style="margin-top:6px">${p.industry ? `<span class="chip c">${esc(p.industry)}</span>` : ''}${p.strategies.slice(0, 3).map(s => `<span class="chip a">${esc(s.name)}</span>`).join('')}</div>
         <div class="plan"><div><div class="l">选出价</div><div class="v">${num(p.price)}</div></div>
@@ -859,9 +890,10 @@
     const rg2 = $('#runAiGo'); if (rg2) rg2.onclick = async () => { rg2.disabled = true; $('#runAi').innerHTML = '<div class="loading">AI 解读中</div>'; try { showRunAi(await api('ai/run', { id: r.id })); } catch (e) { $('#runAi').innerHTML = `<div class="up">${esc(e.message)}</div>`; } rg2.disabled = false; };
     const upd = async () => { const els = $$('#runDetail [data-lp]'); if (!els.length) return; try {
         const qs = await api('quotes?codes=' + els.map(e => e.dataset.lp).join(','));
-        els.forEach(e => { const q = qs[e.dataset.lp]; if (!q) return; const sc = (q.price / +e.dataset.base - 1) * 100;
-          $('.lpx', e).textContent = num(q.price); $('.lpx', e).className = 'lpx ' + cls(q.pct); $('.lpc', e).textContent = pct(q.pct); $('.lpc', e).className = 'lpc ' + cls(q.pct);
-          $('.lps', e).textContent = pct(sc); $('.lps', e).className = 'lps ' + cls(sc); }); } catch { } };
+        els.forEach(e => { const v = quoteValues(qs[e.dataset.lp], e.dataset.base, e.dataset.selected);
+          $('.lpx', e).textContent = num(v.price); $('.lpx', e).className = 'lpx ' + cls(v.change); $('.lpc', e).textContent = pct(v.change); $('.lpc', e).className = 'lpc ' + cls(v.change);
+          $('.lps', e).textContent = pct(v.relative); $('.lps', e).className = 'lps ' + cls(v.relative);
+          e.nextElementSibling.textContent = v.note; }); } catch { } };
     upd(); clearInterval(S.timers.lp); S.timers.lp = setInterval(() => { if (S.page !== 'pick') return clearInterval(S.timers.lp); if (!document.hidden) upd(); }, 5000);
     const c = await api('picks/candidates?run=' + r.id);
     const names = { breakout: '突破', pullback: '回踩', volume_start: '放量', oversold: '超跌', macd_cross: '金叉', accumulate: '吸筹', tail_strong: '尾强', auction_strong: '竞强' };
@@ -997,7 +1029,7 @@
     $('#p-anly').innerHTML = `<div class="grid">
       <div class="panel c12"><div class="qhead"><button class="btn sm" onclick="location.hash='anly'" title="返回自选列表">‹ 自选</button><span class="nm">${esc(a.name)}</span><span class="mono muted">${a.code.toUpperCase()}</span>
         <span class="px ${cls(q.pct)}" id="aPx">${num(q.price)}</span><span class="ch ${cls(q.pct)}" id="aCh">${sgn(q.chg)} ${pct(q.pct)}</span><span class="sp"></span>
-        <button class="btn rw" id="aWl">${inWl ? '已自选' : '+ 自选'}</button><button class="btn buy rw" id="aBuy">模拟买入</button><button class="btn sell rw" id="aSell">模拟卖出</button><button class="btn rw" id="aBt">回测</button></div>
+        <span class="hint mono" id="aQuoteTime">行情时点 ${esc(sourceTime(q.quote_time || q.time))}</span><button class="btn rw" id="aWl">${inWl ? '已自选' : '+ 自选'}</button><button class="btn buy rw" id="aBuy">模拟买入</button><button class="btn sell rw" id="aSell">模拟卖出</button><button class="btn rw" id="aBt">回测</button></div>
         <div class="qgrid"><div><span>今开</span>${num(q.open)}</div><div><span>最高</span><b class="up">${num(q.high)}</b></div><div><span>最低</span><b class="down">${num(q.low)}</b></div><div><span>昨收</span>${num(q.prev)}</div>
           <div><span>量比</span>${num(q.vr)}</div><div><span>换手</span>${num(q.turnover)}%</div><div><span>成交额</span>${money(q.amount)}</div><div><span>主力净额</span><b class="${cls(q.main_net)}">${money(q.main_net)}</b></div>
           <div><span>市盈</span>${num(q.pe, 1)}</div><div><span>市净</span>${num(q.pb)}</div><div><span>总市值</span>${num(q.mcap, 0)}亿</div><div><span>流通</span>${num(q.fmcap, 0)}亿</div>
@@ -1084,8 +1116,9 @@
     clearInterval(S.timers.anly);
     S.timers.anly = setInterval(async () => {
       if (S.page !== 'anly' || S.anly !== a) return clearInterval(S.timers.anly);
-      try { const r = await api('quotes?codes=' + a.code); const x = r[a.code]; if (!x) return; drawOB(x);
-        $('#aPx').textContent = num(x.price); $('#aPx').className = 'px ' + cls(x.pct); $('#aCh').textContent = `${sgn(x.chg)} ${pct(x.pct)}`; $('#aCh').className = 'ch ' + cls(x.pct);
+      try { const r = await api('quotes?codes=' + a.code); const x = r[a.code]; if (!x) return; if (x.bids?.length) drawOB(x);
+        $('#aQuoteTime').textContent = '行情时点 ' + sourceTime(x.quote_time || x.time);
+        $('#aPx').textContent = num(x.price); $('#aPx').className = 'px ' + cls(x.pct); $('#aCh').textContent = x.chg == null ? pct(x.pct) : `${sgn(x.chg)} ${pct(x.pct)}`; $('#aCh').className = 'ch ' + cls(x.pct);
         if (S.ichart && S.ov && S.ov.phase === 'trading') S.ichart.setData(await api('intraday?code=' + a.code));
       } catch { }
     }, 5000);
