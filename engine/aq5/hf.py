@@ -127,6 +127,8 @@ def _feat(code: str, q: dict) -> dict:
 
 # ----------------------------------------------------------------------------- 主循环
 def tick() -> dict:
+    if not load_settings().get("strategy_v2", {}).get("legacy_auto", False):
+        return {"status": "shadow_v2", "reason": "新做T使用独立模拟，旧自动盘停止开新信号"}
     from . import sim
     c = cfg()
     if time.time() - _scan["t"] > 600 and not STATE["scanning"]:

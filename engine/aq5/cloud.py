@@ -32,7 +32,7 @@ from .config import DATA, DB_PATH, SETTINGS_PATH, load_settings, now, save_setti
 
 CLOUD = os.environ.get("AQ5_CLOUD") == "1"
 BRANCH = "state"
-EXCLUDE = {"klines", "kline_meta", "fundflow", "news", "auth_user", "auth_session", "sqlite_sequence"}
+EXCLUDE = {"intraday_samples", "klines", "kline_meta", "fundflow", "news", "auth_user", "auth_session", "sqlite_sequence"}
 STATE = {"role": "cloud" if CLOUD else "pc", "last_up": None, "last_pull": None, "error": None, "waiting": False,
          "remote": None}
 _lock = threading.Lock()
@@ -120,8 +120,8 @@ def pack() -> bytes:
     key = _key()
     if not key:
         raise ValueError("没有设置「手机查看密码」，无法加密云端状态")
-    tmp = Path(tempfile.mkdtemp()) / "s.db"
-    src = sqlite3.connect(DB_PATH, timeout=30)
+    tmp = Path(tempfile.mkdtemp(prefix="cloud-state-", dir=DATA)) / "s.db"
+    src = sqlite3.connect(DB_PATH.resolve().as_uri() + "?mode=ro", uri=True, timeout=30)
     dst = sqlite3.connect(tmp)
     try:
         src.backup(dst)
@@ -142,11 +142,13 @@ def pack() -> bytes:
 
 
 def unpack(blob: bytes, take_settings: bool) -> dict:
+    from . import live
+    live.init()
     key = _key()
     if not key:
         raise ValueError("缺少解密口令（AQ5_KEY / 手机查看密码）")
     d = json.loads(vault.unseal(blob, key))
-    tmp = Path(tempfile.mkdtemp()) / "s.db"
+    tmp = Path(tempfile.mkdtemp(prefix="cloud-state-", dir=DATA)) / "s.db"
     tmp.write_bytes(gzip.decompress(base64.b64decode(d["db"])))
     n = 0
     try:
@@ -180,6 +182,12 @@ def _git(args, cwd, timeout=120):
 
 
 def upload(active: bool, final: bool = False) -> dict:
+    def failed(reason):
+        STATE["error"] = reason
+        return {"ok": False, "error": reason}
+
+    if final and (active or not db.writes_frozen()):
+        return failed("最终状态只能从已冻结的账本上传")
     cfg = _cfg()
     if not cfg["remote"] or not _key():
         return {"ok": False, "error": "未配置发布仓库或手机查看密码"}
@@ -187,24 +195,28 @@ def upload(active: bool, final: bool = False) -> dict:
         root = DATA / "state_repo"
         root.mkdir(exist_ok=True)
         if not (root / ".git").exists():
-            _git(["init", "-q"], root)
-            _git(["checkout", "-q", "-b", BRANCH], root)
-            _git(["config", "user.name", "aq5-state"], root)
-            _git(["config", "user.email", "aq5-state@users.noreply.github.com"], root)
+            setup = (["init", "-q"], ["checkout", "-q", "-b", BRANCH], ["config", "user.name", "aq5-state"],
+                     ["config", "user.email", "aq5-state@users.noreply.github.com"])
+            if any(_git(step, root)[0] for step in setup):
+                return failed("状态仓库初始化失败")
         rc, remotes = _git(["remote"], root)
-        _git(["remote", "add" if "origin" not in remotes.split() else "set-url", "origin", cfg["remote"]], root)
+        verb = "set-url" if "origin" in remotes.split() else "add"
+        if rc or _git(["remote", verb, "origin", cfg["remote"]], root)[0]:
+            return failed("状态仓库远端设置失败")
         ts = now().strftime("%Y-%m-%d %H:%M:%S")
         (root / "state.bin").write_bytes(pack())
         meta = {"owner": STATE["role"], "active": bool(active), "heartbeat": ts, "updated": ts,
                 "note": "A量化云端交接状态（state.bin 已加密）。请勿手工修改。"}
         (root / "cloud.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), "utf-8")
-        _git(["add", "-A"], root)
+        if _git(["add", "-A"], root)[0]:
+            return failed("状态文件暂存失败")
         has_head = _git(["rev-parse", "--verify", "HEAD"], root)[0] == 0
-        _git(["commit", "-q", "--amend", "-m", f"state {ts}"] if has_head else ["commit", "-q", "-m", f"state {ts}"], root)
-        code, out = _git(["push", "-q", "--force", "origin", f"HEAD:{BRANCH}"], root, timeout=180)
+        commit = ["commit", "-q", "--amend"] if has_head else ["commit", "-q"]
+        if _git(commit + ["-m", f"state {ts}"], root)[0]:
+            return failed("状态提交失败")
+        code, _ = _git(["push", "-q", "--force", "origin", f"HEAD:{BRANCH}"], root, timeout=180)
         if code:
-            STATE["error"] = out[-300:]
-            return {"ok": False, "error": out[-300:]}
+            return failed("状态推送未确认")
         STATE["last_up"] = ts
         STATE["error"] = None
         if not CLOUD:
@@ -213,6 +225,17 @@ def upload(active: bool, final: bool = False) -> dict:
 
 
 # ----------------------------------------------------------------------------- 电脑端：启动交接 + 定时上传
+def _unfinished(meta) -> bool:
+    return bool(meta and meta.get("owner") == "cloud"
+                and (meta.get("active") is not False or not meta.get("updated")))
+
+
+def _reconcile_error(reason: str, waiting: bool = False) -> dict:
+    STATE.update(error=reason, waiting=waiting)
+    db.event("system", "云端交接未确认", reason, "warn")
+    return {"error": reason, "waiting": waiting}
+
+
 def reconcile(max_wait: int = 330) -> dict:
     """电脑启动时调用（在调度器、高频引擎启动之前）。"""
     cfg = _cfg()
@@ -221,38 +244,40 @@ def reconcile(max_wait: int = 330) -> dict:
     try:
         meta = remote_meta()
         STATE["remote"] = meta
+        observed_unfinished = _unfinished(meta)
         t0 = time.time()
-        while meta and meta.get("owner") == "cloud" and meta.get("active") and _age(meta.get("heartbeat")) < 420 \
-                and time.time() - t0 < max_wait:
+        while _unfinished(meta) and _age(meta.get("heartbeat")) < 420 and time.time() - t0 < max_wait:
             STATE["waiting"] = True
             db.event("system", "云端正在代跑，等它交接…", "最多约 5 分钟", "info")
             time.sleep(20)
             meta = remote_meta()
             STATE["remote"] = meta
-        STATE["waiting"] = False
+        confirmed_final = bool(meta and meta.get("owner") == "cloud" and not _unfinished(meta))
+        if _unfinished(meta) or (observed_unfinished and not confirmed_final):
+            return _reconcile_error("云端最终状态尚未确认，需等待交接成功或人工核验后恢复。", waiting=True)
         res = {"pulled": False}
-        if meta and meta.get("owner") == "cloud" and (meta.get("updated") or "") > (cfg["last_sync"] or ""):
+        if confirmed_final and (meta.get("updated") or "") > (cfg["last_sync"] or ""):
             blob = _gh_raw("state.bin")
-            if blob:
-                local = DATA / "backups"
-                local.mkdir(exist_ok=True)
-                from .backup import db_snapshot
-                try:
-                    db_snapshot()
-                except Exception:  # noqa: BLE001
-                    pass
-                r = unpack(blob, take_settings=False)
-                save_settings({"cloud": {"last_sync": meta.get("updated")}})
-                STATE["last_pull"] = now().strftime("%Y-%m-%d %H:%M:%S")
-                db.event("system", "已接回云端代跑的数据", f"云端最后状态 {meta.get('updated')}，导入 {r['tables']} 张表", "good")
-                res = {"pulled": True, **r}
-        upload(active=False)
+            confirmed_meta = remote_meta()
+            STATE["remote"] = confirmed_meta
+            if not blob or confirmed_meta != meta:
+                return _reconcile_error("云端状态缺失或读取期间已变化，未接管。", waiting=True)
+            from .backup import db_snapshot
+            try:
+                db_snapshot()
+            except Exception:  # noqa: BLE001
+                pass
+            r = unpack(blob, take_settings=False)
+            save_settings({"cloud": {"last_sync": meta.get("updated")}})
+            STATE["last_pull"] = now().strftime("%Y-%m-%d %H:%M:%S")
+            db.event("system", "已接回云端代跑的数据", f"云端最后状态 {meta.get('updated')}，导入 {r['tables']} 张表", "good")
+            res = {"pulled": True, **r}
+        if not upload(active=False).get("ok"):
+            return _reconcile_error("电脑接管状态未能发布，已暂停自动任务。")
+        STATE.update(waiting=False, error=None)
         return res
     except Exception as e:  # noqa: BLE001
-        STATE["error"] = str(e)[:200]
-        STATE["waiting"] = False
-        db.event("system", "云端交接失败", str(e)[:300], "warn")
-        return {"error": str(e)}
+        return _reconcile_error(f"云端交接读取或导入失败（{type(e).__name__}）。")
 
 
 def uploader() -> None:
@@ -341,6 +366,7 @@ def run_cloud(max_minutes: int = 340) -> int:
     except Exception as e:  # noqa: BLE001
         print("交易日判断失败，按交易日处理：", e, flush=True)
     t0, last_up, misses, active, reason = time.time(), 0.0, 0, False, "到时"
+    next_reason = None
     while True:
         hm = now().hour * 100 + now().minute
         if hm >= GUARD_END:
@@ -348,20 +374,25 @@ def run_cloud(max_minutes: int = 340) -> int:
             break
         if time.time() - t0 > max_minutes * 60:
             reason = "单次运行接近 6 小时上限"
-            dispatch_next(reason)
+            next_reason = reason
             break
         alive = pc_alive()
         misses = 0 if alive else misses + 1
         if not active:
             if misses >= OFFLINE_CONFIRM:
-                _take_over(sim, hf, scheduler)
+                try:
+                    _take_over(sim, hf, scheduler)
+                except Exception as e:  # noqa: BLE001
+                    STATE["error"] = "云端接管未确认"
+                    print(f"云端接管未确认（{type(e).__name__}），未开启自动任务。", flush=True)
+                    return 1
                 active, last_up = True, time.time()
             elif misses == 0 and int(time.time() - t0) % 1800 < 60:
                 print(now().strftime("%H:%M"), "电脑在线，云端待命", flush=True)
         else:
             if alive:
                 reason = "电脑上线，交还给电脑"
-                dispatch_next("交还后继续值守")
+                next_reason = "交还后继续值守"
                 break
             if time.time() - last_up > 300:
                 last_up = time.time()
@@ -369,18 +400,36 @@ def run_cloud(max_minutes: int = 340) -> int:
                 print(now().strftime("%H:%M"), "状态已上传" if res.get("ok") else res, flush=True)
         time.sleep(60)
     if active:
+        from . import live
+        live.stop()
         db.event("system", f"云端代跑结束（{reason}）", "", "info")
-        res = upload(active=False, final=True)
-        print("结束：", reason, res, flush=True)
+        db.freeze_writes()
+        try:
+            res = upload(active=False, final=True)
+        except Exception as e:  # noqa: BLE001
+            STATE["error"] = "云端最终状态上传异常"
+            print(f"云端最终状态未确认（{type(e).__name__}），交接失败。", flush=True)
+            return 1
+        if not res.get("ok"):
+            STATE["error"] = "云端最终状态推送未确认"
+            print("云端最终状态推送未确认，交接失败。", flush=True)
+            return 1
+        print("云端最终状态已上传，交接完成。", reason, flush=True)
     else:
         print("值守结束：", reason, "（期间电脑一直在线，云端没有交易）", flush=True)
+    if next_reason:
+        dispatch_next(next_reason)
     return 0
 
 
 def _take_over(sim, hf, scheduler) -> None:
     """电脑确认离线：导入电脑最后上传的状态，开始交易和发布。"""
+    meta = remote_meta()
+    if not meta or _unfinished(meta):
+        raise RuntimeError("上次云端状态未完成交接")
     blob = _gh_raw("state.bin")
-    meta = remote_meta() or {}
+    if not blob or remote_meta() != meta:
+        raise RuntimeError("远端状态缺失或已变化")
     r = unpack(blob, take_settings=True)
     print(now().strftime("%H:%M"), f"电脑离线，云端接手。导入状态：{meta.get('owner')} {meta.get('updated')}，{r['tables']} 张表", flush=True)
     save_settings({"remote": {"enabled": False}, "backup": {"enabled": False}})  # 云端：不开隧道、不推私有备份；发布网页照常
@@ -390,7 +439,8 @@ def _take_over(sim, hf, scheduler) -> None:
     vault.set_many(sec)
     sim.ensure_accounts()
     db.event("system", "云端代跑开始", "电脑离线超过 3 分钟，GitHub 云端接手：自动选股、AI 自动盘、计划模拟、自选信号、发布网页", "info")
-    upload(active=True)
+    if not upload(active=True).get("ok"):
+        raise RuntimeError("未能发布云端接管状态")
     hf.start()
     scheduler.start()
 

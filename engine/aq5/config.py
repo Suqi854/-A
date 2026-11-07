@@ -13,9 +13,8 @@ WEB = ROOT / "web"
 try:
     DATA.mkdir(parents=True, exist_ok=True)
     (DATA / ".w").write_text("ok")
-except OSError:  # 插件缓存目录可能只读，改用用户目录
-    DATA = Path.home() / ".aq5"
-    DATA.mkdir(parents=True, exist_ok=True)
+except OSError as exc:
+    raise RuntimeError("数据目录不可写，请设置 AQ5_DATA 到可写的数据盘目录") from exc
 DB_PATH = DATA / "aq5.sqlite3"
 SETTINGS_PATH = DATA / "settings.json"
 
@@ -58,6 +57,7 @@ DEFAULTS = {
     "risk": {"stop_atr": 2.0, "max_stop_pct": 0.08, "rr_1": 1.5, "rr_2": 3.0, "max_hold_days": 10},
     "notify": {"pushplus_token": "", "serverchan_key": "", "enabled": False},
     "refresh_sec": 3,
+    "strategy_v2": {"enabled": True, "legacy_auto": False, "version": "5.2-shadow.1"},
     # 公开发布：把行情、选股、分析、AI自动盘、学习结果导出为 JSON + 只读网页，推送到 Git 的 data 分支
     # “我的模拟盘”、自选股、推送 token 永远不会被导出
     "publish": {"enabled": False, "remote": "https://github.com/Suqi854/-A.git", "branch": "data",

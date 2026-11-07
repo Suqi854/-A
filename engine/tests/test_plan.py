@@ -1,9 +1,14 @@
-"""离线测试（5.1）：计划模拟（建立 → 选策略 → 跟选股 → 做T → 对照收益）、日志按类型取数、新策略、快速迭代、高频自调。"""
-import os, sys, tempfile
+"""离线验证计划默认影子语义，以及显式开启的旧版兼容入口。"""
+import os, sys
+from datetime import datetime
 os.environ["AQ5_MOCK"] = "1"
-os.environ["AQ5_DATA"] = tempfile.mkdtemp()
+os.environ["AQ5_DATA"] = os.environ["AQ5_TEST_DATA"]
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from aq5 import db, learn, market, picker, plan, server, sim, signals, strategies  # noqa: E402
+from aq5 import config, db, learn, market, marketstate, picker, plan, server, sim, signals, strategies  # noqa: E402
+
+fixture_time = datetime(2026, 11, 6, 10, 0, tzinfo=config.CN_TZ)
+for module in (config, db, learn, market, picker, plan, server, sim, signals):
+    module.now = lambda: fixture_time
 
 db.init(); signals.init(); sim.ensure_accounts(); market.ensure_universe_mock()
 sim.can_trade_now = lambda: True
@@ -56,13 +61,28 @@ assert res["mode"] == "t_trade" and "锁定" in res["reason"], res
 res = plan.set_mode("auto")
 assert res["mode"] in plan.MODES
 
-# 5 跟选股：进攻/轮动模式应买入候选
+# 5 默认影子模式：历史计划仍可读，选股或盘中评估不会自动生成旧策略开仓单。
 plan.set_mode("attack")
+assert not config.load_settings()["strategy_v2"]["legacy_auto"]
+before = db.q1("SELECT COUNT(*) AS n FROM orders WHERE account='plan'")["n"]
 pr = picker.run("close")
+assert pr["picks"] and all(p["eligible"] == (p["tier"] in ("A", "B")) for p in pr["picks"])
+plan.on_picks(pr["picks"], "close")
+plan.tick()
 v2 = plan.view()
-n_new = len(v2["account"]["positions"]) - 3
-print("选股后计划持仓:", len(v2["account"]["positions"]), "新增", n_new)
-assert n_new > 0, "进攻模式应跟随选股买入"
+assert v2["exists"] and v2["active"] and len(v2["account"]["positions"]) == 3
+assert db.q1("SELECT COUNT(*) AS n FROM orders WHERE account='plan'")["n"] == before
+
+# 旧版进攻、减仓、做T仅在以下隔离夹具显式开启。
+config.save_settings({"strategy_v2": {"legacy_auto": True}})
+candidate = next(x for x in snap if x["code"] not in codes and 5 < x.get("price", 0) < 50)
+px = candidate["price"]
+explicit_pick = {"code": candidate["code"], "name": candidate["name"], "tier": "A",
+                 "eligible": True, "score": 90, "price": px, "rank": 1, "signals": [],
+                 "plan": {"stop": px * 0.93, "target1": px * 1.1, "target2": px * 1.2}}
+plan.on_picks([explicit_pick], "close")
+v2 = plan.view()
+assert len(v2["account"]["positions"]) == 4
 assert any(t["reason"].startswith("计划·进攻跟随") for t in v2["account"]["trades"])
 
 # 6 防守：只卖不买
@@ -82,8 +102,6 @@ with db.tx() as c:  # 防守可能已卖掉初始持仓：补一笔可卖的持�
     c.execute("INSERT OR REPLACE INTO positions(account, code, name, qty, cost, opened, last_buy, source, high_since, auto, stage) "
               "VALUES('plan', ?, 'T测试', 3000, 10, '2026-01-05 10:00:00', '2026-01-05 10:00:00', '初始持仓', 10, 1, 0)", (codes[2],))
 code = codes[2]
-from aq5.config import now as real_now  # noqa: E402
-plan.now = lambda: real_now().replace(hour=10, minute=0)  # 测试按上午盘中跑（14:50 后只做收尾）
 real_levels, real_check = signals.levels, signals.check_t
 lv = real_levels(code)
 signals.levels = lambda c, a=None: lv
@@ -136,15 +154,17 @@ for r0 in snap[:300]:
         hit[s["id"]] = hit.get(s["id"], 0) + 1
 print("策略触发次数（模拟行情 300 只）:", hit)
 
-# 13 迭代：1 日收益先反馈 + 实战平仓回灌；午间快速迭代；高频自调
+# 13 未满新标签窗口的样本和旧盘平仓不会直接采用新权重或调整阈值。
+weights_before = db.q("SELECT * FROM weights")
+hf_before = config.load_settings().get("hf")
 it = learn.iterate(force=True)
-assert it["changed"] and "_meta" in it["strat"], it
-print("迭代:", it["note"])
-print("快速迭代:", learn.quick()["model"])
-print("高频自调:", learn.tune_hf())
+assert not it["changed"], it
+quick = learn.quick()
+assert not quick["iterate"]["changed"] and not quick["model"]["trained"], quick
+assert not learn.tune_hf()["changed"] and config.load_settings().get("hf") == hf_before
+assert db.q("SELECT * FROM weights") == weights_before
 sw = strategies.strategy_weights("close")
 assert all(0.5 <= w <= 1.5 for w in sw.values()), sw
-print("ALL OK")
 
 # 14 （5.1.3）大盘立场去抖：新立场持续 10 分钟才采用，「防守」立即生效
 import time as _tm  # noqa: E402
@@ -175,3 +195,5 @@ signals.plan = real_plan
 after = len(db.q("SELECT id FROM orders WHERE account='plan' AND reason LIKE '%盘中机会%'"))
 assert after == before + 1, (before, after)
 print("盘中机会买入 OK")
+config.save_settings({"strategy_v2": {"legacy_auto": False}})
+print("ALL OK")

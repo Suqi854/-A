@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 from datetime import date
 
-from . import db, market
+from . import accounting, db, market
 from .config import load_settings, now, today
 
 ACCOUNTS = {"me": "我的模拟盘", "ai": "AI自动盘", "plan": "计划模拟盘"}
@@ -20,6 +20,7 @@ EMOTIONS = ["逻辑驱动", "计划内", "跟随系统", "追涨", "抄底", "�
 def ensure_accounts() -> None:
     init = load_settings()["init_cash"]
     with db.tx() as c:
+        accounting.init(c)
         for k in AUTO_ACCOUNTS:
             v = ACCOUNTS[k]
             c.execute("INSERT OR IGNORE INTO accounts(id, name, cash, init_cash, created, peak) VALUES(?,?,?,?,?,?)",
@@ -38,9 +39,13 @@ def migrate_capital() -> None:
             continue
         delta = target - a["init_cash"]
         with db.tx() as c:
-            c.execute("UPDATE accounts SET cash=cash+?, init_cash=?, peak=COALESCE(peak,0)+? WHERE id=?",
-                      (delta, target, delta, a["id"]))
-            c.execute("UPDATE equity SET equity=equity+? WHERE account=?", (delta, a["id"]))
+            updated = c.execute(
+                "UPDATE accounts SET cash=cash+?, init_cash=?, peak=COALESCE(peak,0)+? WHERE id=? AND init_cash=?",
+                (delta, target, delta, a["id"], a["init_cash"]),
+            )
+            if updated.rowcount != 1:
+                continue
+            accounting.record_cash_flow(c, a["id"], today(), "funding", delta)
         db.event("trade", f"{ACCOUNTS[a['id']]} 资金已提升到 {target / 1e4:.0f} 万", f"补入 {delta:.0f} 元，原有持仓和记录保留")
 
 
@@ -184,6 +189,10 @@ def _execute_ai(o: dict, fill: float) -> str:
     ts = now().strftime("%Y-%m-%d %H:%M:%S")
     r = ai_rules()
     with db.tx() as c:
+        c.execute("BEGIN IMMEDIATE")
+        state = c.execute("SELECT status FROM orders WHERE id=?", (o["id"],)).fetchone()
+        if state is None or state["status"] != "pending":
+            return "订单已处理"
         a = c.execute("SELECT cash FROM accounts WHERE id=?", (acct,)).fetchone()
         pos = c.execute("SELECT * FROM positions WHERE account=? AND code=?", (acct, code)).fetchone()
         old = pos["qty"] if pos else 0
@@ -232,6 +241,10 @@ def _execute(o: dict, fill: float) -> str:
     fee = fees(o["side"], amount)
     ts = now().strftime("%Y-%m-%d %H:%M:%S")
     with db.tx() as c:
+        c.execute("BEGIN IMMEDIATE")
+        current = c.execute("SELECT status FROM orders WHERE id=?", (o["id"],)).fetchone()
+        if not current or current["status"] != "pending":
+            return "订单不是待成交状态"
         a = c.execute("SELECT cash FROM accounts WHERE id=?", (acct,)).fetchone()
         pos = c.execute("SELECT * FROM positions WHERE account=? AND code=?", (acct, code)).fetchone()
         if o["side"] == "buy":
@@ -255,6 +268,9 @@ def _execute(o: dict, fill: float) -> str:
             if not pos or pos["qty"] < qty:
                 c.execute("UPDATE orders SET status='rejected', note='持仓不足', updated=? WHERE id=?", (ts, o["id"]))
                 return "持仓不足"
+            if qty > pos["qty"] - _bought_today(acct, code):
+                c.execute("UPDATE orders SET status='rejected', note='T+1可卖数量不足', updated=? WHERE id=?", (ts, o["id"]))
+                return "T+1可卖数量不足，订单作废"
             pnl = round((fill - pos["cost"]) * qty - fee, 2)
             hold = trading_days_between(pos["opened"][:10], today())
             c.execute("UPDATE accounts SET cash=cash+? WHERE id=?", (amount - fee, acct))
@@ -351,15 +367,16 @@ def _traded_today(acct: str) -> int:
 
 
 def auto_follow(picks: list[dict], session: str) -> None:
-    """AI 自动盘：A/B 级按仓位买入；每个交易日至少交易一次（尾盘检查），用于收集实战数据。
+    """旧版 AI 自动盘的受控兼容入口，仅允许 A/B 级候选。
 
-    仓位 = 基础仓位 × 级别系数（A 1.0 / B 0.6 / C 0.3）× 凯利修正（半凯利与 1 取小）
+    不使用未校准的上涨概率进行凯利放大；不为凑数据强制交易。
     """
-    from .models import kelly
+    if not load_settings().get("strategy_v2", {}).get("legacy_auto", False):
+        return
     ensure_accounts()
     cfg = load_settings()["pick"]
     base = float(cfg.get("ai_position_pct", 0.12))
-    max_pos = max(int(cfg.get("ai_max_positions", 12)), 30)  # 真正的约束是杠杆上限（下单时检查），持仓只数放宽
+    max_pos = max(1, int(cfg.get("ai_max_positions", 12)))  # 真正的约束是杠杆上限（下单时检查），持仓只数放宽
     v = view("ai", light=True)
     held = {p["code"] for p in v["positions"]}
     pend = {o["code"] for o in db.q("SELECT code FROM orders WHERE account='ai' AND status='pending'")}
@@ -368,9 +385,7 @@ def auto_follow(picks: list[dict], session: str) -> None:
 
     def buy(p, size_k, why):
         nonlocal bought
-        k = kelly(p.get("prob") or 0.5, (p["plan"].get("rr") or 1.5))
-        kf = min(1.2, max(0.5, (k["half"] / 100) / base)) if k["half"] > 0 else 0.5
-        budget = min(v["equity"] * base * size_k * kf, v["cash"] * 0.98)
+        budget = min(v["equity"] * base * size_k, v["cash"] * 0.98)
         qty = int(budget / (p["price"] * 1.003) / 100) * 100
         if qty < 100:
             return False
@@ -407,56 +422,38 @@ def auto_follow(picks: list[dict], session: str) -> None:
                 except ValueError:
                     pass
     for p in picks:
+        if p.get("tier") not in ("A", "B") or p.get("eligible") is False:
+            continue
         if p["code"] in held or p["code"] in pend:
             continue
         if len(held) >= max_pos:
             break
         buy(p, TIER_SIZE[p.get("tier", "A")], f"仓位系数 {TIER_SIZE[p.get('tier', 'A')]}")
 
-    if session != "close" or not cfg.get("ai_daily_trade", True) or bought or _traded_today("ai"):
-        return
-    # —— 尾盘仍没有任何交易：保证每天至少一笔，收集迭代数据 ——
-    cands = [p for p in picks if p["code"] not in held and p["code"] not in pend]
-    if not cands:
-        return
-    best = cands[0]
-    if len(held) < max_pos and v["cash"] > best["price"] * 100 * 1.01:
-        if buy(best, TIER_SIZE.get(best.get("tier", "C"), 0.3), "每日最少一笔（试错仓，收集数据）"):
-            return
-    # 满仓或没钱：卖出当前评分最低、且明显弱于今日第一名的持仓，换成第一名
-    from .analysis import analyze
-    worst = None
-    for pos in v["positions"]:
-        if pos["avail"] <= 0:
-            continue
-        try:
-            sc = analyze(pos["code"])["score"]
-        except (RuntimeError, ValueError):
-            continue
-        if worst is None or sc < worst[1]:
-            worst = (pos, sc)
-    if worst and worst[1] < best["score"] - 5:
-        pos, sc = worst
-        try:
-            place("ai", pos["code"], "sell", pos["avail"],
-                  reason=f"调仓：持仓评分 {sc:.0f} 明显低于今日第1名 {best['name']} 的 {best['score']:.0f}", emotion="跟随系统")
-            v["cash"] += pos["avail"] * (pos["price"] or pos["cost"]) * 0.998
-            held.discard(pos["code"])
-            buy(best, TIER_SIZE.get(best.get("tier", "C"), 0.3), "调仓换股")
-        except ValueError as e:
-            db.event("trade", "AI自动盘调仓失败", str(e), "warn")
-    else:
-        db.event("trade", "AI自动盘今日未交易", "持仓都不弱于今日候选，且没有可用资金或仓位", "info")
 
 
 def view(acct: str, light: bool = False) -> dict:
-    ensure_accounts()
-    a = db.q1("SELECT * FROM accounts WHERE id=?", (acct,))
+    if not db.writes_frozen():
+        ensure_accounts()
+    day = today()
+    a, poss, plan, anchor, fills, flows, latest_fill = accounting.snapshot(acct, day)
     if not a:
         raise ValueError(f"{ACCOUNTS.get(acct, acct)}还没有建立")
-    poss = db.q("SELECT * FROM positions WHERE account=? ORDER BY opened", (acct,))
-    qs = market.quotes([p["code"] for p in poss]) if poss else {}
-    mv, today_pnl = 0.0, 0.0
+    codes = {p["code"] for p in poss}
+    codes.update(t["code"] for t in fills if t["code"] and str(t["time"] or "")[:10] == day)
+    qs = market.quotes_recent(sorted(codes)) if codes else {}
+    asof = now()
+    today_pnl, daily_status, daily_basis = accounting.daily_result(
+        day, a, poss, plan, anchor, fills, flows, qs, asof=asof, latest_fill=latest_fill,
+    )
+
+    def previous_close_allowed():
+        return market.market_phase(asof) in ("closed", "before", "auction", "pre") or not market.is_trading_day()
+
+    valuation_status, valuation_asof, valuation_freshness, valuation_time, close_eligible = accounting.valuation_evidence(
+        poss, qs, asof, latest_fill, previous_close_allowed,
+    )
+    mv = 0.0
     for p in poss:
         qd = qs.get(p["code"]) or {}
         px = qd.get("price") or p["cost"]
@@ -469,15 +466,19 @@ def view(acct: str, light: bool = False) -> dict:
         p["hold_days"] = trading_days_between(p["opened"][:10], today())
         p["to_stop"] = round((p["stop"] / px - 1) * 100, 2) if p["stop"] else None
         p["to_target"] = round((p["target1"] / px - 1) * 100, 2) if p["target1"] else None
-        if qd.get("prev"):
-            bought_today = _bought_today(acct, p["code"])
-            old = p["qty"] - bought_today
-            today_pnl += (px - qd["prev"]) * old
         mv += p["value"]
     equity = a["cash"] + mv
+    init = a["init_cash"]
+    total_pnl = equity - init if valuation_asof and init else None
     out = {"id": acct, "name": a["name"], "cash": round(a["cash"], 2), "market_value": round(mv, 2),
-           "equity": round(equity, 2), "init": a["init_cash"], "total_pnl": round(equity - a["init_cash"], 2),
-           "total_pct": round((equity / a["init_cash"] - 1) * 100, 2), "today_pnl": round(today_pnl, 2),
+           "equity": round(equity, 2), "init": init, "total_pnl": round(total_pnl, 2) if total_pnl is not None else None,
+           "total_pct": round(total_pnl / init * 100, 2) if total_pnl is not None else None,
+           "today_pnl": today_pnl, "daily_pnl_status": daily_status,
+           "performance": {"valuation_status": valuation_status, "daily_basis": daily_basis,
+                           "valuation_asof": valuation_asof, "valuation_freshness": valuation_freshness,
+                           "valuation_time": valuation_time, "close_eligible": close_eligible,
+                           "verified_equity": round(equity, 2) if valuation_asof else None,
+                           "cumulative_basis": "recorded_initial_capital", "as_of_date": day},
            "positions": poss}
     if _rules_on(acct):
         out["margin"] = {**exposure(acct), "rules": ai_rules()}
@@ -486,18 +487,19 @@ def view(acct: str, light: bool = False) -> dict:
     out["orders"] = db.q("SELECT * FROM orders WHERE account=? ORDER BY id DESC LIMIT 50", (acct,))
     trades = db.q("SELECT * FROM trades WHERE account=? ORDER BY id DESC LIMIT 200", (acct,))
     out["trades"] = trades
-    out["stats"] = stats(acct, trades)
+    out["stats"] = stats(acct)
     out["equity_curve"] = db.q("SELECT date, equity FROM equity WHERE account=? ORDER BY date", (acct,))
     return out
 
 
 def stats(acct: str, trades=None) -> dict:
-    trades = trades or db.q("SELECT * FROM trades WHERE account=?", (acct,))
-    sells = [t for t in trades if t["side"] == "sell" and t["pnl"] is not None]
-    wins = [t["pnl"] for t in sells if t["pnl"] > 0]
-    loss = [t["pnl"] for t in sells if t["pnl"] <= 0]
+    trades = db.q("SELECT * FROM trades WHERE account=? ORDER BY id", (acct,)) if trades is None else trades
+    closes = [t for t in trades if t["side"] in ("buy", "sell") and t["pnl"] is not None]
+    wins = [t["pnl"] for t in closes if t["pnl"] > 0]
+    loss = [t["pnl"] for t in closes if t["pnl"] < 0]
+    sell_closes = sum(t["side"] == "sell" for t in closes)
     emo = {}
-    for t in sells:
+    for t in closes:
         e = t["emotion"] or "未标注"
         d = emo.setdefault(e, {"n": 0, "win": 0, "pnl": 0.0})
         d["n"] += 1
@@ -508,13 +510,17 @@ def stats(acct: str, trades=None) -> dict:
     for v in curve:
         peak = max(peak, v)
         mdd = max(mdd, (peak - v) / peak if peak > 0 else 0)
-    return {"sells": len(sells), "win_rate": round(len(wins) / len(sells), 3) if sells else None,
+    n = len(closes)
+    return {"sells": n, "closed_trades": n, "sell_closes": sell_closes, "short_cover_closes": n - sell_closes,
+            "wins": len(wins), "losses": len(loss), "breakeven": n - len(wins) - len(loss),
+            "win_rate": round(len(wins) / n, 3) if n else None,
             "avg_win": round(sum(wins) / len(wins), 2) if wins else None,
             "avg_loss": round(sum(loss) / len(loss), 2) if loss else None,
             "profit_factor": round(sum(wins) / -sum(loss), 2) if loss and sum(loss) < 0 else None,
-            "max_dd": round(mdd * 100, 2), "fees": round(sum(t["fee"] or 0 for t in trades), 2),
-            "avg_hold": round(sum(t["hold_days"] or 0 for t in sells) / len(sells), 1) if sells else None,
-            "by_emotion": emo}
+            "max_dd": round(mdd * 100, 2), "max_dd_basis": "recorded_equity_unadjusted",
+            "fees": round(sum(t["fee"] or 0 for t in trades), 2),
+            "avg_hold": round(sum(t["hold_days"] or 0 for t in closes) / n, 1) if n else None,
+            "by_emotion": emo, "cost_note": "历史平仓统计沿用原流水口径，未完整分摊全部开仓费用；费用后表现请看账户权益和新训练两腿净额。"}
 
 
 def accrue_interest() -> None:
@@ -526,6 +532,13 @@ def accrue_interest() -> None:
     cost = ex["borrowed"] * r["margin_rate"] / 365 + ex["short_mv"] * r["short_rate"] / 365
     if cost > 0.01:
         with db.tx() as c:
+            day = today()
+            legacy_post = c.execute(
+                "SELECT 1 FROM events WHERE kind='trade' AND time LIKE ? AND title LIKE 'AI自动盘 两融利息 %' LIMIT 1",
+                (day + "%",),
+            ).fetchone()
+            if legacy_post or not accounting.record_cash_flow(c, "ai", day, "interest", -cost):
+                return
             c.execute("UPDATE accounts SET cash=cash-? WHERE id='ai'", (cost,))
         db.event("trade", f"AI自动盘 两融利息 {cost:.2f} 元", f"融资 {ex['borrowed']:.0f} × {r['margin_rate']:.0%}/365 + 融券 {ex['short_mv']:.0f} × {r['short_rate']:.0%}/365")
 
@@ -545,6 +558,9 @@ def check_maintenance() -> None:
 
 
 def record_equity() -> None:
+    t = now()
+    if t.weekday() >= 5 or t.hour < 15:
+        return
     try:
         accrue_interest()
     except Exception:  # noqa: BLE001
@@ -552,7 +568,10 @@ def record_equity() -> None:
     for k in existing():
         v = view(k, light=True)
         with db.tx() as c:
-            c.execute("INSERT OR REPLACE INTO equity VALUES(?,?,?)", (k, today(), v["equity"]))
+            day = v["performance"]["as_of_date"]
+            accounting.record_close(c, k, day)
+            if v["performance"]["close_eligible"] and v["performance"]["valuation_asof"] == day:
+                c.execute("INSERT OR REPLACE INTO equity VALUES(?,?,?)", (k, day, v["performance"]["verified_equity"]))
 
 
 def reset(acct: str) -> None:
@@ -560,5 +579,7 @@ def reset(acct: str) -> None:
     with db.tx() as c:
         for t in ("positions", "orders", "trades", "equity"):
             c.execute(f"DELETE FROM {t} WHERE account=?", (acct,))
+        accounting.init(c)
+        c.execute("DELETE FROM accounting_cash WHERE account=?", (acct,))
         c.execute("UPDATE accounts SET cash=?, init_cash=?, peak=? WHERE id=?", (init, init, init, acct))
     db.event("trade", f"{ACCOUNTS[acct]} 已重置为 {init:.0f} 元", "")

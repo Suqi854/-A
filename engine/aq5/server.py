@@ -15,7 +15,7 @@ from . import ai, analysis, auth, backtest, backup, cloud, db, learn, market, no
 from .config import DATA, MOCK, WEB, load_settings, now, public_settings, save_settings
 from .strategies import DESC, NAMES
 
-VERSION = "5.1.3"
+VERSION = "5.2-shadow.1"
 
 
 def lan_ip() -> str:
@@ -87,6 +87,10 @@ def api_overview(_q):
         q["code"]: {"price": q["price"], "pct": q.get("pct")}
         for q in snap if q["code"] in pick_codes and (q.get("price") or 0) > 0
     }
+    # A failed or incomplete all-market snapshot must not erase selected-stock quotes.
+    for code, quote in market.quotes_recent(sorted(pick_codes)).items():
+        if (quote.get("price") or 0) > 0:
+            pick_quotes[code] = {k: quote.get(k) for k in ("code", "price", "pct", "time")}
     accts = {k: sim.view(k, light=True) for k in sim.existing()}
     for a in accts.values():
         a["positions"] = [{k: p[k] for k in ("code", "name", "qty", "price", "pct", "pnl", "pnl_pct", "to_stop",
@@ -99,7 +103,8 @@ def api_overview(_q):
             "last_run": last_run, "pick_quotes": pick_quotes, "accounts": accts,
             "events": db.q("SELECT * FROM events ORDER BY id DESC LIMIT 30"),
             "scheduler": scheduler.STATUS, "picker": picker.STATE, "publish": publisher.STATE,
-            "lan": f"http://{lan_ip()}:{s['port']}", "version": VERSION}
+            "lan": f"http://{lan_ip()}:{s['port']}", "version": VERSION,
+            "live_relay": cloud._cfg()["relay"], "strategy_v2": s.get("strategy_v2")}
 
 
 def api_quotes(q):
@@ -462,7 +467,7 @@ POST = {"/api/picks/run": p_pick_run, "/api/sim/order": p_order, "/api/sim/cance
         "/api/me/restore": p_restore, "/api/me/security": p_security,
         "/api/ai/config": p_ai_config, "/api/ai/test": lambda b: ai.test_connection(), "/api/ai/ask": p_ai_ask,
         "/api/ai/review": lambda b: ai.daily_review(force=True), "/api/ai/suggest": lambda b: ai.suggest_iteration(),
-        "/api/ai/adopt": lambda b: ai.adopt_suggestion(),
+        "/api/ai/adopt": lambda b: {"error": "旧版建议采用已关闭；新因子需先完成样本外验证"},
         "/api/ai/chat": lambda b: ai.assistant(b.get("messages") or [], b.get("page", ""), b.get("code")),
         "/api/ai/check": lambda b: ai.order_check(b["code"], b.get("side", "buy"), int(b.get("qty") or 100),
                                                   float(b["price"]) if b.get("price") else None),
@@ -492,7 +497,17 @@ POST = {"/api/picks/run": p_pick_run, "/api/sim/order": p_order, "/api/sim/cance
         "/api/sectors/refresh": lambda b: (sectors.refresh_map_async(force=True), {"started": True})[1]}
 
 
-SENSITIVE = {"/api/me/vault", "/api/me/password", "/api/me/restore", "/api/me/token", "/api/me/revoke",
+from . import live, research, fundamentals, training
+GET.update({"/api/research/preview": lambda q: research.preview(),
+            "/api/t/live": lambda q: live.payload(),
+            "/api/research": lambda q: research.shadow_report(),
+            "/api/training": lambda q: training.view()})
+POST.update({"/api/research/promote": lambda b: research.promote_factor(b["factor_id"], b["version"], enabled=bool(b.get("enabled", True))),
+             "/api/model/select": lambda b: learn.select_model(b.get("version")),
+             "/api/fundamentals/import": lambda b: fundamentals.import_disclosures(b.get("records", []))})
+
+
+SENSITIVE = {"/api/research/promote", "/api/model/select", "/api/fundamentals/import", "/api/me/vault", "/api/me/password", "/api/me/restore", "/api/me/token", "/api/me/revoke",
              "/api/me/security", "/api/remote/enable", "/api/remote/download", "/api/remote/relay"}
 
 
@@ -696,6 +711,8 @@ def _migrate_secrets():
 
 def main():
     db.init()
+    from . import live
+    live.init()
     auth.init()
     ai.init()
     sectors.init()
@@ -730,10 +747,14 @@ def main():
     def _workers():  # 先让网页和隧道起来，再和云端交接，最后才开始交易/调度
         try:
             r = cloud.reconcile()
+            if r.get("error") or r.get("waiting"):
+                print("自动调度未启动：等待云端完成交接", flush=True)
+                return
             if r.get("pulled"):
                 print("已接回云端代跑的数据", flush=True)
         except Exception as e:  # noqa: BLE001
-            print("云端交接出错：", e, flush=True)
+            print("云端交接出错，自动调度未启动：", type(e).__name__, flush=True)
+            return
         hf.start()
         scheduler.start()
         cloud.uploader()

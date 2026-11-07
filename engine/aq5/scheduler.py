@@ -108,13 +108,13 @@ def loop() -> None:
                         threading.Thread(target=lambda: marketstate.state(force=True), daemon=True).start()
                     if hm >= 1000:
                         _once("market_morning", marketstate.record_morning)
-                    if time.time() - last_t > 120:
+                    if s.get("strategy_v2", {}).get("legacy_auto", False) and time.time() - last_t > 120:
                         last_t = time.time()
                         threading.Thread(target=signals.scan_t, daemon=True).start()
                         threading.Thread(target=plan.tick, daemon=True, name="aq5-plan").start()
                     slot = (hm // 100) * 2 + (1 if hm % 100 >= 30 else 0)
                     bg(f"watch_intra_{slot}", lambda: signals.run_watch("intra"))
-                if hm >= 1510:
+                if hm >= 1510 and s.get("strategy_v2", {}).get("legacy_auto", False):
                     bg("t_eval", signals.evaluate_t)
                 if hm >= 1512:
                     bg("close_review", marketstate.close_review)
@@ -150,4 +150,6 @@ def loop() -> None:
 
 
 def start() -> None:
+    from . import live
+    live.start()
     threading.Thread(target=loop, name="aq5-scheduler", daemon=True).start()

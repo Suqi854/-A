@@ -1,7 +1,7 @@
 """离线测试：模拟行情下跑通 选股 -> 模拟成交 -> 止盈止损 -> 回填收益 -> 权重迭代 -> 模型训练。"""
-import os, random, sys, tempfile
+import os, random, sys
 os.environ["AQ5_MOCK"] = "1"
-os.environ["AQ5_DATA"] = tempfile.mkdtemp()
+os.environ["AQ5_DATA"] = os.environ["AQ5_TEST_DATA"]
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from aq5 import db, market, picker, sim, learn, analysis, backtest  # noqa: E402
 
@@ -12,10 +12,12 @@ sim.can_trade_now = lambda: True  # 测试时视为交易时间
 r = picker.run("close")
 assert r["scanned"] > 100 and r["candidates"] > 50, r
 print("选股:", len(r["picks"]), "只", [p["name"] for p in r["picks"]])
-# 2 AI 自动盘应已跟随买入
+# 2 自动盘只允许跟随执行候选，空机会可以空仓
 ai = sim.view("ai")
 print("AI持仓:", len(ai["positions"]), "现金", ai["cash"])
-assert 0 < len(ai["positions"]) <= len(r["picks"])  # 资金用完后不再买（100万 × 仓位上限）
+assert {p["code"] for p in ai["positions"]} <= {p["code"] for p in r["picks"] if p["eligible"]}
+assert r["research"]["short_term"]["quote_count"] > 0
+assert r["research"]["value_quality"]["status"] == "unavailable"
 # 3 手动下单 + T+1 校验
 code = r["picks"][0]["code"] if r["picks"] else "sh600008"
 o = sim.place("me", code, "buy", 300, emotion="逻辑驱动", reason="测试")
@@ -36,7 +38,7 @@ sim.tick()
 me = sim.view("me")
 print("止损后持仓:", len(me["positions"]), "交易:", [(t["side"], t["reason"], t["pnl"]) for t in me["trades"]][:3])
 assert not me["positions"], "止损没有执行"
-# 5 学习：造 400 个历史样本（让 momentum 因子真的有预测力）
+# 5 学习：旧样本即使数量足够也不能进入新协议
 rnd = random.Random(3)
 with db.tx() as c:
     for d in range(40):
@@ -49,11 +51,11 @@ with db.tx() as c:
                       (f"2026-08-{d % 28 + 1:02d}", "close" if d < 28 else "auction", "sh600008", 10, 70,
                        db.dumps(f), db.dumps(["breakout"] if ret > 0 else []), ret, ret, ret))
 it = learn.iterate()
-print("迭代:", it["note"])
-assert it["weights"]["momentum"] > 0.13, "有效因子权重应上升"
+print("迭代:", it.get("reason"))
+assert not it["changed"] and "weights" not in it
 tr = learn.train()
 print("模型:", tr)
-assert tr["trained"] and tr["metrics"]["test_auc"] > 0.6
+assert not tr["trained"]
 # 6 分析 / 回测
 a = analysis.analyze(code)
 print("分析:", a["name"], a["score"], a["rating"], a["main_force"]["label"], a["plan"]["stop"], a["plan"]["target1"])

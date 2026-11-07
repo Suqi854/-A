@@ -18,6 +18,8 @@ import time
 
 from . import db, market
 from .config import load_settings, now, today
+# Intraday shadow evidence is separate from the legacy pre/intra/post signal API.
+from .intraday import latest as intraday_latest, status as intraday_status  # noqa: F401
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS watch_signals(code TEXT, date TEXT, phase TEXT, time TEXT, data TEXT,

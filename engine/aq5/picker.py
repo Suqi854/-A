@@ -5,11 +5,12 @@ session: auction（9:26 集合竞价后）/ close（14:45 收盘前）/ manual�
 """
 from __future__ import annotations
 
+import math
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from . import analysis, db, market, notify
+from . import analysis, db, learn, market, notify, research
 from .config import load_settings, now, today
 from .factors import LABELS, current_weights
 from .strategies import strategy_weights
@@ -79,7 +80,13 @@ def _run(session: str, top_n: int) -> dict:
     s = load_settings()
     cfg = s["pick"]
     t0 = time.time()
+    started = now().strftime("%H:%M:%S")
     snap = market.snapshot(force=True)
+    asof = research.timestamp()
+    for r in snap:
+        avg = r.get("avg")
+        if avg is not None and (not isinstance(avg, (int, float)) or not math.isfinite(avg) or avg <= 0):
+            r["avg"] = None
     br = market.breadth(snap)
     reg = analysis.regime()
     pool = [r for r in snap if _base_filter(r, session, cfg)]
@@ -176,6 +183,16 @@ def _run(session: str, top_n: int) -> dict:
         sec_data = sectors.compute()
     except Exception:  # noqa: BLE001
         sec_data = {"stock": {}, "by_code": {}}
+    report, research_features = research.screen(snap, asof, sec_data["stock"])
+    active = research.active_factors()
+    report["active_factors"] = sorted(active)
+    for rank, ev in enumerate(evaluated, 1):
+        ev["baseline_score"] = ev["score"]
+        ev["baseline_rank"] = rank
+        if active:
+            ev["score"] = round(ev["score"] + research.adjustment(research_features.get(ev["code"], {}), active), 1)
+    if active:
+        evaluated.sort(key=lambda ev: -ev["score"])
     per_ind: dict[str, int] = {}
     for ev in evaluated:
         if len(picks) >= top_n:
@@ -204,13 +221,16 @@ def _run(session: str, top_n: int) -> dict:
             ev["tier"] = "C"
         picks.append(ev)
 
+    report["prob_sources"] = {ev["code"]: ev["prob_src"] for ev in picks}
+    research.init()
     with db.tx() as c:
         cur = c.execute("INSERT INTO pick_runs(date, session, started, finished, scanned, candidates, picks, market, "
                         "status, weights_ver) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                        (today(), session, now().strftime("%H:%M:%S"), None, len(snap), len(evaluated), len(picks),
+                        (today(), session, started, None, len(snap), len(evaluated), len(picks),
                          db.dumps({"breadth": br, "regime": reg, "min_score": min_score, "max_picks": max_picks}),
                          "done", ver))
         run_id = cur.lastrowid
+        research.save_run(c, run_id, asof, report, evaluated, research_features)
         c.executemany("INSERT INTO samples(run_id, date, session, code, price, score, factors, strategies) "
                       "VALUES(?,?,?,?,?,?,?,?)",
                       [(run_id, today(), session, e["code"], e["row"]["price"], e["score"], db.dumps(e["raw"]),
@@ -251,7 +271,10 @@ def _run(session: str, top_n: int) -> dict:
                              len(out) + 1, sc["name"] if sc else None))
             out.append({"id": cur.lastrowid, "code": e["code"], "name": r.get("name"), "score": e["score"],
                         "industry": sc["name"] if sc else None, "tier": e["tier"], "rank": len(out) + 1,
-                        "prob": e["prob"], "price": r["price"], "pct": r.get("pct"), "plan": pl,
+                        "eligible": e["tier"] in ("A", "B"), "prob": e["prob"],
+                        "prob_src": e["prob_src"],
+                        "prob_label": learn.PROB_LABEL if e["prob_src"] == "model" else learn.HEURISTIC_LABEL,
+                        "price": r["price"], "pct": r.get("pct"), "plan": pl,
                         "signals": e["signals"], "reasons": reasons, "risks": risks})
         c.execute("UPDATE pick_runs SET finished=? WHERE id=?", (now().strftime("%H:%M:%S"), run_id))
     label = {"auction": "竞价选股", "close": "尾盘选股", "manual": "手动选股"}.get(session, session)
@@ -289,14 +312,22 @@ def _run(session: str, top_n: int) -> dict:
         from . import publisher
         publisher.publish_async(full=True)
     return {"run_id": run_id, "picks": out, "scanned": len(snap), "candidates": len(evaluated),
-            "min_score": min_score, "regime": reg, "breadth": br, "secs": round(time.time() - t0, 1)}
+            "min_score": min_score, "regime": reg, "breadth": br, "research": report,
+            "secs": round(time.time() - t0, 1)}
 
 
 def runs(limit: int = 30) -> list[dict]:
     rs = db.q("SELECT * FROM pick_runs ORDER BY id DESC LIMIT ?", (limit,))
+    reports = research.for_runs([r["id"] for r in rs])
     for r in rs:
         r["market"] = db.loads(r["market"], {})
+        r["research"] = reports.get(r["id"])
+        sources = (r["research"] or {}).get("prob_sources", {})
         r["items"] = picks_of(r["id"])
+        for item in r["items"]:
+            item["prob_src"] = sources.get(item["code"], "legacy")
+            item["prob_label"] = (learn.PROB_LABEL if item["prob_src"] == "model" else learn.HEURISTIC_LABEL
+                                  if item["prob_src"] == "heuristic" else "历史参考值，来源未记录")
     return rs
 
 
@@ -304,6 +335,7 @@ def picks_of(run_id: int) -> list[dict]:
     ps = db.q("SELECT p.*, s.industry FROM picks p LEFT JOIN stock_sector s ON s.code=p.code WHERE run_id=? "
               "ORDER BY score DESC", (run_id,))
     for p in ps:
+        p["eligible"] = p.get("tier") in ("A", "B")
         for k in ("factors", "strategies", "reasons", "risks"):
             p[k] = db.loads(p[k], [])
     return ps

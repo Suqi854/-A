@@ -17,7 +17,7 @@ SPECS = [
     ("capital", "资金", 0.0, 5.0, "主力（大单+超大单）净流入占成交额比例，今日与近5日加权"),
     ("strength", "强度", 1.0, 2.5, "相对大盘的超额涨幅 + 当日收在高位的程度"),
     ("volatility", "波动", -1.5, 0.8, "ATR波动率接近3.5%最合适：太小没机会，太大风险高"),
-    ("value", "估值", 0.6, 0.35, "市盈率越低越安全；亏损股（PE<0）明显扣分"),
+    ("value", "估值", 0.6, 0.35, "正市盈率越低估值分越高，非正值扣分，缺失按中性处理"),
     ("position", "位置", 88.0, 6.0, "距60日最高价的位置，接近新高更好；短线过热（RSI、乖离过大）扣分"),
     ("liquidity", "流动性", 8.3, 0.4, "近5日平均成交额（对数）；太冷门的股票买卖都困难"),
     ("sector", "板块", 50.0, 15.0, "所属行业的强度（今日涨幅、上涨家数、涨停数、近5日动量的排名合成）；强行业里的个股更容易走强"),
@@ -29,7 +29,7 @@ FORMULA = {
     "capital": "x = 0.6·今日主力净占比 + 0.4·近5日主力净占比均值（%）；分数 = σ(x/5)·100",
     "strength": "x = (今日涨幅 − 市场中位涨幅) + 2·(日内位置 − 0.5)；日内位置 = (C−L)/(H−L)；分数 = σ((x−1)/2.5)·100",
     "volatility": "ATR% = ATR14/C·100；x = −|ATR% − 3.5|；分数 = σ((x+1.5)/0.8)·100",
-    "value": "x = 2 − log₁₀(PE)（PE≤0 时 x = −1）；分数 = σ((x−0.6)/0.35)·100",
+    "value": "x = 2 − log₁₀(PE)（PE≤0 时 x = −1，缺失时 x = 0.6）；分数 = σ((x−0.6)/0.35)·100",
     "position": "x = 100·C/H60 − max(0, RSI6−80) − 2·max(0, 乖离20−12%)；分数 = σ((x−88)/6)·100",
     "liquidity": "x = log₁₀(近5日平均成交额)；分数 = σ((x−8.3)/0.4)·100（约2亿元对应50分）",
     "sector": "x = 行业强度 = 0.40·Rank(今日涨幅) + 0.20·Rank(上涨比例) + 0.15·Rank(涨停数) + 0.25·Rank(5日动量)；分数 = σ((x−50)/15)·100",
@@ -102,7 +102,8 @@ def raw_factors(rows: list[dict], live: dict | None, market_median: float = 0.0,
     volatility = -abs(atrp - 3.5)
 
     pe = (live or {}).get("pe")
-    value = (2 - math.log10(pe)) if pe and pe > 0 else -1.0
+    pe_available = isinstance(pe, (int, float)) and math.isfinite(pe)
+    value = (2 - math.log10(pe) if pe > 0 else -1.0) if pe_available else 0.6
 
     h60 = max(r["high"] for r in rows[-60:])
     rsi6 = ind["rsi6"][-1] or 50
@@ -116,7 +117,7 @@ def raw_factors(rows: list[dict], live: dict | None, market_median: float = 0.0,
            "strength": strength, "volatility": volatility, "value": value, "position": position,
            "liquidity": liquidity, "sector": 50.0}  # 板块强度由 analysis.evaluate 用实时行业数据覆盖
     extra = {"r5": r5, "r20": r20, "vr": vr, "atrp": atrp, "rsi6": rsi6, "dev20": dev20, "pos_day": pos_day,
-             "h60": h60, "pct": pct, "main_pct": mp, "main5": m5, "align": align}
+             "h60": h60, "pct": pct, "main_pct": mp, "main5": m5, "align": align, "pe_available": pe_available}
     ind["extra"] = extra
     return raw, ind
 

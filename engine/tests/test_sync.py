@@ -1,14 +1,14 @@
 """离线测试（5.1.1）：外观设置各端同步、计划模拟进加密个人包（电脑离线时手机网页版可看）。"""
-import gzip, json, os, sys, tempfile
+import gzip, json, os, sys
 from hashlib import sha256
 from unittest.mock import patch
 os.environ["AQ5_MOCK"] = "1"
-os.environ["AQ5_DATA"] = os.environ.get("AQ5_TEST_DATA") or tempfile.mkdtemp()
+os.environ["AQ5_DATA"] = os.environ["AQ5_TEST_DATA"]
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from aq5 import ai, announce, auth, db, market, marketstate, plan, publisher, sectors, server, signals, sim, vault  # noqa: E402
+from aq5 import ai, announce, auth, db, live, market, marketstate, plan, publisher, sectors, server, signals, sim, vault  # noqa: E402
 from aq5.config import load_settings  # noqa: E402
 
-db.init(); [m.init() for m in (auth, ai, sectors, signals, marketstate, announce)]; sim.ensure_accounts(); market.ensure_universe_mock()
+db.init(); [m.init() for m in (auth, ai, sectors, signals, marketstate, announce)]; sim.ensure_accounts(); market.ensure_universe_mock(); live.init()
 sim.can_trade_now = lambda: True
 
 # 1 外观：新的覆盖旧的，旧的不能覆盖新的
@@ -48,7 +48,7 @@ quote_snap = [
     {"code": "sh605998", "price": None, "pct": None},
     {"code": "sh605999", "price": 30, "pct": 1},
 ]
-with patch.object(market, "snapshot", return_value=quote_snap):
+with patch.object(market, "snapshot", return_value=quote_snap), patch.object(market, "quotes_recent", return_value={}):
     publisher.export(full=False)
 
 latest = json.loads((d / "latest.json").read_text("utf-8"))

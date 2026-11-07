@@ -49,7 +49,8 @@ def public_overview() -> dict:
     from .server import api_overview
     ov = api_overview({})
     ov.pop("lan", None)
-    # 自选股不算隐私（只有“我的模拟盘”和设置是隐私），公开发布
+    # Private watchlists are exposed only through the encrypted package.
+    ov["watchlist"] = []
     ov["accounts"] = {"ai": ov["accounts"]["ai"]}
     ov["events"] = public_events(30)
     ov["scheduler"] = {"started": ov["scheduler"].get("started"), "jobs": ov["scheduler"].get("jobs", {})}
@@ -67,7 +68,6 @@ def public_events(limit=100) -> list[dict]:
 def _analysis_codes() -> list[str]:
     codes = [r["code"] for r in db.q("SELECT DISTINCT code FROM picks WHERE date >= date(?, '-7 day')", (today(),))]
     codes += [r["code"] for r in db.q("SELECT code FROM positions WHERE account='ai'")]
-    codes += [market.norm_code(c) for c in load_settings()["watchlist"]]
     seen, out = set(), []
     for c in codes:
         if c not in seen:
@@ -98,6 +98,8 @@ def export(full: bool = True) -> dict:
         except RuntimeError:
             pass
     if full:
+        from . import research
+        _w(d / "research.json", research.preview())
         runs = picker.runs(60)
         from . import ai
         for r in runs:
@@ -150,7 +152,12 @@ def export(full: bool = True) -> dict:
                 old = {x["code"]: x for x in json.loads(p.read_text("utf-8"))}
             except (ValueError, KeyError):
                 old = {}
+        allowed = {r["code"] for r in db.q("SELECT DISTINCT code FROM picks UNION SELECT code FROM positions WHERE account='ai' UNION SELECT code FROM trades WHERE account='ai'")}
+        old = {code: item for code, item in old.items() if code in allowed}
         old.update({x["code"]: x for x in idx})
+        for stale in (d / "analysis").glob("*.json"):
+            if stale.stem != "index" and stale.stem not in allowed:
+                stale.unlink()
         _w(p, sorted(old.values(), key=lambda x: x["time"], reverse=True))
         files += ["runs.json", "ai.json", "learn.json", f"analysis/*.json({len(idx)})"]
     files += _private_pack(d, full)
@@ -199,7 +206,7 @@ def _private_pack(d: Path, full: bool) -> list[str]:
             "analysis": _PRIV_CACHE["analysis"], "me": me, "profile": (u or {}).get("profile", {}),
             "events": db.q("SELECT * FROM events WHERE kind IN ('alert','trade','ai','announce') ORDER BY id DESC LIMIT 80"),
             "ai": _private_ai(wl), "lan": _lan(), "remote": _remote(), "signals": _private_signals(wl),
-            "plan": _private_plan(), "look": load_settings().get("look") or {}}
+            "plan": _private_plan(), **_private_strategy(), "look": load_settings().get("look") or {}}
     raw = gzip.compress(json.dumps(clean(pack), ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
     target.write_bytes(vault.seal_web(raw, pw))
     return [f"private.enc({len(_PRIV_CACHE['analysis'])}只自选,加密)"]
@@ -362,3 +369,8 @@ def _safe(full, force):
         STATE["error"] = str(e)
         db.event("publish", "发布出错", str(e)[:300], "error")
 
+
+
+def _private_strategy():
+    from . import intraday, training
+    return {"intraday": intraday.latest(), "intraday_status": intraday.status(), "training": training.view()}

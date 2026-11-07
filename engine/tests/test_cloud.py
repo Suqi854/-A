@@ -44,6 +44,6 @@ print("抖动不接手:", r)
 # 3 连续 3 分钟离线 → 接手；之后电脑回来 → 交还并接力
 r = run([True, False, False, False, False, False, True], max_minutes=60)
 assert ("sched",) in r and ("hf",) in r and ("upload", True, False) in r, r
-assert r[-2] == ("dispatch", "交还后继续值守") and r[-1] == ("upload", False, True), r
+assert r[-2] == ("upload", False, True) and r[-1] == ("dispatch", "交还后继续值守"), r
 print("接手并交还:", r)
 print("ALL OK")

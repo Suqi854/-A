@@ -1,3 +1,5 @@
+import { liveRoute } from './live.js';
+export { LiveSnapshot } from './live.js';
 // A量化 固定地址中转：https://aq5-relay.<你的子域>.workers.dev
 // 电脑在线：原样转发到电脑的 trycloudflare 隧道（完整版）；
 // 电脑离线：自动改为提供 GitHub 网页版（只读 + 手机本地分析 + 云端代跑的数据），不再报错。
@@ -76,6 +78,8 @@ export default {
     ctx.waitUntil(kickCloud(env));
   },
   async fetch(req, env) {
+    const live = await liveRoute(req, env);
+    if (live) return live;
     const url = new URL(req.url);
     if (url.pathname === "/__aq5/cloud") {  // 看云端触发的最近结果（不含任何密钥）；带 ?kick=1 并附中转密钥可手动触发
       if (url.searchParams.get("kick") === "1") {

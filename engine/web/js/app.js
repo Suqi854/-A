@@ -47,6 +47,7 @@
       case 'picks/runs': return sj('runs.json');
       case 'picks/candidates': { const r = (await sj('runs.json')).find(x => String(x.id) === q.get('run')); return r ? r.cand_list || [] : []; }
       case 'picks/state': return { running: false };
+      case 'research/preview': return sj('research.json');
       case 'analyze': if (S.priv && S.priv.analysis[code]) return S.priv.analysis[code];
         try { return await sj('analysis/' + code + '.json'); } catch { const k = await Lite.klines(code, 'day', 320); S.liteCache = { code, rows: k.rows }; return Lite.analyze(code, k.rows, k.qt); }
       case 'kline': { const per = q.get('period') || 'day';
@@ -55,12 +56,14 @@
         if (x && x.kline) return { code, rows: x.kline }; if (S.liteCache && S.liteCache.code === code) return { code, rows: S.liteCache.rows, source: '腾讯（浏览器直连）' };
         const k = await Lite.klines(code, 'day', 320); return { code, rows: k.rows, source: k.source }; }
       case 'intraday': return sj('intraday/' + code + '.json').catch(() => Lite.intraday(code));
-      case 'sim': return (q.get('acct') === 'me' && S.priv) ? S.priv.me : sj('ai.json');
+      case 'sim': { const priv = privateForDisplay(); return q.get('acct') === 'me' && priv ? priv.me : sj('ai.json'); }
+      case 't/live': { const priv = privateForDisplay(); return { signals: priv?.intraday || {}, status: priv?.intraday_status, training: priv?.training }; }
       case 'plan': {
-        const p = S.priv?.plan, failed = !!S.privateSession?.error;
-        if (p) return { ...p, static_time: S.priv.time, static_refresh_failed: failed };
+        const priv = privateForDisplay(), p = priv?.plan, mini = livePrivate();
+        const failed = mini ? mini.hash !== activeRelay()?.private_pack_sha256 : !!S.privateSession?.error;
+        if (p) return { ...p, static_time: priv.time, static_refresh_failed: failed };
         return { exists: false, static: true, error: S.priv
-          ? '个人快照中没有计划模拟（在电脑或连上电脑后设定）。' + privateStatus(S.priv.time, failed)
+          ? '个人快照中没有计划模拟（在电脑或连上电脑后设定）。' + privateStatus(priv.time, failed)
           : '解锁个人数据后可以看计划模拟' };
       }
       case 'learn': return sj('learn.json');
@@ -276,7 +279,8 @@
     const [t, c] = PHASE[ov.phase] || ['--', 'muted'];
     const ph = $('#phase'); ph.className = 'phase ' + c + (ov.phase === 'trading' || ov.phase === 'auction' ? ' live' : ''); ph.innerHTML = `<i></i>${t}`;
     $('#mockTag').hidden = !ov.mock && !STATIC; if (STATIC) $('#mockTag').textContent = '公开只读';
-    $('#lastUpd').textContent = (STATIC ? '数据时间 ' + ov.time.slice(5, 16) : '更新 ' + ov.time.slice(11));
+    $('#lastUpd').textContent = ov.live_quote_time ? '中转报价 ' + sourceTime(ov.live_quote_time)
+      : STATIC ? '快照 ' + ov.time.slice(5, 16) : '更新 ' + ov.time.slice(11);
     const items = [...ov.indices, ...ov.overseas, ...ov.watchlist.filter(w => w.price)];
     const html = items.map(q => `<span class="it" data-c="${q.code}"><b>${esc(q.name)}</b><span class="${cls(q.pct)}">${num(q.price)} ${pct(q.pct)}</span></span>`).join('');
     const inner = $('#tapeInner'); if (inner.dataset.h !== html) { inner.innerHTML = html + html; inner.dataset.h = html; }
@@ -349,8 +353,9 @@
       const ov = await api('overview');
       if (wasStatic !== STATIC || remote !== S.remote) return;
       const old = S.ov;
-      S.ov = ov; header(ov);
-      if (S.page === 'mon') updateMon(ov);
+      S.ov = ov;
+      const shown = displayOverview(ov); header(shown);
+      if (S.page === 'mon') { updateMon(shown); drawLive(); }
       if (STATIC && !S.priv && !S.unlocking) autoUnlock(ov);
       if (STATIC && S.page === 'sim' && S.acct === 'plan' && S.priv &&
           (old?.private_time !== ov.private_time || old?.private_refresh_failed !== ov.private_refresh_failed ||
@@ -364,6 +369,202 @@
   function restartPoll() { clearInterval(S.timers.poll); const sec = STATIC ? +(lsGet('aq5_refresh') || 60) : 5; S.timers.poll = setInterval(() => { if (!document.hidden) poll(); }, sec * 1000); }
   restartPoll();
 
+  const LIVE_AGE = 45000;
+  function sourceStamp(value) {
+    if (typeof value !== 'string') return NaN;
+    if (/^\d{14}$/.test(value)) value = value.replace(/^(\d{4})(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)$/, '$1-$2-$3T$4:$5:$6+08:00');
+    if (/^\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d$/.test(value)) value = value.replace(' ', 'T') + '+08:00';
+    return Date.parse(value);
+  }
+  function sourceTime(value) {
+    const ms = sourceStamp(value);
+    return Number.isFinite(ms) ? new Date(ms + 8 * 3600000).toISOString().slice(5, 19).replace('T', ' ') : '--';
+  }
+  function relayBase() {
+    try {
+      const url = new URL(S.ov?.live_relay);
+      if (url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash) return url.href.replace(/\/+$/, '');
+    } catch { }
+    return null;
+  }
+  function activeRelay() {
+    const p = S.relayPacket;
+    return p && p.relay === relayBase() && p.age_ms + Date.now() - p.loadedAt <= LIVE_AGE ? p : null;
+  }
+  function activePublic() {
+    const p = activeRelay(), age = Date.now() - sourceStamp(p?.public?.quote_time);
+    return p && age >= -5000 && age <= LIVE_AGE ? p.public : null;
+  }
+  function livePrivate() {
+    const p = activeRelay(), mini = S.livePrivate;
+    return S.priv && mini?.session === S.privateSession && mini.stream === p?.stream_id &&
+      mini.data.time >= S.priv.time ? mini : null;
+  }
+  function privateForDisplay() {
+    const mini = livePrivate();
+    return mini ? { ...S.priv, ...mini.data } : S.priv;
+  }
+  function displayOverview(base) {
+    if (!STATIC) return base;
+    const data = activePublic(), mini = livePrivate();
+    if (!data && !mini) return base;
+    const ov = { ...base };
+    if (data) {
+      for (const k of ['time', 'phase', 'version', 'pick_quotes', 'indices', 'quote_time']) {
+        if (data[k] != null) ov[k] = data[k];
+      }
+      ov.live_quote_time = data.quote_time;
+    }
+    if (mini) {
+      const { me, plan, time } = mini.data;
+      ov.accounts = { ...base.accounts };
+      if (me) ov.accounts.me = { ...me, positions: me.positions || [] };
+      if (plan?.account) ov.accounts.plan = { ...plan.account, positions: plan.account.positions || [] };
+      else if (plan && !plan.exists) delete ov.accounts.plan;
+      ov.private_time = time;
+      ov.private_refresh_failed = mini.hash !== activeRelay()?.private_pack_sha256;
+    }
+    return ov;
+  }
+  function paintLive() {
+    if (S.ov && STATIC) {
+      const ov = displayOverview(S.ov);
+      header(ov);
+      if (S.page === 'mon') updateMon(ov);
+      const marker = livePrivate()?.hash || S.ov.private_pack_sha256 || S.priv?.time;
+      if (S.page === 'sim' && S.priv && S.acct !== 'ai' && marker && marker !== S.simLiveMarker) {
+        S.simLiveMarker = marker;
+        renderSim().catch(() => {});
+      }
+    }
+    drawLive();
+  }
+  async function pollLive() {
+    if (document.hidden || S.livePolling) return;
+    const wasStatic = STATIC, remote = S.remote, relay = STATIC ? relayBase() : null;
+    const sameRoute = () => wasStatic === STATIC && remote === S.remote && (!STATIC || relay === relayBase());
+    S.livePolling = true;
+    try {
+      if (!wasStatic) {
+        const data = await api('t/live');
+        if (sameRoute()) S.engineLive = { ...data, loadedAt: Date.now() };
+        return;
+      }
+      if (!relay) { S.relayPacket = null; return; }
+      const r = await fetch(relay + '/__aq5/live', { cache: 'no-store', signal: AbortSignal.timeout(5000) });
+      if (!r.ok) throw new Error('中转暂不可用');
+      const p = await r.json();
+      if (!sameRoute()) return;
+      if (!p.available || p.schema !== 1 || !['pc', 'cloud'].includes(p.role) || !p.stream_id ||
+          !Number.isSafeInteger(p.sequence) || !Number.isFinite(p.age_ms) || p.age_ms < 0 || p.age_ms > LIVE_AGE) {
+        S.relayPacket = null;
+        return;
+      }
+      const prior = S.liveSeen;
+      if (prior?.relay === relay && prior.stream === p.stream_id && p.sequence < prior.sequence) return;
+      S.liveSeen = { relay, stream: p.stream_id, sequence: p.sequence };
+      S.relayPacket = { ...p, relay, loadedAt: Date.now() };
+      paintLive();
+      const session = S.privateSession, hash = p.private_pack_sha256;
+      if (!S.priv || !session || !/^[a-f0-9]{64}$/.test(hash || '') ||
+          (S.livePrivate?.session === session && S.livePrivate.stream === p.stream_id && S.livePrivate.hash === hash)) return;
+      try {
+        const data = await unlockPrivate(session.key, hash, relay + '/__aq5/live/private.enc?v=' + hash, 5000);
+        if (sameRoute() && S.privateSession === session && activeRelay()?.private_pack_sha256 === hash &&
+            data.time && data.time >= (S.priv?.time || '') &&
+            (S.livePrivate?.stream !== p.stream_id || data.time >= S.livePrivate.data.time)) {
+          const fields = ['time', 'me', 'plan', 'intraday', 'intraday_status', 'training', 'look'];
+          const mini = Object.fromEntries(fields.filter(k => Object.hasOwn(data, k)).map(k => [k, data[k]]));
+          S.livePrivate = { session, stream: p.stream_id, hash, data: mini };
+        }
+      } catch { /* A newer relay publish can replace this digest before download. */ }
+    } catch {
+      if (sameRoute()) {
+        if (wasStatic) S.relayPacket = null;
+        else S.engineLive = null;
+      }
+    } finally {
+      S.livePolling = false;
+      paintLive();
+    }
+  }
+
+  const T_PHASE = { candidate: '候选', watch: '观察', confirmed: '已确认', invalid: '失效', unknown: '未知' };
+  const T_SETUP = { trend_pullback: '趋势回踩', breakout_retest: '突破回踩', range_edge: '区间边沿', risk_exit: '风险退出' };
+  const T_REASON = { market_risk_off: '大盘急跌或防守', market_context_unavailable: '大盘数据缺失或陈旧',
+    quote_missing_or_stale: '个股报价缺失或陈旧', macd_warming_up: '等待连续完成的 1 分钟样本，早盘最早约 10:30',
+    quote_window_incomplete: '连续报价窗口不足', out_of_continuous_session: '非连续竞价时段',
+    no_structural_entry: '暂无可用价格结构', net_space_too_small: '目标空间不足以覆盖研究费用',
+    target_outside_research_reach: '目标超出当前时段波动估计', market_conflict: '大盘或相对强弱冲突',
+    vwap_conflict: '量价均线方向冲突', waiting_for_direction_volume_and_macd: '等待方向、量能与 MACD 确认',
+    structure_and_turn_confirmed: '结构与量价转折确认', opportunity_expired: '机会已过期',
+    structure_crossed: '已触及目标或失效价', structure_replaced: '价格结构已变更' };
+  const tReason = s => T_REASON[s] || s || '暂无';
+  const probability = v => v == null ? '--' : num(v * 100, 0) + '%';
+  const tSide = s => s === 'buy' ? '低吸' : s === 'sell' ? '高抛' : '—';
+  function tPhase(s) {
+    const expires = sourceStamp(s?.expires_at);
+    return Number.isFinite(expires) && Date.now() >= expires && ['candidate', 'watch', 'confirmed'].includes(s.phase)
+      ? '已过期' : T_PHASE[s?.phase] || '未知';
+  }
+  function trainingView(t) {
+    if (!t || t.status === 'unconfigured') return '<div class="empty">尚无独立做 T 训练记录</div>';
+    if (t.status === 'awaiting_session') return '<div class="empty">等待有效交易时段和报价，冻结训练起点</div>';
+    const cards = Object.entries(t.experiments || {}).map(([name, x]) => {
+      const v = x.valuation || {}, observed = x.opportunities || {}, closed = x.closed_cycles || {}, open = x.open_risk || {};
+      const valid = v.status === 'recorded' && v.matches_last_tick;
+      const blocks = Object.entries(observed.blocked_reasons || {}).map(([reason, n]) => `${esc(tReason(reason))} ${esc(n)}`).join(' · ');
+      return `<div class="c4"><div class="pb"><b>${esc(({ fast: '快', balanced: '均衡', slow: '慢' })[name] || name)}</b> <span class="chip">${x.mode === 'paper' ? '主版本 · 模拟成交' : '影子对照'}</span>
+        <div data-nc class="hint">机会 ${num(observed.seen, 0)} · 确认 ${num(observed.confirmed, 0)} · 待成交 ${num(x.orders?.pending ?? 0, 0)} · 未成交 ${num(x.orders?.unfilled ?? 0, 0)}</div>
+        <div data-nc class="hint">闭环 ${num(closed.count, 0)} · 费用后 ${sgn(closed.net_after_fees)} · 未闭环 ${num(open.cycles, 0)}</div>
+        <div data-nc class="hint">${valid ? `净值 ${yuan(v.equity)} · 对照 ${yuan(v.hold_equity)} · 相对持有 ${pct(v.excess)}<br>估值 ${esc(sourceTime(v.asof))}` : '本轮估值证据不足'}</div>
+        ${blocks ? `<div data-nc class="hint">阻断 ${blocks}</div>` : ''}</div></div>`;
+    }).join('');
+    return `<div data-nc class="hint">独立模拟训练 · 冻结持有对照 · 起点 ${esc(sourceTime(t.opened_at))} · 最近评估 ${esc(sourceTime(t.last_tick))}</div><div class="grid">${cards}</div>`;
+  }
+  function drawLive() {
+    const el = $('#tLive'), train = $('#tTraining');
+    if (!el) return;
+    if (STATIC && !S.priv) { el.innerHTML = '<div class="empty">解锁个人数据后可查看日内影子信号</div>'; if (train) train.innerHTML = ''; return; }
+    const priv = STATIC ? privateForDisplay() : null;
+    const local = S.engineLive && Date.now() - S.engineLive.loadedAt <= LIVE_AGE ? S.engineLive : null;
+    const data = STATIC ? { signals: priv?.intraday, status: priv?.intraday_status, training: priv?.training } : local;
+    const relay = STATIC && activeRelay(), mini = STATIC && livePrivate();
+    const channel = STATIC ? (relay ? (mini && mini.hash === relay.private_pack_sha256 ? '加密中转' : '个人快照 · 中转更新中')
+                                    : '个人快照 · 中转不可用或过期') : (local ? '引擎读数' : '引擎读数暂不可用');
+    const status = data?.status || {};
+    const rows = Object.entries(data?.signals || {}).map(([code, versions]) => {
+      const s = versions.balanced || {}, side = tSide(s.side);
+      const variants = [['fast','快'], ['balanced','均衡'], ['slow','慢']].map(([key, label]) =>
+        `<span class="chip">${label} ${esc(tPhase(versions[key]))} · ${tSide(versions[key]?.side)}</span>`).join('');
+      const z = Array.isArray(s.entry_zone) ? s.entry_zone.map(x => num(x)).join('～') : '--';
+      return `<div class="c4"><div class="pb"><div class="row"><button class="btn sm" data-intra-code="${esc(code)}">${esc(code)}</button><b>${esc(tPhase(s))} · ${side}</b><span>${esc(T_SETUP[s.setup] || '—')}</span></div>
+        <div data-nc class="hint mono">报价 ${esc(sourceTime(s.quote_time))} · 评估 ${esc(sourceTime(s.evaluated_at))} · 有效至 ${esc(sourceTime(s.expires_at))}</div>
+        <div data-nc class="hint mono">入区 ${z} · 目标 ${num(s.target)} · 失效 ${num(s.invalidation)}</div>
+        <div data-nc class="hint">${esc(tReason(s.reason))}${s.missing?.length ? ' · 缺 ' + esc(s.missing.join('、')) : ''}</div>
+        <div class="modechips">${variants}</div></div></div>`;
+    }).join('');
+    el.innerHTML = `<div data-nc class="hint">${esc(channel)} · 影子信号 · 最近源报价 ${esc(sourceTime(status.last_quote))} · 已接收 ${num(status.accepted, 0)} 次</div>` +
+      (rows ? `<div class="grid">${rows}</div>` : '<div class="empty">暂无可显示的日内信号</div>');
+    el.querySelectorAll('[data-intra-code]').forEach(b => b.onclick = () => go('anly', b.dataset.intraCode));
+    if (train) train.innerHTML = trainingView(data?.training);
+  }
+  function shownEquity(a) { return a.performance ? a.performance.verified_equity : a.equity; }
+  function dayPnl(a) {
+    if (a.today_pnl == null) return `<span class="muted" title="${esc(a.daily_pnl_status?.reason || '')}">未知</span>`;
+    return `<b class="${cls(a.today_pnl)}">${sgn(a.today_pnl)}</b>${a.daily_pnl_status ? '' : ' <small>旧口径</small>'}`;
+  }
+  function accountingNote(a) {
+    if (!a.performance) return '<div data-nc class="hint">旧快照，估值与日盈亏口径未标注</div>';
+    const reason = a.today_pnl == null ? a.daily_pnl_status?.reason : a.daily_pnl_status?.code === 'ok' ? '' : a.daily_pnl_status?.reason;
+    return `<div data-nc class="hint">估值 ${esc(a.performance.valuation_asof || '未知')} · ${esc(a.performance.valuation_status?.reason || '')}${reason ? ' · 日盈亏 ' + esc(reason) : ''}</div>`;
+  }
+  function planReturns(p, a) {
+    const cost = p.performance?.historical_cost, inception = p.performance?.inception_mark;
+    if (!p.performance) return `<div data-nc class="hint">旧快照收益（历史成本口径） ${pct(a.total_pct)} · 旧版持有参考 ${pct(p.baseline?.pct)}</div>`;
+    const part = (label, x) => `<div>${label} <b class="${cls(x?.return_pct)}">${pct(x?.return_pct)}</b> · 基准 ${yuan(x?.basis)} · ${esc(x?.status?.reason || '')}</div>`;
+    return `<div data-nc class="hint">${part('录入成本盈亏', cost)}${part('建盘后收益', inception)}<div>冻结持有对照 · ${esc(p.performance.holding_comparison?.status?.reason || '未知')}</div></div>`;
+  }
   // ================================================================== F1 监控
   function renderMon() {
     $('#p-mon').innerHTML = `<div class="grid">
@@ -371,6 +572,8 @@
       ${panel('MARKET <small>大盘状态 · 放量/缩量/阴跌/异动 · 每分钟更新</small>', '<div id="mktBox" class="loading">载入</div>', { cls: 'c12' })}
       ${panel('BREADTH <small>市场温度 · 沪深主板</small>', '<div id="breadth" class="loading">载入</div>', { cls: 'c4' })}
       ${panel('SIGNAL <small>最新选股</small>', '<div id="monPick" class="loading">载入</div>', { cls: 'c4', right: '<button class="btn sm" onclick="location.hash=\'pick\'">全部 ›</button>' })}
+      ${panel('INTRADAY <small>日内做 T · 影子信号</small>', '<div id="tLive"></div>', { cls: 'c12' })}
+      ${STATIC && !S.priv ? '' : panel('T LAB <small>独立做 T 模拟训练</small>', '<div id="tTraining"></div>', { cls: 'c12' })}
       ${panel('ACCOUNT <small>模拟账户</small>', '<div id="monAcct"></div>', { cls: 'c4', right: '<button class="btn sm" onclick="location.hash=\'sim\'">模拟盘 ›</button>' })}
       ${panel('SECTORS <small>板块热度</small>', '<div id="secBox" class="scroll" style="max-height:380px"><div class="loading">载入</div></div>', { cls: 'c8', np: true, right: '<div class="seg" id="secSeg"><button data-m="ind" class="on">行业强度</button><button data-m="con">热门概念</button></div>' })}
       ${panel('AI BRIEF <small>AI 今日简报</small>', '<div id="aiBrief" class="scroll" style="max-height:380px"><div class="loading">载入</div></div>', { cls: 'c4', right: '<button class="btn sm rw" id="aiBriefGo">生成</button>' })}
@@ -382,7 +585,8 @@
       ${panel('FEED <small>实时动态</small>', '<div class="scroll" style="max-height:330px" id="feed"></div>', { cls: 'c4', np: true })}
     </div>`;
     if (!STATIC && $('#wlAdd')) bindWlSearch();
-    if (S.ov) updateMon(S.ov);
+    if (S.ov) updateMon(displayOverview(S.ov));
+    drawLive();
     $$('#secSeg button').forEach(b => b.onclick = () => { S.secMode = b.dataset.m; drawSectors(); });
     loadSectors(); loadBrief(); loadMarket(); clearInterval(S.timers.mkt); S.timers.mkt = setInterval(() => S.page === 'mon' && !document.hidden && loadMarket(), 60000); clearInterval(S.timers.sec); S.timers.sec = setInterval(() => S.page === 'mon' && !document.hidden && loadSectors(), 60000);
     loadIdxSpark(); clearInterval(S.timers.spark); S.timers.spark = setInterval(() => S.page === 'mon' && loadIdxSpark(), 60000);
@@ -526,8 +730,8 @@
       api('quotes?codes=' + lr.items.map(p => p.code).join(',')).then(r => { S.pq = { ...(S.pq || {}), ...r }; }).catch(() => { }); }
     // 账户
     const privateNote = ov.private_time ? `<div class="hint">${esc(privateStatus(ov.private_time, ov.private_refresh_failed))}</div>` : '';
-    $('#monAcct').innerHTML = privateNote + Object.values(ov.accounts).map(a => `<div style="margin-bottom:10px"><div class="row"><b>${esc(a.name)}</b><span class="sp"></span><span class="mono">${yuan(a.equity)}</span></div>
-      <div class="row hint mono"><span>今日 <b class="${cls(a.today_pnl)}">${sgn(a.today_pnl)}</b></span><span>累计 <b class="${cls(a.total_pnl)}">${sgn(a.total_pnl)} (${pct(a.total_pct)})</b></span><span class="sp"></span><span>持仓 ${a.positions.length}</span></div>
+    $('#monAcct').innerHTML = privateNote + Object.values(ov.accounts).map(a => `<div style="margin-bottom:10px"><div class="row"><b>${esc(a.name)}</b><span class="sp"></span><span class="mono">${yuan(shownEquity(a))}</span></div>
+      <div class="row hint mono"><span>今日 ${dayPnl(a)}</span><span>累计 <b class="${cls(a.total_pnl)}">${sgn(a.total_pnl)} (${pct(a.total_pct)})</b></span><span class="sp"></span><span>持仓 ${a.positions.length}</span></div>${accountingNote(a)}
       ${a.positions.slice(0, 4).map(p => `<div class="row mono" style="font-size:12px;cursor:pointer" data-c="${p.code}"><span>${esc(p.name)}</span><span class="sp"></span><span class="${cls(p.pnl_pct)}">${pct(p.pnl_pct)}</span><span class="muted">距止损 ${pct(p.to_stop, 1)}</span></div>`).join('')}</div>`).join('<div class="sep"></div>');
     $('#monAcct').querySelectorAll('[data-c]').forEach(r => r.onclick = () => go('anly', r.dataset.c));
     // 自选
@@ -557,7 +761,8 @@
           <span class="hint">交易日自动运行：全主板扫描 → 10 维因子 + 12 种策略（含数学模型）精评 → 取综合分前 ${st ? st.pick.top_n || 10 : 10} 只 → 按门槛 ${st ? st.pick.min_score : 72} 分分为 A 重点 / B 关注 / C 观察 → AI自动盘按级别买入</span>
           <span class="sp"></span><button class="btn pri rw" id="runPick">▶ 立即选股</button></div><div id="pickProg"></div>`, { cls: 'c12', right: '<div class="seg" id="pkTab"><button data-t="res" class="on">选股结果</button><button data-t="trk">跟踪复盘</button></div>' })}
       <div class="c12 grid" id="pkRes" style="padding:0">${panel('RUNS <small>历史</small>', '<div id="runList" class="scroll" style="max-height:70vh"></div>', { cls: 'c3', np: true })}
-      <div class="c9" id="runDetail"><div class="loading">载入</div></div></div>
+      <div class="c9" id="runDetail"><div class="loading">载入</div></div>
+      <div class="c12" id="researchPreview" hidden></div></div>
       <div class="c12" id="pkTrk" style="display:none"></div>
     </div>`;
     $$('#pkTab button').forEach(b => b.onclick = () => { $$('#pkTab button').forEach(x => x.classList.toggle('on', x === b)); const t = b.dataset.t === 'trk';
@@ -569,6 +774,7 @@
   async function loadRuns(sel) {
     const runs = await api('picks/runs?limit=40');
     const el = $('#runList'); if (!el) return;
+    loadResearchPreview(!runs[0]?.research);
     if (!runs.length) { el.innerHTML = '<div class="empty">暂无记录</div>'; $('#runDetail').innerHTML = panel('RESULT', '<div class="empty">点「立即选股」先跑一次看看<br><small>收盘后跑会用当天收盘数据</small></div>'); return; }
     S.runs = runs; S.run = sel || (S.run && runs.find(r => r.id === S.run) ? S.run : runs[0].id);
     el.innerHTML = `<table class="t">${runs.map(r => `<tr class="click ${r.id === S.run ? 'bgup' : ''}" data-id="${r.id}"><td><div class="mono">${r.date.slice(5)} ${(r.started || '').slice(0, 5)}</div><div class="muted" style="font-size:11px">${SESSION[r.session] || r.session}</div></td>
@@ -576,13 +782,54 @@
     el.querySelectorAll('[data-id]').forEach(tr => tr.onclick = () => { S.run = +tr.dataset.id; loadRuns(S.run); });
     showRun(runs.find(r => r.id === S.run));
   }
+  async function loadResearchPreview(needed) {
+    const el = $('#researchPreview');
+    if (!el) return;
+    el.hidden = !needed;
+    if (!needed || el.dataset.requested) return;
+    el.dataset.requested = '1';
+    const r = await api('research/preview').catch(() => null);
+    if (S.page !== 'pick' || el !== $('#researchPreview') || el.hidden) return;
+    if (!r || r.kind !== 'research_preview') {
+      el.innerHTML = panel('RESEARCH PREVIEW <small>研究预览</small>', '<div data-nc class="hint">等待下一交易日的真实研究样本</div>', {});
+      return;
+    }
+    const stamp = r.quote_time_status === 'known' ? '行情时点 ' + sourceTime(r.asof)
+      : r.quote_time_status === 'partial' ? '行情时点部分可核对 · 最早 ' + sourceTime(r.quote_time_min)
+      : '行情时点未提供';
+    const note = `<div data-nc class="hint">${esc(stamp)} · 生成 ${esc(sourceTime(r.generated_at))} · 等待下一交易日真实选股样本</div>`;
+    el.innerHTML = panel('RESEARCH PREVIEW <small>研究预览</small>', note + researchRun(r), {});
+  }
+  function researchRun(r) {
+    if (!r) return '';
+    const s = r.short_term || {}, v = r.value_quality || {};
+    const short = (s.leaders?.length ? s.leaders : s.candidates || []).slice(0, 8);
+    const value = (v.candidates || []).slice(0, 8);
+    const names = rows => rows.length ? rows.join('') : '<div class="empty">暂无满足数据条件的候选</div>';
+    return `<div class="grid" style="margin-top:8px">
+      ${panel('SHORT TERM <small>短线情绪与板块强度</small>', `<div data-nc class="hint">行情覆盖 ${num(s.quote_count, 0)}/${num(s.snapshot_count, 0)} · 行业覆盖 ${num(s.industry_count, 0)} · 量价覆盖 ${num(s.vwap_count, 0)}</div><div data-nc class="hint">${esc(s.data_note || '')}</div>` +
+        names(short.map(x => `<div class="row"><button class="btn sm" data-a="${esc(x.code)}">${esc(x.name || x.code)}</button><span>${esc(x.industry || '行业未知')}</span><span>相对强度 ${pct(x.relative_pct)}</span><span>成交额名次 ${num(x.amount_rank, 0)}</span></div>`)), { cls: 'c6' })}
+      ${panel('VALUE <small>价值与质量 · 有披露覆盖的候选</small>', `<div data-nc class="hint">披露覆盖 ${num(v.disclosure_count, 0)}/${num(v.universe_count, 0)} · 估值覆盖 ${num(v.valuation_count, 0)} · 候选 ${num(v.candidate_count, 0)}</div><div data-nc class="hint">${esc(v.data_note || '')}</div>` +
+        names(value.map(x => `<div class="row"><button class="btn sm" data-a="${esc(x.code)}">${esc(x.name || x.code)}</button><span>PE ${num(x.pe, 1)} · 质量 ${num(x.quality, 1)} · 披露 ${esc(x.published_at || '未知')}</span></div>`)), { cls: 'c6' })}
+    </div>`;
+  }
+  function shadowResearch(r, l) {
+    const info = `<div data-nc class="hint">模型协议 ${esc(l.model_protocol || '旧版')} · 使用版本 ${esc(l.active_model_version ?? '未启用')} · ${esc(l.prob_label || '暂无已标注概率模型')}</div>`;
+    if (!r) return info;
+    const rows = Object.values(r.factors || {}).map(f => {
+      const windows = f.folds || [], runs = windows.reduce((sum, row) => sum + (row.n || 0), 0);
+      const coverage = Object.entries(f.coverage || {}).map(([k, x]) => `${esc(SESSION[k] || k)} ${num(x.observed, 0)}/${num(x.samples, 0)}`).join(' · ');
+      return `<div class="row"><b>${esc(f.title)}</b><span>${windows.length} 轮 · ${runs} 个选股场次</span><span>${f.eligible ? '通过影子门槛' : '影子证据未达门槛'}</span><span data-nc class="hint">${coverage}</span></div>`;
+    }).join('');
+    return info + `<div data-nc class="hint">${esc(r.baseline || '')} ${esc(r.limits || '')}</div>` + rows;
+  }
   async function showRun(r) {
     const m = r.market || {}, br = m.breadth || {}, rg = m.regime || {};
     const foldPicks = innerWidth <= 600;  // 手机默认折叠，只看结论；点开看说明
     const cards = r.items.map(p => {
       const pl = { stop: p.stop, target1: p.target1, target2: p.target2 };
       return `<div class="pick${foldPicks ? ' fold' : ''}"><div class="hd" data-tg>${p.tier ? `<span class="tier t${p.tier}" title="${TIER[p.tier]}">${p.tier}</span><span class="muted mono" style="margin-right:6px">#${p.rank}</span>` : ''}<span class="nm">${esc(p.name)}</span><span class="cd">${short(p.code)}</span></div>
-        <div class="score"><b>${num(p.score, 1)}</b><small>综合评分 · 估计胜率 ${num(p.prob * 100, 0)}%</small></div>
+        <div class="score"><b>${num(p.score, 1)}</b><small>综合评分 · ${p.prob_src === 'model' ? '3日毛收益&gt;1%估计' : '旧版／经验分'} ${probability(p.prob)}${p.eligible === false ? ' · 仅观察' : ''}</small></div>
         <div class="row mono livep" data-lp="${p.code}" data-base="${p.price}" style="margin-top:6px"><span class="muted">现价</span><b class="lpx">--</b><b class="lpc">--</b><span class="muted">较选出</span><b class="lps">--</b></div>
         <div class="pk-foot row"><span class="chip ${p.industry ? 'c' : ''} pk-mini">${esc(p.industry || (p.strategies[0] || {}).name || '')}</span><span class="sp"></span><button class="btn sm pk-tg" data-tg>${foldPicks ? '展开说明 ▾' : '收起 ▴'}</button><button class="btn sm pri" data-a="${p.code}">分析 ›</button></div>
         <div class="pk-body"><div class="row" style="margin-top:6px">${p.industry ? `<span class="chip c">${esc(p.industry)}</span>` : ''}${p.strategies.slice(0, 3).map(s => `<span class="chip a">${esc(s.name)}</span>`).join('')}</div>
@@ -602,6 +849,7 @@
        ${r.items.length ? `<div class="picks">${cards}</div>` : `<div class="nopick"><b>宁缺毋滥 · 本次无机会</b><span class="hint">扫描 ${r.scanned} 只、精评 ${r.candidates} 只，没有股票同时满足：综合分≥${num(m.min_score, 0)}、至少一个策略信号、盈亏比≥1.4、不过热。<br>空仓也是一种仓位。</span></div>`}`, {}) +
       `<div style="height:10px"></div>` + panel('AI <small>AI 解读这次选股</small>', '<div id="runAi"><div class="loading">载入</div></div>', { right: '<button class="btn sm rw" id="runAiGo">生成解读</button>' }) +
       `<div style="height:10px"></div>` + panel('CANDIDATES <small>候选前30（参考，不是推荐）</small>', '<div class="scroll" style="max-height:420px"><table class="t" id="candT"><tr><td class="loading">载入</td></tr></table></div>', { np: true });
+    if (r.research) $('#runDetail').insertAdjacentHTML('beforeend', researchRun(r.research));
     $$('#runDetail [data-a]').forEach(b => b.onclick = e => { e.stopPropagation(); go('anly', b.dataset.a); });
     $$('#runDetail .pick [data-tg]').forEach(b => b.onclick = e => { if (e.target.closest('[data-a], .star')) return; const c = b.closest('.pick'); const f = !c.classList.contains('fold');
       c.classList.toggle('fold', f); const t = c.querySelector('.pk-tg'); if (t) t.textContent = f ? '展开说明 ▾' : '收起 ▴'; });
@@ -707,12 +955,12 @@
     const L = d.levels || {}, tone = { up: 'var(--up)', down: 'var(--down)', amber: 'var(--amber)', neutral: 'var(--muted)' };
     const lv = (k, v, c) => `<div><div class="l">${k}</div><div class="v ${c || ''}">${v == null ? '--' : Array.isArray(v) ? v.map(x => num(x)).join('~') : num(v)}</div></div>`;
     box.className = '';
-    box.innerHTML = `<div class="sigcard"><div class="sigact" style="border-color:${tone[d.tone]};color:${tone[d.tone]}"><b>${esc(d.action)}</b><small>${esc(PH[d.phase] || '')} ${esc((d.time || '').slice(11, 16))}${d.lite ? '<br>手机本地计算' : ''}</small></div>
+    box.innerHTML = `<div class="sigcard"><div class="sigact" style="border-color:${tone[d.tone]};color:${tone[d.tone]}"><b>${esc(d.action === '做T' ? '旧规则观察' : d.action)}</b><small>旧版参考 · ${esc(PH[d.phase] || '')} ${esc((d.time || '').slice(11, 16))}${d.lite ? '<br>手机本地计算' : ''}</small></div>
       <div class="sigmain"><p style="margin:0 0 6px">${esc(d.summary)}</p>
         ${d.position ? `<div class="hint mono">我的持仓 ${d.position.qty} 股（可卖 ${d.position.avail}）· 成本 ${d.position.cost} · 浮盈 <b class="${cls(d.position.pnl_pct)}">${pct(d.position.pnl_pct)}</b></div>` : '<div class="hint">未持有（「我的模拟盘」）</div>'}
-        <div class="plan siglv">${lv('买入区', L.buy_zone)}${lv('做T低吸', L.t_low, 'up')}${lv('做T高抛', L.t_high, 'down')}${lv('止损', L.stop, 'down')}${lv('止盈①', L.target1, 'up')}${lv('止盈②', L.target2, 'up')}${lv('枢轴 P', L.pivot)}${lv('VWAP 均价', L.vwap)}</div>
+        <div class="plan siglv">${lv('买入区', L.buy_zone)}${lv('旧规则低位参考', L.t_low, 'up')}${lv('旧规则高位参考', L.t_high, 'down')}${lv('止损', L.stop, 'down')}${lv('止盈①', L.target1, 'up')}${lv('止盈②', L.target2, 'up')}${lv('枢轴 P', L.pivot)}${lv('VWAP 均价', L.vwap)}</div>
         <div class="hint mono">R1 ${num(L.r1)} · S1 ${num(L.s1)} · R2 ${num(L.r2)} · S2 ${num(L.s2)} · VWAP ${num(L.vwap)} · 5分RSI ${num(L.rsi5, 0)} · ATR ${num(L.atr, 3)}</div></div>
-      <div class="siglist">${d.signals.map(x => `<div class="sg ${x.kind === 't_fire' ? 'fire' : ''}"><span class="lab" style="color:${tone[x.tone] || 'var(--text)'}">${esc(x.label)}</span><b class="mono">${x.price == null ? '' : num(x.price)}</b><div class="hint">${esc(x.why)}</div></div>`).join('')}
+      <div class="siglist"><div class="hint">旧日线价位和触发记录仅供背景参考，日内新信号见监控。</div>${d.signals.map(x => `<div class="sg"><span class="lab" style="color:${tone[x.tone] || 'var(--text)'}">${esc(x.label)}</span><b class="mono">${x.price == null ? '' : num(x.price)}</b><div class="hint">${esc(x.why)}</div></div>`).join('')}
         <div class="hint" style="margin-top:4px">${esc(d.t_note || '')}</div></div></div>`;
   }
   function drawOB(q) {
@@ -765,7 +1013,7 @@
       <div class="c4" style="display:flex;flex-direction:column;gap:10px">
         ${panel('ORDER BOOK <small>五档 · 内外盘 · 委比</small>', '<div id="obBox"></div>', { np: false })}
         ${panel('VERDICT <small>综合结论</small>', `<div class="big-score">${ring(a.score, tone)}<div><div class="rating" style="color:${tone}">${esc(a.rating)}</div>
-          <div class="hint mono" style="margin-top:6px">因子 ${num(a.fscore, 0)} · 策略 ${num(a.sscore, 0)}</div><div class="hint mono">${a.prob_src === 'model' ? '模型' : '经验'}估计3日上涨概率 <b class="amber">${num(a.prob * 100, 0)}%</b></div></div></div>
+          <div class="hint mono" style="margin-top:6px">因子 ${num(a.fscore, 0)} · 策略 ${num(a.sscore, 0)}</div><div class="hint mono">${a.prob_src === 'model' ? '模型估计3日毛收益&gt;1%的概率' : '经验分（未经概率校准）'} <b class="amber">${probability(a.prob)}</b></div></div></div>
           <p style="margin:10px 0 0">${esc(a.advice)}</p>${a.prob_src !== 'model' ? '<p class="hint" style="margin:4px 0 0">※ 样本积累到200个后会自动训练概率模型，届时概率经过历史检验。</p>' : ''}`)}
         ${panel('PLAN <small>交易计划</small>', `<div class="plan" style="margin-top:0"><div><div class="l">买入区间</div><div class="v">${num(pl.buy_zone[0])}~${num(pl.buy_zone[1])}</div></div>
             <div><div class="l">止损</div><div class="v down">${num(pl.stop)}</div><div class="p down">${pct(pl.stop_pct, 1)}</div></div>
@@ -791,7 +1039,7 @@
          <div class="hint">风险提示</div><ul class="why risk">${a.risks.map(x => `<li>${esc(x)}</li>`).join('') || '<li>暂无明显风险项</li>'}</ul>`, { cls: 'c4' })}
       ${a.models ? panel('MODELS <small>数学模型 · 回归 / 均值回归 / Hurst / 波动率 / 凯利</small>', `<ul class="why">${a.models.summary.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
           <div class="stat4" style="margin-top:8px"><div><div class="l">期望值 EV</div><div class="v ${cls(a.models.kelly.ev)}">${sgn(a.models.kelly.ev)}R</div></div><div><div class="l">凯利仓位</div><div class="v">${num(a.models.kelly.full, 0)}%</div></div>
-            <div><div class="l">半凯利（建议）</div><div class="v amber">${num(a.models.kelly.half, 0)}%</div></div><div><div class="l">估计胜率</div><div class="v">${num(a.prob * 100, 0)}%</div></div></div>
+            <div><div class="l">仓位口径</div><div class="v muted">待独立验证</div></div><div><div class="l">3日毛收益&gt;1%标签</div><div class="v">${a.prob_src === 'model' ? probability(a.prob) : '--'}</div></div></div>
           ${a.chips ? `<div class="sep"></div><div class="row hint mono"><span>筹码：获利盘 <b class="amber">${a.chips.profit_ratio}%</b></span><span>平均成本 <b>${a.chips.avg_cost}</b></span><span>筹码峰 ${a.chips.peak}</span><span>90%集中度 ${a.chips.c90}%（${a.chips.range90.join('~')}）</span>${a.chips.estimated ? '<span>（流通股本未知，换手按估算）</span>' : ''}</div>` : ''}
           <details class="fx"><summary>查看模型公式</summary>${Object.entries(a.models.formulas).map(([k, v]) => `<div><code>${esc(v)}</code></div>`).join('')}</details>`, { cls: 'c8' }) : ''}
       ${STATIC ? (S.priv && S.priv.ai && S.priv.ai.comments[a.code] ? panel('AI <small>AI 点评 · 电脑端生成</small>', md(S.priv.ai.comments[a.code].content) + `<div class="hint mono">${esc(S.priv.ai.comments[a.code].created)}</div>`, { cls: 'c12' }) : '') : panel('AI <small>AI 点评 · ' + esc((S.aiStatus && S.aiStatus.cfg.model) || '未配置') + '</small>', '<div id="aiCmt" class="hint">载入中…</div>', { cls: 'c8', right: '<button class="btn sm" id="aiCmtGo">生成 / 刷新</button>' })}
@@ -962,9 +1210,10 @@
     $('#p-sim').innerHTML = `<div class="grid">
       <div class="panel c12"><div class="ph"><h3>SIM <small>模拟盘</small></h3><div class="r">${acctSeg()}
         <span class="rw row">${P ? '' : '<input class="in" id="simCode" placeholder="代码" style="width:90px;height:22px"><button class="btn sm buy" id="simNew">下单</button>'}<button class="btn sm" id="simReset">${P ? '重新设定' : '重置'}</button></span></div></div>
-        <div class="summary"><div><div class="l">总资产</div><div class="v">${yuan(a.equity)}</div></div><div><div class="l">可用现金</div><div class="v">${yuan(a.cash)}</div></div>
-          <div><div class="l">持仓市值</div><div class="v">${yuan(a.market_value)}</div></div><div><div class="l">今日盈亏</div><div class="v ${cls(a.today_pnl)}">${sgn(a.today_pnl)}</div></div>
-          <div><div class="l">累计盈亏</div><div class="v ${cls(a.total_pnl)}">${sgn(a.total_pnl)}</div></div><div><div class="l">累计收益率</div><div class="v ${cls(a.total_pct)}">${pct(a.total_pct)}</div></div></div>
+        <div class="summary"><div><div class="l">总资产</div><div class="v">${yuan(shownEquity(a))}</div></div><div><div class="l">可用现金</div><div class="v">${yuan(a.cash)}</div></div>
+          <div><div class="l">持仓市值</div><div class="v">${yuan(a.market_value)}</div></div><div><div class="l">今日盈亏</div><div class="v">${dayPnl(a)}</div></div>
+          <div><div class="l">累计盈亏</div><div class="v ${cls(a.total_pnl)}">${sgn(a.total_pnl)}</div></div><div><div class="l">${P ? '录入成本收益率' : '累计收益率'}</div><div class="v ${cls(a.total_pct)}">${pct(a.total_pct)}</div></div></div>
+         ${accountingNote(a)}
         ${a.margin ? `<div class="summary" style="border-top:1px solid var(--line)"><div><div class="l">多头市值</div><div class="v">${yuan(a.margin.long_mv)}</div></div><div><div class="l">融券市值（空头）</div><div class="v down">${yuan(a.margin.short_mv)}</div></div>
           <div><div class="l">融资负债</div><div class="v ${a.margin.borrowed ? 'down' : ''}">${yuan(a.margin.borrowed)}</div></div><div><div class="l">杠杆（总敞口/净资产）</div><div class="v">${a.margin.leverage == null ? '--' : num(a.margin.leverage) + ' 倍'}</div></div>
           <div><div class="l">维持担保比例</div><div class="v ${a.margin.maint_ratio != null && a.margin.maint_ratio < 1.5 ? 'down' : ''}">${a.margin.maint_ratio == null ? '--' : num(a.margin.maint_ratio * 100, 0) + '%'}</div></div><div><div class="l">净资产</div><div class="v">${yuan(a.margin.equity)}</div></div></div>` : ''}
@@ -973,7 +1222,7 @@
         ${a.positions.map(p => `<tr><td class="click" data-c="${p.code}">${p.side === 'short' ? '<span class="chip d">空</span> ' : S.acct === 'ai' ? '<span class="chip u">多</span> ' : ''}${nameCell(p.name, p.code)}</td><td>${p.qty}/<span class="muted">${p.avail}</span></td><td>${num(p.cost, 3)}</td><td class="${cls(p.pct)}">${num(p.price)}</td>
           <td class="${cls(p.pnl)}">${sgn(p.pnl)}<br><small>${pct(p.pnl_pct)}</small></td><td class="down">${num(p.stop)}<br><small>${pct(p.to_stop, 1)}</small></td><td class="up">${num(p.target1)}<br><small>${pct(p.to_target, 1)}</small></td>
           <td class="hide-m">${p.hold_days}天${p.auto ? '<br><small class="amber">自动</small>' : ''}</td><td><button class="btn sm rw" data-ed="${p.code}">改</button> <button class="btn sm sell rw" data-sl='${esc(JSON.stringify({ code: p.code, name: p.name, price: p.price, side: 'sell', qty: p.avail }))}'>卖</button></td></tr>`).join('')}</table></div>` : '<div class="empty">空仓</div>', { cls: 'c8', np: !!a.positions.length, right: S.acct === 'me' ? `<button class="btn sm ${STATIC ? '' : 'rw'}" id="aiHold">AI 持仓体检</button>` : '' })}
-      ${panel('STATS <small>交易统计</small>', `<dl class="kv"><dt>平仓次数</dt><dd>${st.sells}</dd><dt>胜率</dt><dd class="amber">${st.win_rate == null ? '--' : num(st.win_rate * 100, 1) + '%'}</dd>
+      ${panel('STATS <small>交易统计</small>', `${st.cost_note ? `<p class="hint" data-nc="1">${esc(st.cost_note)}</p>` : ''}<dl class="kv"><dt>平仓次数</dt><dd>${st.sells}</dd><dt>胜率</dt><dd class="amber">${st.win_rate == null ? '--' : num(st.win_rate * 100, 1) + '%'}</dd>
         <dt>平均盈利</dt><dd class="up">${num(st.avg_win)}</dd><dt>平均亏损</dt><dd class="down">${num(st.avg_loss)}</dd><dt>盈亏比(PF)</dt><dd>${num(st.profit_factor)}</dd>
         <dt>最大回撤</dt><dd class="down">${num(st.max_dd)}%</dd><dt>平均持有</dt><dd>${st.avg_hold ?? '--'} 天</dd><dt>累计手续费</dt><dd>${num(st.fees)}</dd></dl>
         <div class="sep"></div><div class="hint">按下单心态统计（找出让你亏钱的情绪）</div>
@@ -1034,7 +1283,7 @@
   }
   function planBox(P, a) {
     const mo = Object.entries(P.modes).map(([k, m]) => `<option value="${k}" ${P.cfg.mode === k ? 'selected' : ''}>锁定：${esc(m.name)}</option>`).join('');
-    const b = P.baseline || {}, pend = P.pending || [];
+    const pend = P.pending || [];
     return `<div class="pb" id="planBox"><div class="row"><span class="hint">当前策略</span><span class="chip a" style="font-size:13px">${esc(P.mode_name || '选择中…')}</span>
         <span class="chip">${P.cfg.mode === 'auto' ? 'AI 自选' : '已锁定'}</span><span class="chip">风格 ${esc(P.cfg.risk)}</span>${P.active ? '' : '<span class="chip d">已暂停</span>'}<span class="sp"></span>
         <select class="in rw" id="plModeSel" style="width:auto;height:24px"><option value="auto" ${P.cfg.mode === 'auto' ? 'selected' : ''}>策略：AI 自选</option>${mo}</select>
@@ -1042,8 +1291,7 @@
       ${P.static_time ? `<div class="hint" style="margin-bottom:4px">网页版只读。${esc(privateStatus(P.static_time, P.static_refresh_failed))}。改策略、暂停、重新设定请在电脑上或连上电脑后操作</div>` : ''}
       <div class="hint" style="margin-top:4px">${esc(P.reason || 'AI 正在分析持仓和大盘，几秒后刷新就能看到它选的策略…')}${P.updated ? ` <span class="mono">（${esc(P.updated.slice(5, 16))}）</span>` : ''}</div>
       ${pend.length ? `<div class="row hint" style="margin-top:4px"><span class="amber">待成交</span>${pend.map(o => `<span class="chip">${esc(o.name)} ${o.side === 'buy' ? '买' : '卖'} ${o.qty} 股</span>`).join('')}<span>非交易时间下的单，开盘后按 A 股规则自动成交</span></div>` : ''}
-      <div class="row hint mono" style="margin-top:6px"><span>计划收益 <b class="${cls(a.total_pct)}">${pct(a.total_pct)}</b></span><span>一直不动 <b class="${cls(b.pct)}">${pct(b.pct)}</b></span>
-        <span>超额 <b class="${cls(P.excess)}">${pct(P.excess)}</b></span><span>初始总值 ${yuan(P.cfg.init_total)}</span><span>开始 ${esc((P.cfg.started || '').slice(0, 16))}</span></div>
+      ${planReturns(P, a)}
       <div class="modechips" style="margin-top:6px">${Object.entries(P.stats).map(([k, s]) => `<span class="chip ${k === P.mode ? 'on' : ''}">${esc(s.name)} · ${s.n} 笔${s.win == null ? '' : ' · 胜率 ' + num(s.win * 100, 0) + '%'}${s.n ? ' · ' + sgn(s.pnl, 0) : ''}</span>`).join('')}</div>
       ${P.history.length ? `<details class="fx"><summary>策略切换记录（${P.history.length}）</summary>${P.history.map(h => `<div style="font-size:12px;margin:4px 0"><span class="mono">${esc(h.time.slice(5, 16))}</span> ${esc(h.from ? P.modes[h.from].name : '开始')} → <b>${esc(P.modes[h.to].name)}</b><div class="hint">${esc(h.reason)}</div></div>`).join('')}</details>` : ''}
       <details class="note"><summary>AI 怎么选策略</summary><div class="hint">${Object.values(P.modes).map(m => `<b>${esc(m.name)}</b>：${esc(m.desc)}`).join('<br>')}<br>每天开盘、大盘立场变化、每次选股前都会重新判断；某个策略在本计划已平仓 ≥5 笔且胜率 &lt;35% 时自动降级到更稳的策略。计划模拟盘按真实 A 股规则：T+1、100 股一手、不融资融券、涨跌停限制、真实手续费。「一直不动」= 初始持仓和开局买入的股票一直拿着、现金不动的对照收益。</div></details></div>`;
@@ -1193,7 +1441,7 @@
 
   // ================================================================== F5 自我迭代
   async function renderLearn() {
-    const L = await api('learn');
+    const [L, shadow] = await Promise.all([api('learn'), STATIC ? Promise.resolve(null) : api('research').catch(() => null)]);
     setTimeout(async () => { const el = $('#fcBox'); if (!el) return; try { const f = await api('market/accuracy'); el.className = '';
       el.innerHTML = `<div class="row" style="padding:8px 10px">${Object.entries(f.by).map(([k, v]) => `<span class="chip ${v.acc >= 0.55 ? 'u' : 'd'}">${esc(k)}：${num(v.acc * 100, 0)}%（${v.n} 次）</span>`).join('') || '<span class="hint">每天 15:12 自动对照：早盘（10:00）大盘判断、自选股盘前信号 vs 收盘实际涨跌。积累几天后这里会显示准确率。</span>'}</div>
         <div class="scroll" style="max-height:300px"><table class="t"><tr><th>日期</th><th class="l">对象</th><th class="l">预判</th><th>实际</th><th>对错</th><th class="l">说明</th></tr>${f.recent.map(r => `<tr><td class="muted">${r.date.slice(5)}</td><td class="l">${esc(r.name || r.code)}</td><td class="l">${esc(r.predicted)}</td><td class="${cls(r.actual)}">${pct(r.actual)}</td><td>${r.correct ? '<b class="up">✓</b>' : '<b class="down">✗</b>'}</td><td class="l hint">${esc(r.note || '')}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">暂无</td></tr>'}</table></div>
@@ -1212,6 +1460,7 @@
     const md = L.model ? L.model.metrics : null;
     const st = x => x.n ? `<b class="amber">${num(x.win * 100, 0)}%</b> <small class="muted">均${pct(x.avg)} · ${x.n}次</small>` : '<span class="muted">--</span>';
     $('#p-learn').innerHTML = `<div class="grid">
+      ${panel('RESEARCH <small>因子影子验证与模型协议</small>', shadowResearch(shadow, L), { cls: 'c12' })}
       ${panel('HOW <small>系统怎么“自己变聪明”</small>', `<div class="row" style="gap:18px;align-items:flex-start">
         ${[['① 记录', `每次选股把前150只候选的因子值存为样本（已存 <b class="amber">${L.samples}</b> 个）`], ['② 回填', `收盘后自动回填这些股票之后 1/3/5 日的真实涨跌（已回填 <b class="amber">${L.evaluated}</b> 个）`],
            ['③ 评估', `计算每个因子的 Rank IC（因子高的股票后来是不是真的涨得多），统计每个策略的实战胜率`], ['④ 调整', `有效的因子加权、失效的降权（IC 越稳定调得越快，每次 20%~50%，有上下限）；近期样本权重更大（15 天减半）；第二天就用 1 日收益先反馈，午间 11:35 再快速迭代一次；样本≥${L.min_model}后训练概率模型并做时间外检验`]]
@@ -1222,7 +1471,7 @@
           return `<div class="fbar" style="grid-template-columns:52px 1fr 100px"><span>${L.labels[k]}</span><div class="bar"><i style="width:${w / 0.3 * 100}%;background:var(--amber)"></i><em style="left:${d / 0.3 * 100}%;background:var(--hi)"></em></div><span class="mono">${num(w * 100, 1)}% <small class="${cls(w - d)}">${sgn((w - d) * 100, 1)}</small></span></div>`; }).join('') +
         '<div class="hint">白线 = 初始权重。IC：因子与未来3日收益的相关性，>0.03 说明有用，<0 说明反向。</div>' +
         `<table class="t" style="margin-top:6px"><tr><th>因子</th><th>最近IC</th><th>IR</th></tr>${Object.keys(L.weights).map(k => `<tr><td>${L.labels[k]}</td><td class="${cls(ic[k])}">${num(ic[k], 3)}</td><td>${num(last ? (last.ic.ir || {})[k] : null, 2)}</td></tr>`).join('')}</table>`, { cls: 'c4' })}
-      ${panel('STRATEGIES <small>策略实战表现（3日，含实盘平仓）</small>', `<table class="t"><tr><th class="l">策略</th><th>样本</th><th>胜率</th><th>均收益</th><th>权重</th></tr>${L.strategies.map(s => { const x = strat[s.id] || {};
+      ${panel('STRATEGIES <small>旧版策略统计（3日路径与模拟平仓）</small>', `<table class="t"><tr><th class="l">策略</th><th>样本</th><th>胜率</th><th>均收益</th><th>权重</th></tr>${L.strategies.map(s => { const x = strat[s.id] || {};
           return `<tr title="${esc(s.desc)}"><td class="l">${esc(s.name)}</td><td>${x.n ?? 0}</td><td>${x.win == null ? '--' : num(x.win * 100, 0) + '%'}</td><td class="${cls(x.avg)}">${x.avg == null ? '--' : pct(x.avg)}</td><td class="amber">${num(x.weight ?? 1, 2)}</td></tr>`; }).join('')}</table>
           <div class="hint" style="margin-top:6px">贝叶斯收缩：样本少时权重靠近 1.0、随样本增加逐步放开；胜率高、收益好→升（最高1.5），反之降（最低0.5）。AI 自动盘和计划模拟盘的真实平仓按 2 倍权重计入。</div>
           <details class="fx"><summary>查看每个策略的数学条件</summary>${L.strategies.map(s => `<div><b>${esc(s.name)}</b>：<code>${esc(s.formula || '')}</code></div>`).join('')}
@@ -1234,7 +1483,7 @@
           const rows = L.strategies.map(st => `<tr><td class="l">${esc(st.name)}</td>${sess.map(([k]) => { const x = (bs[k] || {})[st.id]; return x ? `<td>${x.n}</td><td class="${x.win >= 0.5 ? 'up' : 'down'}">${num(x.win * 100, 0)}%</td><td class="amber">${num(x.weight, 2)}</td>` : '<td class="muted">0</td><td>--</td><td class="muted">1.00</td>'; }).join('')}</tr>`).join('');
           return `<div class="scroll"><table class="t"><tr><th class="l" rowspan="2">策略</th>${sess.map(([, n]) => `<th colspan="3">${n}</th>`).join('')}</tr><tr>${sess.map(() => '<th>样本</th><th>胜率</th><th>权重</th>').join('')}</tr>${rows}</table></div>
             <div class="hint" style="padding:6px 10px">同一个策略在早盘和尾盘的表现往往不同：每个场次单独统计 3 日胜率和收益，样本 ≥5 后该场次用自己的权重（0.5~1.5）。</div>`; })(), { cls: 'c8', np: true })}
-      ${panel('T STRATEGIES <small>盘中做T策略 · 自动统计胜率</small>', '<div id="tStats" class="loading">载入</div>', { cls: 'c4', np: true })}
+      ${panel('T STRATEGIES <small>旧版做T · 事后报价路径统计</small>', '<div id="tStats" class="loading">载入</div>', { cls: 'c4', np: true })}
       ${panel('FORECAST <small>预判 vs 实际 · 早盘判断和盘前信号对不对</small>', '<div id="fcBox" class="loading">载入</div>', { cls: 'c12', np: true })}
       ${panel('SCORECARD <small>选股成绩单</small>', `<dl class="kv"><dt>次日胜率</dt><dd>${st(pk.d1)}</dd><dt>3日胜率</dt><dd>${st(pk.d3)}</dd><dt>5日胜率</dt><dd>${st(pk.d5)}</dd></dl><div class="sep"></div>
           <dl class="kv">${Object.entries(pk.outcomes).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl><div class="sep"></div>
@@ -1374,7 +1623,7 @@
     bindLook();
     $('#phRef').onchange = e => { lsSet('aq5_refresh', e.target.value); restartPoll(); toast('已保存'); };
     $('#phRem').onchange = e => { if (e.target.value === '0') lsSet('aq5_pw', null); else if (!S.priv) toast('下次解锁时勾选「记住」即可'); toast('已保存'); };
-    $('#phLock').onclick = () => { if (S.priv) { S.priv = null; S.privateSession = null; lsSet('aq5_pw', null); location.reload(); } else showUnlock(); };
+    $('#phLock').onclick = () => { if (S.priv) { S.priv = null; S.privateSession = null; S.livePrivate = null; lsSet('aq5_pw', null); location.reload(); } else showUnlock(); };
     $('#phClear').onclick = () => { if (!confirm('清除这台手机上保存的密码和设置？')) return; ['aq5_pw', 'aq5_refresh', 'aq5_chat'].forEach(k => lsSet(k, null)); location.reload(); };
   }
   async function renderSet() {
@@ -1534,9 +1783,9 @@
     }).finally(() => { session.pending = null; });
     return session.pending;
   }
-  async function unlockPrivate(key, expectedHash) {
-    const r = await fetch('data/private.enc?t=' + Date.now(),
-      { cache: 'no-store', signal: globalThis.AbortSignal?.timeout?.(15000) });
+  async function unlockPrivate(key, expectedHash, url, timeout = 15000) {
+    const r = await fetch(url || 'data/private.enc?t=' + Date.now(),
+      { cache: 'no-store', signal: globalThis.AbortSignal?.timeout?.(timeout) });
     if (!r.ok) throw new Error('还没有加密的个人数据：请在电脑端「设置 → 密钥保险箱」设置「手机查看密码」，等 1–2 分钟发布完成再试');
     const buf = new Uint8Array(await r.arrayBuffer());
     if (expectedHash) {
@@ -1598,7 +1847,7 @@
     S.timers.rc = setInterval(async () => { if (!S.remote && S.priv && !document.hidden && await connectRemote(true)) { poll(); const [p2, a2] = location.hash.slice(1).split('/'); show(PAGES.includes(p2) ? p2 : 'mon', a2); } }, 60000);
   }
   function showUnlock() {
-    if (S.priv) { if (confirm('锁定并清除本机记住的密码？')) { S.priv = null; S.privateSession = null; lsSet('aq5_pw', null); location.reload(); } return; }
+    if (S.priv) { if (confirm('锁定并清除本机记住的密码？')) { S.priv = null; S.privateSession = null; S.livePrivate = null; lsSet('aq5_pw', null); location.reload(); } return; }
     const m = document.createElement('div'); m.className = 'modal';
     m.innerHTML = `<div class="box" style="max-width:380px">${panel('UNLOCK <small>解锁个人数据</small>', `<p class="hint">输入电脑端设置的「手机查看密码」。自选股、我的模拟盘只在你的浏览器里解密，GitHub 上只有密文。</p>
       <div class="ticket"><label class="full">密码<input class="in" id="ulP" type="password" autocomplete="current-password"></label>
@@ -1690,4 +1939,5 @@
     poll().then(() => { const [p, a] = location.hash.slice(1).split('/'); show(PAGES.includes(p) ? p : 'mon', a); });
   }
   boot();
+  S.timers.live = setInterval(pollLive, 3000);
 })();

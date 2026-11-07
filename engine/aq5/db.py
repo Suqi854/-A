@@ -52,6 +52,24 @@ CREATE TABLE IF NOT EXISTS plan(id INTEGER PRIMARY KEY CHECK(id=1), created TEXT
 
 _local = threading.local()
 _write_lock = threading.RLock()
+_writes_frozen = False
+
+
+class StateFrozen(RuntimeError):
+    """This process has frozen its ledger for the final cloud handoff."""
+
+
+def freeze_writes() -> None:
+    """Wait for the in-flight writer to finish and permanently seal this process."""
+    global _writes_frozen
+    with _write_lock:
+        if getattr(_local, "write_depth", 0):
+            raise RuntimeError("不能在未完成的写事务内冻结账本")
+        _writes_frozen = True
+
+
+def writes_frozen() -> bool:
+    return _writes_frozen
 
 
 def conn() -> sqlite3.Connection:
@@ -59,8 +77,11 @@ def conn() -> sqlite3.Connection:
     if c is None:
         c = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
         c.row_factory = sqlite3.Row
-        c.execute("PRAGMA journal_mode=WAL")
-        c.execute("PRAGMA synchronous=NORMAL")
+        if _writes_frozen:
+            c.execute("PRAGMA query_only=ON")
+        else:
+            c.execute("PRAGMA journal_mode=WAL")
+            c.execute("PRAGMA synchronous=NORMAL")
         _local.c = c
     return c
 
@@ -80,13 +101,19 @@ def init() -> None:
 @contextmanager
 def tx():
     with _write_lock:
+        if _writes_frozen:
+            raise StateFrozen("最终交接账本已冻结，拒绝新增写入")
         c = conn()
+        depth = getattr(_local, "write_depth", 0)
+        _local.write_depth = depth + 1
         try:
             yield c
             c.commit()
-        except Exception:
+        except BaseException:
             c.rollback()
             raise
+        finally:
+            _local.write_depth = depth
 
 
 def q(sql: str, args=()) -> list[dict]:

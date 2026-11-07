@@ -14,7 +14,7 @@ from __future__ import annotations
 import threading
 
 from . import db, market, sim
-from .config import now, today
+from .config import load_settings, now, today
 
 ACCT = "plan"
 MODES = {
@@ -365,9 +365,9 @@ def _buy(p: dict, budget: float, why: str, mode: str) -> bool:
         return False
     pl = p.get("plan") or {}
     try:
-        sim.place(ACCT, p["code"], "buy", qty, stop=pl.get("stop"), target1=pl.get("target1"), target2=pl.get("target2"),
-                  reason=f"{_tag(mode)}：{why}", emotion="计划内", pick_id=p.get("id"))
-        return True
+        o = sim.place(ACCT, p["code"], "buy", qty, stop=pl.get("stop"), target1=pl.get("target1"), target2=pl.get("target2"),
+                      reason=f"{_tag(mode)}：{why}", emotion="计划内", pick_id=p.get("id"))
+        return o["status"] in ("filled", "pending")
     except ValueError as e:
         db.event("plan", f"计划模拟买入失败 {p.get('name')}", str(e), "warn")
         return False
@@ -384,6 +384,8 @@ def _size_k() -> float:
 
 def on_picks(picks: list[dict], session: str) -> None:
     """竞价/尾盘选股后调用：按当前策略决定买卖。"""
+    if not load_settings().get("strategy_v2", {}).get("legacy_auto", False):
+        return
     if not active():
         return
     with _lock:
@@ -433,6 +435,8 @@ def on_picks(picks: list[dict], session: str) -> None:
 
 def tick() -> None:
     """盘中每 2 分钟：大盘立场变了就重新选策略；做T / 轮动 / 进攻模式下对持仓按做T信号高抛低吸。"""
+    if not load_settings().get("strategy_v2", {}).get("legacy_auto", False):
+        return
     if not active() or not sim.can_trade_now():
         return
     from . import signals
@@ -458,7 +462,7 @@ def tick() -> None:
             fired = signals.check_t(code, lv, p["name"], record=False)
             sides = {f["side"] for f in fired}
             names = "、".join(signals.T_STRATS[f["strategy"]][0] for f in fired)
-            if "sell" in sides and not sold:
+            if "sell" in sides and not sold and not back:
                 q = int(sim.available(ACCT, code) / 3 / 100) * 100
                 if q >= 100:
                     _t_order(code, "sell", q, f"做T高抛：{names}（价 {lv['price']}，高抛位 {lv['t_high']}）", p, mode)
@@ -510,13 +514,29 @@ def _scan_entries(mode: str) -> None:
             return  # 每轮最多买一只
 
 
+_T_ORDER_REASON = "计划·%做T%"
+
+
 def _t_qty(code: str, side: str) -> int:
-    return int(db.q1("SELECT COALESCE(SUM(qty),0) AS q FROM orders WHERE account=? AND code=? AND side=? AND reason LIKE ? "
-                     "AND status IN ('filled','pending') AND created LIKE ?",
-                     (ACCT, code, side, "计划·%做T%", today() + "%"))["q"])
+    return int(db.q1("SELECT COALESCE(SUM(o.qty),0) AS q FROM orders AS o "
+                     "WHERE o.account=? AND o.code=? AND o.side=? AND o.reason LIKE ? AND o.status='filled' "
+                     "AND COALESCE(NULLIF(o.updated,''), (SELECT MAX(t.time) FROM trades AS t "
+                     "WHERE t.order_id=o.id AND t.account=o.account)) LIKE ?",
+                     (ACCT, code, side, _T_ORDER_REASON, today() + "%"))["q"])
 
 
 def _t_order(code, side, qty, why, pos, mode) -> None:
+    if db.q1("SELECT 1 FROM orders WHERE account=? AND code=? AND status='pending' AND reason LIKE ? LIMIT 1",
+             (ACCT, code, _T_ORDER_REASON)):
+        return
+    # 撮合线程可能刚处理完挂单，按最新已成交腿重新决定剩余数量。
+    sold, back = _t_qty(code, "sell"), _t_qty(code, "buy")
+    if side == "buy":
+        qty = min(qty, max(0, sold - back))
+        if not qty:
+            return
+    elif sold or back:
+        return
     try:
         sim.place(ACCT, code, side, qty, reason=f"{_tag(mode)}：{why}", emotion="计划内",
                   stop=pos.get("stop") if side == "buy" else None, target1=pos.get("target1") if side == "buy" else None,
@@ -548,10 +568,12 @@ def view() -> dict:
     if not r or not db.q1("SELECT 1 FROM accounts WHERE id=?", (ACCT,)):
         return {"exists": False, "modes": {k: {"name": v[0], "desc": v[1]} for k, v in MODES.items()}, "risks": list(RISK)}
     acct = sim.view(ACCT)
+    from . import accounting
     base = baseline(r["cfg"])
+    performance = accounting.plan_performance(r["cfg"], acct)
     pend = [o for o in acct.get("orders", []) if o["status"] == "pending"]
     return {"exists": True, "active": bool(r["active"]), "cfg": r["cfg"], "mode": r["mode"], "pending": pend,
             "mode_name": MODES[r["mode"]][0] if r["mode"] else None, "reason": r["reason"], "updated": r["updated"],
-            "stance": r["stance"], "history": r["history"][::-1], "stats": mode_stats(), "baseline": base,
-            "excess": round(acct["total_pct"] - base["pct"], 2) if base else None,
+            "stance": r["stance"], "history": r["history"][::-1], "stats": mode_stats(), "baseline": base, "performance": performance,
+            "excess": round(acct["total_pct"] - base["pct"], 2) if base and acct.get("total_pct") is not None else None,
             "modes": {k: {"name": v[0], "desc": v[1]} for k, v in MODES.items()}, "risks": list(RISK), "account": acct}

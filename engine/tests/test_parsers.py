@@ -1,6 +1,7 @@
 """用 2026-10-22 实际抓到的接口原文验证解析器。"""
-import json, os, sys, tempfile
-os.environ["AQ5_DATA"] = tempfile.mkdtemp()
+import json, os, sys
+os.environ["AQ5_MOCK"] = "0"  # 解析使用下方固定响应，走真实解析分支。
+os.environ["AQ5_DATA"] = os.environ["AQ5_TEST_DATA"]
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from aq5 import market, db
 db.init()

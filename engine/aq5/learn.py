@@ -1,7 +1,7 @@
 """自我迭代：
 1. 每天收盘后回填选股样本的未来收益（1/3/5日）。
-2. 用 Rank IC 衡量每个因子最近的预测力，平滑地调整因子权重（有上下限，防止过拟合）。
-3. 统计每个策略的实战胜率，调整策略权重。
+2. 用 Rank IC 评估已完成标签窗口的线上候选，生成不自动启用的权重建议。
+3. 统计已链接的模拟成交和候选路径，生成影子权重建议。
 4. 样本够多后训练逻辑回归模型，给出“上涨概率”（经过历史校验）。
 所有版本都留档，可在“学习中心”看到每一次变化及原因。
 """
@@ -15,7 +15,10 @@ from .config import now
 
 MIN_IC_SAMPLES = 60
 MIN_MODEL_SAMPLES = 200
-LABEL_RET = 1.0  # 3日收益 > 1% 记为“成功”
+LABEL_RET = 1.0
+MODEL_PROTOCOL = "closed-live-v1"
+PROB_LABEL = "选出参考价至随后第3个完整交易日收盘毛收益超过1%的概率"
+HEURISTIC_LABEL = "经验参考分，未经校准，不是成交胜率"
 
 _model_cache = {"ver": None, "m": None}
 
@@ -51,51 +54,86 @@ def _sig(z):
 
 
 # ----------------------------------------------------------------------------- 回填未来收益
-def fill_outcomes() -> dict:
+def _closed_rows(code, cutoff):
     from . import market
-    pend = db.q("SELECT id, code, date, price, 'sample' AS t FROM samples WHERE evaluated=0 AND date<?",
-                (now().strftime("%Y-%m-%d"),))
-    pend += db.q("SELECT id, code, date, price, stop, target1, 'pick' AS t FROM picks WHERE evaluated=0 AND date<?",
-                 (now().strftime("%Y-%m-%d"),))
-    done = 0
-    cache = {}
+    try:
+        rows = market.kline(code, 120, history=True)
+    except RuntimeError:
+        return []
+    # 盘中 K 线可能包含半根今日数据。缓存也可能只有最近一个交易日的半根。
+    cutoff_day = cutoff.strftime("%Y-%m-%d")
+    allow_today = cutoff.hour * 100 + cutoff.minute >= 1505
+    if not market.MOCK:
+        meta = db.q1("SELECT updated FROM kline_meta WHERE code=?", (code,))
+        if not meta:
+            return []
+        fetched_at = meta["updated"]
+    else:
+        fetched_at = cutoff.strftime("%Y-%m-%d %H:%M")
+    return [r for r in rows if (r["date"] < cutoff_day or allow_today and r["date"] == cutoff_day)
+            and fetched_at >= r["date"] + " 15:05" and (r.get("close") or 0) > 0
+            and math.isfinite(r["close"])]
+
+
+def fill_outcomes() -> dict:
+    from . import research
+    cutoff = now()
+    cut_date = cutoff.strftime("%Y-%m-%d")
+    pend = db.q("SELECT id, code, date, price, 'sample' AS t FROM samples WHERE evaluated=0 AND date<?", (cut_date,))
+    pend += db.q("SELECT id, code, date, price, stop, target1, 'pick' AS t FROM picks WHERE evaluated=0 AND date<?", (cut_date,))
+    if not pend:
+        return {"updated": 0}
+    days = sorted({r["date"] for r in _closed_rows("sh000300", cutoff)})
+    if not days:
+        return {"updated": 0, "reason": "没有可核实的已完成交易日"}
+    research.init()
+    done, cache = 0, {}
+    closed_dates = set(days)
     for p in pend:
+        if p["date"] not in closed_dates or not p["price"] or not math.isfinite(p["price"]):
+            continue
         if p["code"] not in cache:
-            try:
-                cache[p["code"]] = market.kline(p["code"], 120, history=True)
-            except RuntimeError:
-                cache[p["code"]] = []
-        rows = [r for r in cache[p["code"]] if r["date"] > p["date"]]
-        if not rows or not p["price"]:
+            cache[p["code"]] = {r["date"]: r for r in _closed_rows(p["code"], cutoff)}
+        path = []
+        for day in [d for d in days if d > p["date"]][:5]:
+            row = cache[p["code"]].get(day)
+            if not row:
+                break  # 缺前一根时，不拿后面的收盘价代替
+            path.append(row)
+        if not path:
             continue
         base = p["price"]
 
         def ret(k):
-            return round((rows[k - 1]["close"] / base - 1) * 100, 3) if len(rows) >= k else None
+            return round((path[k - 1]["close"] / base - 1) * 100, 3) if len(path) >= k else None
+
         r1, r3, r5 = ret(1), ret(3), ret(5)
         complete = r5 is not None
-        if p["t"] == "sample":
-            with db.tx() as c:
-                c.execute("UPDATE samples SET ret_1d=?, ret_3d=?, ret_5d=?, evaluated=? WHERE id=?",
-                          (r1, r3, r5, 1 if complete else 0, p["id"]))
-        else:
-            w = rows[:5]
-            mu = round((max(r["high"] for r in w) / base - 1) * 100, 2)
-            md = round((min(r["low"] for r in w) / base - 1) * 100, 2)
-            outcome = "持有中"
-            for r in w:
-                if p["stop"] and r["low"] <= p["stop"]:
-                    outcome = "触发止损"
-                    break
-                if p["target1"] and r["high"] >= p["target1"]:
-                    outcome = "达到止盈1"
-                    break
-            else:
+        with db.tx() as c:
+            if p["t"] == "sample":
+                c.execute("""UPDATE samples SET ret_1d=?, ret_3d=COALESCE(?, ret_3d),
+                          ret_5d=COALESCE(?, ret_5d), evaluated=? WHERE id=? AND evaluated=0""",
+                          (r1, r3, r5, int(complete), p["id"]))
                 if complete:
-                    outcome = "5日上涨" if (r5 or 0) > 0 else "5日下跌"
-            with db.tx() as c:
-                c.execute("UPDATE picks SET ret_1d=?, ret_3d=?, ret_5d=?, max_up_5d=?, max_dn_5d=?, outcome=?, "
-                          "evaluated=? WHERE id=?", (r1, r3, r5, mu, md, outcome, 1 if complete else 0, p["id"]))
+                    c.execute("INSERT OR IGNORE INTO research_label_windows VALUES(?,?,?)",
+                              (p["id"], path[2]["date"], path[4]["date"]))
+            else:
+                mu = round((max((r.get("high") or r["close"]) for r in path) / base - 1) * 100, 2)
+                md = round((min((r.get("low") or r["close"]) for r in path) / base - 1) * 100, 2)
+                outcome = "持有中"
+                for r in path:
+                    if p["stop"] and (r.get("low") or r["close"]) <= p["stop"]:
+                        outcome = "触发止损"
+                        break
+                    if p["target1"] and (r.get("high") or r["close"]) >= p["target1"]:
+                        outcome = "达到止盈1"
+                        break
+                else:
+                    if complete:
+                        outcome = "5日上涨" if r5 > 0 else "5日下跌"
+                c.execute("""UPDATE picks SET ret_1d=?, ret_3d=COALESCE(?, ret_3d), ret_5d=COALESCE(?, ret_5d),
+                          max_up_5d=?, max_dn_5d=?, outcome=?, evaluated=? WHERE id=? AND evaluated=0""",
+                          (r1, r3, r5, mu, md, outcome, int(complete), p["id"]))
         done += 1
     return {"updated": done}
 
@@ -155,9 +193,8 @@ def iterate(force: bool = False) -> dict:
     from .factors import DEFAULT_WEIGHTS, KEYS, current_weights
     from .strategies import STRATEGIES
     ref = now().strftime("%Y-%m-%d")
-    rows = db.q("SELECT date, session, factors, strategies, ret_1d, ret_3d FROM samples "
-                "WHERE ret_3d IS NOT NULL OR ret_1d IS NOT NULL ORDER BY id DESC LIMIT 8000")
-    if len(rows) < MIN_IC_SAMPLES and not force:
+    rows = _mature_live()
+    if not rows or (len(rows) < MIN_IC_SAMPLES and not force):
         return {"changed": False, "reason": f"有效样本 {len(rows)} 个，少于 {MIN_IC_SAMPLES}，权重保持不变"}
     groups = {}
     for r in rows:
@@ -227,18 +264,13 @@ def iterate(force: bool = False) -> dict:
     note = "；".join(f"{k} {old[k]:.3f}→{new[k]:.3f}（IC {ic_mean[k]:+.3f}）" for k in moved)
     if real:
         note += f"；实战平仓 {len(real)} 笔参与策略评估"
-    with db.tx() as c:
-        c.execute("INSERT INTO weights(created, weights, ic, strat, note) VALUES(?,?,?,?,?)",
-                  (now().strftime("%Y-%m-%d %H:%M"), db.dumps(new),
-                   db.dumps({"mean": ic_mean, "ir": ic_ir, "groups": len(groups), "samples": len(rows)}),
-                   db.dumps(strat), note))
-    db.event("learn", "因子权重已迭代", note)
-    return {"changed": True, "weights": new, "ic": ic_mean, "strat": strat, "note": note}
+    return {"changed": False, "shadow": True, "baseline_version": ver, "weights": new,
+            "ic": ic_mean, "strat": strat, "note": "影子建议（未启用）： " + note}
 
 
 def tune_hf() -> dict:
     """高频阈值自调：按当天高频平仓的胜率收紧或放宽进场门槛（委比 imb、2分钟动量 mom），有上下限。"""
-    from .config import load_settings, save_settings
+    from .config import load_settings
     rows = db.q("SELECT pnl FROM trades WHERE account='ai' AND reason LIKE '高频·平%' AND pnl IS NOT NULL AND time LIKE ?",
                 (now().strftime("%Y-%m-%d") + "%",))
     n = len(rows)
@@ -254,10 +286,8 @@ def tune_hf() -> dict:
     else:
         return {"changed": False, "reason": f"今日高频 {n} 笔、胜率 {win:.0%}，阈值合适"}
     new = {"imb": round(min(0.4, max(0.08, hf["imb"] * k)), 3), "mom": round(min(0.4, max(0.06, hf["mom"] * k)), 3)}
-    save_settings({"hf": new})
     msg = f"今日高频平仓 {n} 笔、胜率 {win:.0%}：{why}，委比 {hf['imb']}→{new['imb']}，2分钟动量 {hf['mom']}→{new['mom']}%"
-    db.event("learn", "高频阈值已自动调整", msg)
-    return {"changed": True, "note": msg, **new}
+    return {"changed": False, "shadow": True, "note": msg, **new}
 
 
 # ----------------------------------------------------------------------------- 逻辑回归模型
@@ -265,80 +295,131 @@ def _features(raw: dict, sigs) -> list[float]:
     from .factors import KEYS
     from .strategies import STRATEGIES
     ids = set(s["id"] if isinstance(s, dict) else s for s in (sigs or []))
-    return [float(raw.get(k, 0) or 0) for k in KEYS] + [1.0 if key in ids else 0.0 for key, *_ in STRATEGIES]
+    values = [raw.get(k) for k in KEYS]
+    return [float(v) if isinstance(v, (float, int)) and math.isfinite(v) else 0.0 for v in values] + [
+        1.0 if key in ids else 0.0 for key, *_ in STRATEGIES]
+
+
+def _mature_live() -> list[dict]:
+    from . import research
+    if not research.has_schema():
+        return []
+    return db.q("""SELECT s.id, s.date, s.session, s.score, s.factors, s.strategies, s.ret_1d, s.ret_3d, w.end_5d
+                   FROM samples s JOIN research_runs r ON r.run_id=s.run_id
+                   JOIN research_label_windows w ON w.sample_id=s.id
+                   WHERE s.session IN ('auction','close') AND s.evaluated=1 AND s.ret_3d IS NOT NULL
+                     AND r.version=? AND w.end_3d > s.date AND w.end_5d > w.end_3d AND w.end_5d <= ?
+                   ORDER BY s.date DESC, s.id DESC LIMIT 8000""", (research.VERSION, now().strftime("%Y-%m-%d")))
+
+
+def _holdout(rows: list[dict]) -> tuple[list, list]:
+    dates = sorted({r["date"] for r in rows})
+    cut = max(15, int(len(dates) * 0.8))
+    if len(dates) - cut < 5:
+        return [], []
+    split = dates[cut]
+    train_rows = [r for r in rows if r["date"] < split and r["end_5d"] < split]
+    if len({r["date"] for r in train_rows}) < 10:
+        return [], []
+    return train_rows, [r for r in rows if r["date"] >= split]
 
 
 def train() -> dict:
-    rows = db.q("SELECT factors, strategies, ret_3d, date FROM samples WHERE ret_3d IS NOT NULL "
-                "ORDER BY date DESC, id DESC LIMIT 8000")[::-1]
+    rows = _mature_live()[::-1]
     if len(rows) < MIN_MODEL_SAMPLES:
-        return {"trained": False, "reason": f"样本 {len(rows)} 个，至少需要 {MIN_MODEL_SAMPLES} 个才训练模型"}
+        return {"trained": False, "reason": f"新协议下完成5日窗口的线上样本 {len(rows)}，至少需要 {MIN_MODEL_SAMPLES} 个"}
+    train_rows, test_rows = _holdout(rows)
+    if not train_rows:
+        return {"trained": False, "reason": "独立交易日留出集不足，或排除5日标签重叠后训练窗口不足"}
+    rows = train_rows + test_rows
     X = [_features(db.loads(r["factors"], {}), db.loads(r["strategies"], [])) for r in rows]
-    y = [1.0 if r["ret_3d"] > LABEL_RET else 0.0 for r in rows]
+    y = [float(r["ret_3d"] > LABEL_RET) for r in rows]
+    cut = len(train_rows)
+    if cut < 100 or len(rows) - cut < 50 or len(set(y[:cut])) < 2 or len(set(y[cut:])) < 2:
+        return {"trained": False, "reason": "清洗后训练或留出样本不足，或标签只有一类"}
     d = len(X[0])
-    mu = [sum(x[j] for x in X) / len(X) for j in range(d)]
-    sd = [math.sqrt(sum((x[j] - mu[j]) ** 2 for x in X) / len(X)) or 1.0 for j in range(d)]
+    mu = [sum(x[j] for x in X[:cut]) / cut for j in range(d)]
+    sd = [math.sqrt(sum((x[j] - mu[j]) ** 2 for x in X[:cut]) / cut) or 1.0 for j in range(d)]
     Z = [[(x[j] - mu[j]) / sd[j] for j in range(d)] for x in X]
-    cut = int(len(Z) * 0.8)  # 按时间切分：前80%训练，后20%检验（避免偷看未来）
-    tr, te = list(range(cut)), list(range(cut, len(Z)))
     w, b, lr, lam = [0.0] * d, 0.0, 0.1, 0.01
-    rnd = random.Random(1)
+    train_X = Z[:cut]
     for _ in range(250):
-        rnd.shuffle(tr)
         gw, gb = [0.0] * d, 0.0
-        for i in tr:
-            p = _sig(sum(w[j] * Z[i][j] for j in range(d)) + b)
-            e = p - y[i]
+        for i, x in enumerate(train_X):
+            e = _sig(sum(wj * xj for wj, xj in zip(w, x)) + b) - y[i]
             for j in range(d):
-                gw[j] += e * Z[i][j]
+                gw[j] += e * x[j]
             gb += e
-        n = len(tr)
-        w = [w[j] - lr * (gw[j] / n + lam * w[j]) for j in range(d)]
-        b -= lr * gb / n
-
-    def auc(idx):
-        ps = [(_sig(sum(w[j] * Z[i][j] for j in range(d)) + b), y[i]) for i in idx]
-        pos = [p for p, t in ps if t == 1]
-        neg = [p for p, t in ps if t == 0]
-        if not pos or not neg:
-            return None
-        s = sum(1 for a in pos for c in neg if a > c) + 0.5 * sum(1 for a in pos for c in neg if a == c)
-        return s / (len(pos) * len(neg))
-    test_auc = auc(te)
-    top = sorted(te, key=lambda i: -(sum(w[j] * Z[i][j] for j in range(d)) + b))[:max(5, len(te) // 5)]
-    metrics = {"n": len(rows), "train": cut, "test": len(te), "base_rate": round(sum(y) / len(y), 3),
-               "test_auc": None if test_auc is None else round(test_auc, 3),
-               "top20_hit": round(sum(y[i] for i in top) / len(top), 3) if top else None}
-    usable = test_auc is not None and test_auc >= 0.55
-    metrics["usable"] = usable
+        w = [w[j] - lr * (gw[j] / cut + lam * w[j]) for j in range(d)]
+        b -= lr * gb / cut
+    ps = [_sig(sum(wj * xj for wj, xj in zip(w, x)) + b) for x in Z[cut:]]
+    labels = y[cut:]
+    pos = int(sum(labels))
+    neg = len(labels) - pos
+    auc = (sum(rank for rank, label in zip(_rank(ps), labels) if label) - pos * (pos - 1) / 2) / (pos * neg)
+    n_top = max(5, len(labels) // 5)
+    top = sorted(range(len(labels)), key=lambda i: -ps[i])[:n_top]
+    prior = sum(y[:cut]) / cut
+    brier = sum((p - t) ** 2 for p, t in zip(ps, labels)) / len(labels)
+    base_brier = sum((prior - t) ** 2 for t in labels) / len(labels)
+    usable = auc >= 0.55 and brier < base_brier
+    metrics = {"protocol": MODEL_PROTOCOL, "label": PROB_LABEL, "usable": usable,
+               "n": len(rows), "train": cut, "test": len(labels), "base_rate": round(prior, 3),
+               "test_auc": round(auc, 3), "top20_hit": round(sum(labels[i] for i in top) / len(top), 3),
+               "train_end": max(r["date"] for r in train_rows), "train_label_end": max(r["end_5d"] for r in train_rows),
+               "test_start": min(r["date"] for r in test_rows), "test_end": max(r["date"] for r in test_rows),
+               "brier": round(brier, 5), "prior_brier": round(base_brier, 5)}
     with db.tx() as c:
         c.execute("INSERT INTO models(created, coef, metrics) VALUES(?,?,?)",
-                  (now().strftime("%Y-%m-%d %H:%M"), db.dumps({"w": w, "b": b, "mu": mu, "sd": sd}),
-                   db.dumps(metrics)))
-    db.event("learn", "概率模型已重新训练",
-             f"样本 {len(rows)}，检验AUC {metrics['test_auc']}，{'启用' if usable else '效果不够，暂不启用'}")
-    _model_cache["ver"] = None
+                  (now().strftime("%Y-%m-%d %H:%M"), db.dumps({"w": w, "b": b, "mu": mu, "sd": sd}), db.dumps(metrics)))
+    db.event("learn", "概率模型已验证", f"样本外 AUC {metrics['test_auc']}，{'可用于展示' if usable else '保留为未通过版本'}")
     return {"trained": True, "metrics": metrics}
 
 
-def _load_model():
-    r = db.q1("SELECT version, coef, metrics FROM models ORDER BY version DESC LIMIT 1")
-    if not r:
+def _model_rows() -> list[dict]:
+    rows = db.q("SELECT version, created, coef, metrics FROM models ORDER BY version DESC")
+    for r in rows:
+        r["metrics"] = db.loads(r["metrics"], {})
+    return [r for r in rows if r["metrics"].get("protocol") == MODEL_PROTOCOL and r["metrics"].get("usable")]
+
+
+def _selected_model() -> dict | None:
+    from . import research
+    if not research.has_schema():
         return None
-    if _model_cache["ver"] != r["version"]:
-        m = db.loads(r["metrics"], {})
-        _model_cache["ver"] = r["version"]
-        _model_cache["m"] = db.loads(r["coef"], None) if m.get("usable") else None
-    return _model_cache["m"]
+    version = db.q1("SELECT value FROM research_controls WHERE name='model_version'")
+    return db.q1("""SELECT version, coef FROM models
+                    WHERE CASE WHEN json_valid(metrics)
+                               THEN json_extract(metrics, '$.protocol')=? AND json_extract(metrics, '$.usable')=1 END
+                      AND (? IS NULL OR version=?)
+                    ORDER BY version DESC LIMIT 1""",
+                 (MODEL_PROTOCOL, version["value"] if version else None, version["value"] if version else None))
+
+
+def select_model(version: int | None) -> dict:
+    """显式回退到合格旧版本。0 使用经验分，None 恢复选择最新合格版本。"""
+    from . import research
+    if version not in (None, 0) and not any(r["version"] == version for r in _model_rows()):
+        raise ValueError("所选模型版本未通过本协议验证")
+    research.init()
+    with db.tx() as c:
+        if version is None:
+            c.execute("DELETE FROM research_controls WHERE name='model_version'")
+        else:
+            c.execute("INSERT OR REPLACE INTO research_controls VALUES('model_version', ?)", (str(version),))
+    return {"version": version}
 
 
 def predict(raw: dict, sigs, total: float) -> tuple[float, str]:
-    m = _load_model()
-    if m and len(m["w"]) == len(_features(raw, sigs)):
+    row = _selected_model()
+    if row:
+        if _model_cache["ver"] != row["version"]:
+            _model_cache.update(ver=row["version"], m=db.loads(row["coef"], None))
+        m = _model_cache["m"]
         x = _features(raw, sigs)
-        z = sum(m["w"][j] * (x[j] - m["mu"][j]) / m["sd"][j] for j in range(len(x))) + m["b"]
-        return round(_sig(z), 3), "model"
-    # 冷启动：经验映射，未经校准，只用于排序参考
+        if m and len(m["w"]) == len(x):
+            z = sum(w * (v - mu) / sd for w, v, mu, sd in zip(m["w"], x, m["mu"], m["sd"])) + m["b"]
+            return round(_sig(z), 3), "model"
     return round(0.2 + 0.5 * _sig((total - 65) / 8), 3), "heuristic"
 
 
@@ -401,8 +482,8 @@ def bootstrap(n_stocks: int = 200, days: int = 80, step: int = 2) -> dict:
                           [(d, "history", code, p, db.dumps({k: round(v, 4) for k, v in raw.items()}), db.dumps(sig),
                             r1, r3, r5) for d, code, p, raw, sig, r1, r3, r5 in out])
         BOOT["msg"] = f"已生成 {len(out)} 个历史样本，开始评估"
-        it = iterate()
-        tr = train()
+        it = {"changed": False, "reason": "历史回放与线上迭代分开"}
+        tr = {"trained": False, "reason": "历史回放不参与线上模型训练"}
         db.event("learn", "历史冷启动完成", f"{len(codes)} 只股票、{len(out)} 个样本；"
                  + (it.get("note") or it.get("reason", "")))
         BOOT["msg"] = f"完成：{len(out)} 个样本"
@@ -423,15 +504,9 @@ def daily() -> dict:
 
 
 def quick() -> dict:
-    """午间快速迭代：回填昨天样本的 1 日收益并更新权重（模型维度变了才重训），下午就用上新权重。"""
-    from .factors import KEYS
-    from .strategies import STRATEGIES
-    a = fill_outcomes()
-    b = iterate()
-    m = db.q1("SELECT coef FROM models ORDER BY version DESC LIMIT 1")
-    dim = len((db.loads(m["coef"], {}) or {}).get("w", [])) if m else 0
-    c = train() if m and dim != len(KEYS) + len(STRATEGIES) else {"trained": False, "reason": "午间不重训"}
-    return {"outcomes": a, "iterate": b, "model": c}
+    """午间只补齐已完成的交易日，生成影子权重建议。"""
+    return {"outcomes": fill_outcomes(), "iterate": iterate(),
+            "model": {"trained": False, "reason": "午间不重训"}}
 
 
 def summary() -> dict:
@@ -452,7 +527,10 @@ def summary() -> dict:
         v = [p[key] for p in pk if p[key] is not None]
         return {"n": len(v), "win": round(sum(1 for x in v if x > 0) / len(v), 3) if v else None,
                 "avg": round(sum(v) / len(v), 2) if v else None}
+    active_model = _selected_model()
     return {"version": ver, "weights": w, "labels": LABELS, "history": hist, "model": m,
+            "model_protocol": MODEL_PROTOCOL, "prob_label": PROB_LABEL,
+            "active_model_version": active_model["version"] if active_model else None,
             "samples": n_s["n"] or 0, "evaluated": n_s["e"] or 0,
             "picks": {"d1": stat("ret_1d"), "d3": stat("ret_3d"), "d5": stat("ret_5d"),
                       "outcomes": {o: sum(1 for p in pk if p["outcome"] == o) for o in
