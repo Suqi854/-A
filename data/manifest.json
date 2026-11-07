@@ -1,1 +1,1 @@
-{"schema":1,"updated":"2026-11-07 22:13:37","full":false,"phase":"closed","files":["latest.json","private.enc(2只自选,加密)"],"note":"A量化公开数据：行情、选股、个股分析、AI自动盘、因子迭代。仅供学习研究，不构成投资建议。"}
+{"schema":1,"updated":"2026-11-07 22:45:20","full":false,"phase":"closed","files":["latest.json","runs.json","quotes.json","analysis/*.json(10)"],"note":"A量化公开数据：行情、选股、个股分析、AI自动盘、因子迭代。仅供学习研究，不构成投资建议。"}
