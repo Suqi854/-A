@@ -64,6 +64,7 @@ def api_overview(_q):
     idx = market.quotes(s["indices"])
     ovs = market.quotes(s["overseas"])
     wl = market.quotes(s["watchlist"])
+    snap = []
     try:
         snap = market.snapshot()
         br = market.breadth(snap)
@@ -79,7 +80,13 @@ def api_overview(_q):
         reg = analysis.regime()
     except Exception:  # noqa: BLE001
         reg = {"state": "未知", "code": "unknown", "desc": "指数数据获取失败"}
-    last = db.q1("SELECT id FROM pick_runs ORDER BY id DESC LIMIT 1")
+    runs = picker.runs(1)
+    last_run = runs[0] if runs else None
+    pick_codes = {p["code"] for p in last_run["items"]} if last_run else set()
+    pick_quotes = {
+        q["code"]: {"price": q["price"], "pct": q.get("pct")}
+        for q in snap if q["code"] in pick_codes and (q.get("price") or 0) > 0
+    }
     accts = {k: sim.view(k, light=True) for k in sim.existing()}
     for a in accts.values():
         a["positions"] = [{k: p[k] for k in ("code", "name", "qty", "price", "pct", "pnl", "pnl_pct", "to_stop",
@@ -89,7 +96,7 @@ def api_overview(_q):
             "overseas": [ovs.get(c) for c in s["overseas"] if ovs.get(c)],
             "watchlist": [wl.get(market.norm_code(c)) or {"code": market.norm_code(c)} for c in s["watchlist"]],
             "breadth": br, "snap": market.SNAP_INFO, "regime": reg, "top": top, "bottom": bottom, "inflow": inflow,
-            "last_run": picker.runs(1)[0] if last else None, "accounts": accts,
+            "last_run": last_run, "pick_quotes": pick_quotes, "accounts": accts,
             "events": db.q("SELECT * FROM events ORDER BY id DESC LIMIT 30"),
             "scheduler": scheduler.STATUS, "picker": picker.STATE, "publish": publisher.STATE,
             "lan": f"http://{lan_ip()}:{s['port']}", "version": VERSION}

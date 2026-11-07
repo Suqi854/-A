@@ -1,5 +1,7 @@
 """离线测试（5.1.1）：外观设置各端同步、计划模拟进加密个人包（电脑离线时手机网页版可看）。"""
 import gzip, json, os, sys, tempfile
+from hashlib import sha256
+from unittest.mock import patch
 os.environ["AQ5_MOCK"] = "1"
 os.environ["AQ5_DATA"] = os.environ.get("AQ5_TEST_DATA") or tempfile.mkdtemp()
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -35,4 +37,24 @@ assert pl and pl["exists"] and pl["cfg"]["cash"] == 300000 and len(pl["account"]
 assert priv["look"]["theme"] == "ths"
 assert set(json.loads((d / "latest.json").read_text("utf-8"))["accounts"]) == {"ai"}, "计划模拟不能出现在公开数据里"
 print("加密包里的计划模拟:", pl["mode_name"], "持仓", [p["name"] for p in pl["account"]["positions"]], "| 发布目录", publisher.repo_dir())
+# 3 盘中增量发布：只给最新入选股发布快照报价，缺报价不回填选出价。
+with db.tx() as conn:
+    run_id = conn.execute("INSERT INTO pick_runs(date, session, picks) VALUES (?, ?, ?)",
+                          ("2026-11-06", "manual", 2)).lastrowid
+    conn.executemany("INSERT INTO picks(run_id, code, price) VALUES (?, ?, ?)",
+                     [(run_id, "sh605997", 10), (run_id, "sh605998", 20)])
+quote_snap = [
+    {"code": "sh605997", "price": 10.5, "pct": 0},
+    {"code": "sh605998", "price": None, "pct": None},
+    {"code": "sh605999", "price": 30, "pct": 1},
+]
+with patch.object(market, "snapshot", return_value=quote_snap):
+    publisher.export(full=False)
+
+latest = json.loads((d / "latest.json").read_text("utf-8"))
+assert latest["last_run"]["id"] == run_id
+assert {p["code"]: p["price"] for p in latest["last_run"]["items"]} == {"sh605997": 10, "sh605998": 20}
+assert latest["pick_quotes"] == {"sh605997": {"price": 10.5, "pct": 0}}
+assert set(latest["accounts"]) == {"ai"}, "增量公开数据只保留 AI 账户"
+assert latest["private_pack_sha256"] == sha256((d / "private.enc").read_bytes()).hexdigest()
 print("ALL OK")

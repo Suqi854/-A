@@ -8,6 +8,7 @@ data 分支只保留一个提交（每次 amend + 强制推送），仓库不会
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -85,7 +86,6 @@ def export(full: bool = True) -> dict:
     _site(root)
     files = []
     ov = public_overview()
-    _w(d / "latest.json", ov)
     files.append("latest.json")
     try:
         from . import marketstate
@@ -154,6 +154,9 @@ def export(full: bool = True) -> dict:
         _w(p, sorted(old.values(), key=lambda x: x["time"], reverse=True))
         files += ["runs.json", "ai.json", "learn.json", f"analysis/*.json({len(idx)})"]
     files += _private_pack(d, full)
+    private_file = d / "private.enc"
+    ov["private_pack_sha256"] = hashlib.sha256(private_file.read_bytes()).hexdigest() if private_file.exists() else None
+    _w(d / "latest.json", ov)
     _w(d / "manifest.json", {"schema": SCHEMA, "updated": now().strftime("%Y-%m-%d %H:%M:%S"), "full": full,
                              "phase": market.market_phase(), "files": files,
                              "note": "A量化公开数据：行情、选股、个股分析、AI自动盘、因子迭代。仅供学习研究，不构成投资建议。"})
