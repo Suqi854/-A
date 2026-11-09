@@ -514,7 +514,9 @@ def _execution_loop():
                 qs=market.quotes_fast(universe());execute(qs,now())
             except Exception as exc:STATE['error']='close:'+type(exc).__name__
         if not db.writes_frozen():
-            try:_set('status',{**STATE,'asof':calendar.iso(t),'role':'cloud' if __import__('os').environ.get('AQ5_CLOUD')=='1' else 'pc'})
+            try:
+                STATE.update(asof=calendar.iso(t),role='cloud' if __import__('os').environ.get('AQ5_CLOUD')=='1' else 'pc')
+                _set('status',dict(STATE))
             except db.StateFrozen:break
 
 
