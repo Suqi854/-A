@@ -126,6 +126,13 @@ def _folds(rows):
 
 def train_candidate(rows, asof=None):
     from .features import VERSION as feature_version
+    # Optional local installation stays beside the engine on its data drive.
+    # Cloud runners install the same pinned requirements into their environment.
+    import sys
+    from ..config import ROOT
+    local_dependencies=ROOT/'vendor'/'forecast_deps'
+    if local_dependencies.is_dir() and str(local_dependencies) not in sys.path:
+        sys.path.insert(0,str(local_dependencies))
     init(); t=stamp(asof) if asof else now()
     if not t:
         raise ValueError('invalid asof')

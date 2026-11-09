@@ -6,3 +6,4 @@ __pycache__/
 *.tmp
 
 engine/cloudflare-relay/.wrangler/
+engine/vendor/forecast_deps/
