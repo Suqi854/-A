@@ -72,6 +72,9 @@ def ai_rules() -> dict:
     r = {"t0": True, "margin": True, "short": True, "leverage": 2.0, "margin_rate": 0.06, "short_rate": 0.08,
          "maint": 1.3}
     r.update(load_settings().get("ai_rules", {}))
+    from .forecast.runtime import owns_ai
+    if owns_ai():
+        r.update(t0=False,margin=False,short=False,leverage=1.0)
     return r
 
 
@@ -315,6 +318,24 @@ def set_exit(acct: str, code: str, stop=None, target1=None, target2=None, auto=N
                   (stop, target1, target2, None if auto is None else int(bool(auto)), acct, code))
 
 
+def exit_decision(p, px, available_qty, risk, day):
+    """Original stop/target/time policy; pure and shared by isolated comparison."""
+    if not p.get("auto") or p["qty"] < 0 or available_qty <= 0:
+        return 0, None
+    qty = available_qty
+    reason = None
+    if p.get("stop") and px <= p["stop"]:
+        reason = f"触发止损 {p['stop']:.2f}"
+    elif p.get("target2") and px >= p["target2"]:
+        reason = f"达到第二止盈 {p['target2']:.2f}"
+    elif p.get("target1") and px >= p["target1"] and p.get("stage", 0) == 0:
+        qty = max(100, (available_qty // 200) * 100) if available_qty >= 200 else available_qty
+        reason = f"达到第一止盈 {p['target1']:.2f}，先卖一半"
+    elif p.get("account") == "ai" and trading_days_between(p["opened"][:10], day) >= risk["max_hold_days"]:
+        reason = f"持有满 {risk['max_hold_days']} 个交易日，时间止损"
+    return qty, reason
+
+
 def tick() -> None:
     """盘中每隔几秒调用：撮合挂单、检查止损止盈。"""
     if not can_trade_now():
@@ -341,17 +362,7 @@ def tick() -> None:
         av = available(p["account"], p["code"])
         if av <= 0:
             continue
-        reason = None
-        qty = av
-        if p["stop"] and px <= p["stop"]:
-            reason = f"触发止损 {p['stop']:.2f}"
-        elif p["target2"] and px >= p["target2"]:
-            reason = f"达到第二止盈 {p['target2']:.2f}"
-        elif p["target1"] and px >= p["target1"] and p["stage"] == 0:
-            qty = max(100, (av // 200) * 100) if av >= 200 else av
-            reason = f"达到第一止盈 {p['target1']:.2f}，先卖一半"
-        elif p["account"] == "ai" and trading_days_between(p["opened"][:10], today()) >= risk["max_hold_days"]:
-            reason = f"持有满 {risk['max_hold_days']} 个交易日，时间止损"
+        qty, reason = exit_decision(p, px, av, risk, today())
         if reason:
             o = place(p["account"], p["code"], "sell", qty, reason=reason, emotion="计划内")
             if "第一止盈" in reason and o["status"] == "filled":
@@ -368,20 +379,28 @@ def _traded_today(acct: str) -> int:
                   (acct, today() + "%")) or {}).get("n", 0)
 
 
-def auto_follow(picks: list[dict], session: str) -> None:
+def auto_follow(picks: list[dict], session: str, context=None) -> None:
     """旧版 AI 自动盘的受控兼容入口，仅允许 A/B 级候选。
 
     不使用未校准的上涨概率进行凯利放大；不为凑数据强制交易。
     """
-    if not load_settings().get("strategy_v2", {}).get("legacy_auto", False):
+    if context is None:
+        from .forecast import legacy, runtime
+        legacy.on_picks(picks, session)
+        if runtime.owns_ai():
+            return
+    settings = context.settings if context else load_settings()
+    execute_order = context.place if context else place
+    if not settings.get("strategy_v2", {}).get("legacy_auto", False):
         return
-    ensure_accounts()
-    cfg = load_settings()["pick"]
+    if context is None:
+        ensure_accounts()
+    cfg = settings["pick"]
     base = float(cfg.get("ai_position_pct", 0.12))
     max_pos = max(1, int(cfg.get("ai_max_positions", 12)))  # 真正的约束是杠杆上限（下单时检查），持仓只数放宽
-    v = view("ai", light=True)
+    v = context.view("ai", light=True) if context else view("ai", light=True)
     held = {p["code"] for p in v["positions"]}
-    pend = {o["code"] for o in db.q("SELECT code FROM orders WHERE account='ai' AND status='pending'")}
+    pend = context.pending() if context else {o["code"] for o in db.q("SELECT code FROM orders WHERE account='ai' AND status='pending'")}
     tag = "竞价" if session == "auction" else "尾盘"
     bought = 0
 
@@ -394,11 +413,14 @@ def auto_follow(picks: list[dict], session: str) -> None:
         pl = p["plan"]
         sig = p["signals"][0]["name"] if p.get("signals") else "综合评分"
         try:
-            place("ai", p["code"], "buy", qty, stop=pl["stop"], target1=pl["target1"], target2=pl["target2"],
+            execute_order("ai", p["code"], "buy", qty, stop=pl["stop"], target1=pl["target1"], target2=pl["target2"],
                   reason=f"{tag}选股[{p.get('tier', '?')}级 第{p.get('rank', '?')}名]：{sig}，评分{p['score']}；{why}",
                   emotion="跟随系统", pick_id=p.get("id"))
         except ValueError as e:
-            db.event("trade", f"AI自动盘下单失败 {p['name']}", str(e), "warn")
+            if context:
+                context.log(f"旧策略对照下单失败 {p['name']}: {e}")
+            else:
+                db.event("trade", f"AI自动盘下单失败 {p['name']}", str(e), "warn")
             return False
         v["cash"] -= qty * p["price"]
         held.add(p["code"])
@@ -412,12 +434,12 @@ def auto_follow(picks: list[dict], session: str) -> None:
             if pos["avail"] <= 0 or pos.get("hold_days", 0) < 2:
                 continue
             try:
-                sc = analyze(pos["code"])["score"]
+                sc = (context.analyze(pos["code"]) if context else analyze(pos["code"]))["score"]
             except (RuntimeError, ValueError):
                 continue
             if sc < 50:
                 try:
-                    place("ai", pos["code"], "sell", pos["avail"], reason=f"量化调仓：持仓评分降到 {sc:.0f}（<50），换入更强的股票",
+                    execute_order("ai", pos["code"], "sell", pos["avail"], reason=f"量化调仓：持仓评分降到 {sc:.0f}（<50），换入更强的股票",
                           emotion="跟随系统")
                     v["cash"] += pos["avail"] * (pos["price"] or pos["cost"]) * 0.998
                     held.discard(pos["code"])

@@ -32,10 +32,10 @@ _scan = {"t": 0.0, "long": [], "short": []}
 _lock = threading.Lock()
 
 
-def cfg() -> dict:
+def cfg(settings=None) -> dict:
     c = {"tick_sec": 2, "pos_pct": 0.05, "take": 1.5, "stop": 1.0, "trail_on": 0.8, "trail": 0.6, "max_orders": 300,
          "max_pos": 20, "flat_eod": True, "long_score": 60, "short_score": 42, "imb": 0.15, "mom": 0.12}
-    c.update(load_settings().get("hf", {}))
+    c.update((settings if settings is not None else load_settings()).get("hf", {}))
     return c
 
 
@@ -106,13 +106,15 @@ def scan() -> None:
 _buf_sources: dict[str, str] = {}
 
 
-def _feat(code: str, q: dict) -> dict:
-    t = time.time()
-    b = _buf.setdefault(code, deque(maxlen=400))
+def _feat(code: str, q: dict, context=None) -> dict:
+    t = context.clock() if context else time.time()
+    buffers = context.buffers if context else _buf
+    sources = context.sources if context else _buf_sources
+    b = buffers.setdefault(code, deque(maxlen=400))
     source = q.get("source") or ("模拟" if MOCK else "腾讯")
-    if _buf_sources.get(code) not in (None, source):
+    if sources.get(code) not in (None, source):
         b.clear()
-    _buf_sources[code] = source
+    sources[code] = source
     b.append((t, q["price"], q.get("outer") or 0, q.get("inner") or 0))
 
     def back(sec):
@@ -133,40 +135,52 @@ def _feat(code: str, q: dict) -> dict:
 
 
 # ----------------------------------------------------------------------------- 主循环
-def tick() -> dict:
-    if not load_settings().get("strategy_v2", {}).get("legacy_auto", False):
-        return {"status": "shadow_v2", "reason": "新做T使用独立模拟，旧自动盘停止开新信号"}
-    from . import sim
-    c = cfg()
-    if time.time() - _scan["t"] > 600 and not STATE["scanning"]:
-        threading.Thread(target=scan, daemon=True, name="aq5-hfscan").start()
-    poss = {p["code"]: p for p in db.q("SELECT * FROM positions WHERE account='ai'")}
-    longs, shorts = _scan["long"], _scan["short"]
+def tick(context=None) -> dict:
+    settings = context.settings if context else load_settings()
+    state = context.state if context else STATE
+    best = context.best if context else _best
+    cool = context.cool if context else _cool
+    clock = context.clock if context else time.time
+    current = context.now if context else now
+    if context is None:
+        if time.time() - _scan["t"] > 600 and not STATE["scanning"]:
+            threading.Thread(target=scan, daemon=True, name="aq5-hfscan").start()
+        from .forecast.runtime import owns_ai
+        if owns_ai():
+            return {"status": "owned_forecast"}
+    if not settings.get("strategy_v2", {}).get("legacy_auto", False):
+        return {"status": "shadow_v2", "reason": "旧策略自动信号已关闭"}
+    from . import sim as default_sim
+    sim = context.simulator if context else default_sim
+    c = context.config() if context else cfg()
+    log = context.log if context else _log
+    poss = context.positions() if context else {p["code"]: p for p in db.q("SELECT * FROM positions WHERE account='ai'")}
+    longs, shorts = context.candidates() if context else (_scan["long"], _scan["short"])
     codes = list({*poss, *(x["code"] for x in longs), *(x["code"] for x in shorts)})
     if not codes:
         return {}
-    qs = market.quotes_fast(codes)
-    feats = {k: _feat(k, q) for k, q in qs.items() if q.get("price")}
+    qs = context.quotes(codes) if context else market.quotes_fast(codes)
+    feats = {k: _feat(k, q, context) for k, q in qs.items() if q.get("price")}
     nm = {x["code"]: (x["name"], "多", x["score"]) for x in longs} | {x["code"]: (x["name"], "空", x["score"]) for x in shorts}
-    STATE["watch"] = [{"code": k, "name": nm.get(k, (qs[k].get("name"), "持", None))[0], "dir": nm.get(k, (None, "持"))[1],
+    state["watch"] = [{"code": k, "name": nm.get(k, (qs[k].get("name"), "持", None))[0], "dir": nm.get(k, (None, "持"))[1],
                        "score": nm.get(k, (None, None, None))[2], **{kk: round(v, 3) for kk, v in f.items() if kk != "n"}, "n": f["n"]}
                       for k, f in feats.items()][:40]
-    STATE["ticks"] += 1
-    STATE["last_tick"] = now().strftime("%H:%M:%S")
-    n_today = (db.q1("SELECT COUNT(*) AS n FROM orders WHERE account='ai' AND created LIKE ?", (today() + "%",)) or {}).get("n", 0)
-    STATE["orders_today"] = n_today
-    hm = now().hour * 100 + now().minute
+    state["ticks"] += 1
+    state["last_tick"] = current().strftime("%H:%M:%S")
+    n_today = context.orders_today() if context else (db.q1("SELECT COUNT(*) AS n FROM orders WHERE account='ai' AND created LIKE ?", (today() + "%",)) or {}).get("n", 0)
+    state["orders_today"] = n_today
+    hm = current().hour * 100 + current().minute
 
     def act(code, side, qty, why):
         t0 = time.perf_counter()
         try:
             o = sim.place("ai", code, side, qty, reason=why, emotion="跟随系统", qd=qs.get(code))
             ms = (time.perf_counter() - t0) * 1000
-            STATE["latency_ms"] = round(ms, 2)
-            _log(f"{'买' if side == 'buy' else '卖'} {o.get('name')} {qty}股 @ {o.get('fill_price')}（{ms:.1f}ms）{why}")
+            state["latency_ms"] = round(ms, 2)
+            log(f"{'买' if side == 'buy' else '卖'} {o.get('name')} {qty}股 @ {o.get('fill_price')}（{ms:.1f}ms）{why}")
             return True
         except ValueError as e:
-            _log(f"下单失败 {code}: {e}")
+            log(f"下单失败 {code}: {e}")
             return False
 
     # —— 出场 ——
@@ -178,7 +192,7 @@ def tick() -> dict:
             continue   # 竞价/尾盘选股买入的波段仓位由止损止盈规则管理，高频不动它
         q = p["qty"]
         r = (f["p"] / p["cost"] - 1) * 100 * (1 if q > 0 else -1)
-        _best[code] = max(_best.get(code, r), r)
+        best[code] = max(best.get(code, r), r)
         why = None
         if c["flat_eod"] and hm >= 1456:
             why = "日内平仓（14:56）"
@@ -186,16 +200,16 @@ def tick() -> dict:
             why = f"止盈 {r:+.2f}%"
         elif r <= -c["stop"]:
             why = f"止损 {r:+.2f}%"
-        elif _best[code] >= c["trail_on"] and r <= _best[code] - c["trail"]:
-            why = f"移动止盈：最高 {_best[code]:+.2f}% 回撤到 {r:+.2f}%"
+        elif best[code] >= c["trail_on"] and r <= best[code] - c["trail"]:
+            why = f"移动止盈：最高 {best[code]:+.2f}% 回撤到 {r:+.2f}%"
         elif q > 0 and f["m120"] < -0.25 and f["imb"] < -0.3 and f["p"] < f["vwap"]:
             why = f"信号反转：2分钟 {f['m120']:+.2f}%、委比 {f['imb']:+.2f}、跌破VWAP"
         elif q < 0 and f["m120"] > 0.25 and f["imb"] > 0.3 and f["p"] > f["vwap"]:
             why = f"信号反转：2分钟 {f['m120']:+.2f}%、委比 {f['imb']:+.2f}、站上VWAP"
         if why and (q < 0 or sim.available("ai", code) > 0):
             if act(code, "buy" if q < 0 else "sell", abs(q), "高频·" + ("平空 " if q < 0 else "平多 ") + why):
-                _best.pop(code, None)
-                _cool[code] = time.time()
+                best.pop(code, None)
+                cool[code] = clock()
     if c["flat_eod"] and hm >= 1456:
         return {"flat": True}
     if n_today >= c["max_orders"] or hm >= 1450:
@@ -203,7 +217,7 @@ def tick() -> dict:
     # —— 进场 ——
     try:
         from . import marketstate
-        ms = marketstate.state()
+        ms = context.market_state() if context else marketstate.state()
     except Exception:  # noqa: BLE001
         ms = {}
     ex = sim.exposure("ai")
@@ -219,7 +233,7 @@ def tick() -> dict:
             if opened >= 2 or len(held) >= c["max_pos"]:
                 break
             f = feats.get(x["code"])
-            if not f or f["n"] < 15 or x["code"] in held or time.time() - _cool.get(x["code"], 0) < 300:
+            if not f or f["n"] < 15 or x["code"] in held or clock() - cool.get(x["code"], 0) < 300:
                 continue
             if f["p"] > f["vwap"] and f["imb"] > c["imb"] and f["m120"] > c["mom"] and f["m30"] >= 0 and 0.3 <= f["pct"] <= 7.5:
                 qty = size(f["p"])
@@ -232,7 +246,7 @@ def tick() -> dict:
             if opened >= 2 or len(held) >= c["max_pos"]:
                 break
             f = feats.get(x["code"])
-            if not f or f["n"] < 15 or x["code"] in held or time.time() - _cool.get(x["code"], 0) < 300:
+            if not f or f["n"] < 15 or x["code"] in held or clock() - cool.get(x["code"], 0) < 300:
                 continue
             if f["p"] < f["vwap"] and f["imb"] < -c["imb"] and f["m120"] < -c["mom"] and f["m30"] <= 0 and -7.5 <= f["pct"] <= -0.3:
                 qty = size(f["p"])

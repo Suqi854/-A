@@ -62,6 +62,9 @@
       case 'intraday': return sj('intraday/' + code + '.json').catch(() => Lite.intraday(code));
       case 'sim': { const priv = privateForDisplay(); return q.get('acct') === 'me' && priv ? priv.me : sj('ai.json'); }
       case 't/live': { const priv = privateForDisplay(); return { signals: priv?.intraday || {}, status: priv?.intraday_status, training: priv?.training }; }
+      case 'forecast': return privateForDisplay()?.forecast || {locked: !S.priv, status:{phase:'awaiting_private_snapshot'},predictions:[]};
+      case 'forecast/evaluation': return privateForDisplay()?.forecast?.evaluation || {};
+      case 'forecast/models': return privateForDisplay()?.forecast?.model_status || {};
       case 'plan': {
         const priv = privateForDisplay(), p = priv?.plan, mini = livePrivate();
         const failed = mini ? mini.hash !== activeRelay()?.private_pack_sha256 : !!S.privateSession?.error;
@@ -251,7 +254,7 @@
   const nameCell = (name, code) => `<span class="nm">${esc(name || '')}</span><span class="cd">${short(code)}</span>`;
 
   // ------------------------------------------------------------------ 路由与快捷键
-  const PAGES = ['mon', 'pick', 'anly', 'sim', 'learn', 'bt', 'log', 'set'];
+  const PAGES = ['mon', 'pick', 'anly', 'sim', 'learn', 'bt', 'log', 'set', 'forecast'];
   function go(p, arg) {
     if (!PAGES.includes(p)) p = 'mon';
     if (location.hash.slice(1).split('/')[0] !== p || arg) location.hash = p + (arg ? '/' + arg : '');
@@ -262,7 +265,8 @@
     $$('#nav a').forEach(a => a.classList.toggle('on', a.dataset.p === p));
     $$('.page').forEach(s => s.classList.toggle('on', s.id === 'p-' + p));
     $('#main').scrollTop = 0;
-    ({ mon: renderMon, pick: renderPick, anly: () => renderAnly(arg), sim: renderSim, learn: renderLearn, bt: renderBt, log: renderLog, set: renderSet })[p]();
+    ({ mon: renderMon, pick: renderPick, anly: () => renderAnly(arg), sim: renderSim, learn: renderLearn, bt: renderBt, log: renderLog, set: renderSet,
+      forecast: () => window.ForecastUI.render({api,staticMode:STATIC,unlock:showUnlock}) })[p]();
   }
   window.addEventListener('hashchange', () => { const [p, a] = location.hash.slice(1).split('/'); show(PAGES.includes(p) ? p : 'mon', a); });
   document.addEventListener('keydown', e => {
@@ -504,7 +508,7 @@
         if (sameRoute() && S.privateSession === session && activeRelay()?.private_pack_sha256 === hash &&
             data.time && data.time >= (S.priv?.time || '') &&
             (S.livePrivate?.stream !== p.stream_id || data.time >= S.livePrivate.data.time)) {
-          const fields = ['time', 'me', 'plan', 'intraday', 'intraday_status', 'training', 'look'];
+          const fields = ['time', 'me', 'plan', 'intraday', 'intraday_status', 'training', 'forecast', 'look'];
           const mini = Object.fromEntries(fields.filter(k => Object.hasOwn(data, k)).map(k => [k, data[k]]));
           S.livePrivate = { session, stream: p.stream_id, hash, data: mini };
         }

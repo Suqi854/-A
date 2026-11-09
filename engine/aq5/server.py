@@ -503,17 +503,21 @@ POST = {"/api/picks/run": p_pick_run, "/api/sim/order": p_order, "/api/sim/cance
         "/api/sectors/refresh": lambda b: (sectors.refresh_map_async(force=True), {"started": True})[1]}
 
 
-from . import live, research, fundamentals, training
+from . import live, research, fundamentals, training, forecast
 GET.update({"/api/research/preview": lambda q: research.preview(),
             "/api/t/live": lambda q: live.payload(),
             "/api/research": lambda q: research.shadow_report(),
-            "/api/training": lambda q: training.view()})
+            "/api/training": lambda q: training.view(),
+            "/api/forecast": lambda q: forecast.view(code=q.get('code',[None])[0],limit=int(q.get('limit',['100'])[0])),
+            "/api/forecast/evaluation": lambda q: forecast.evaluation.view(),
+            "/api/forecast/models": lambda q: forecast.models.view()})
+POST.update({"/api/forecast/control": lambda b: forecast.evaluation.control(b.get('action'))})
 POST.update({"/api/research/promote": lambda b: research.promote_factor(b["factor_id"], b["version"], enabled=bool(b.get("enabled", True))),
              "/api/model/select": lambda b: learn.select_model(b.get("version")),
              "/api/fundamentals/import": lambda b: fundamentals.import_disclosures(b.get("records", []))})
 
 
-SENSITIVE = {"/api/research/promote", "/api/model/select", "/api/fundamentals/import", "/api/me/vault", "/api/me/password", "/api/me/restore", "/api/me/token", "/api/me/revoke",
+SENSITIVE = {"/api/forecast/control", "/api/research/promote", "/api/model/select", "/api/fundamentals/import", "/api/me/vault", "/api/me/password", "/api/me/restore", "/api/me/token", "/api/me/revoke",
              "/api/me/security", "/api/remote/enable", "/api/remote/download", "/api/remote/relay"}
 
 

@@ -24,10 +24,10 @@ _quotes = {}
 
 def init():
     # All replicated schemas must exist BEFORE cloud.unpack.
-    from . import accounting, fundamentals, intraday, research, training
+    from . import accounting, fundamentals, intraday, research, training, forecast
     with db.tx() as conn:
         accounting.init(conn)
-    for module in (fundamentals, intraday, research, training):
+    for module in (fundamentals, intraday, research, training, forecast):
         module.init()
 
 
@@ -44,6 +44,10 @@ def codes():
     from . import picker, plan, training
     s = load_settings()
     ordered = training.codes() + [r['code'] for r in db.q('SELECT DISTINCT code FROM positions')]
+    if db.q1("SELECT 1 FROM sqlite_master WHERE type='table' AND name='forecast_books'"):
+        for row in db.q('SELECT holdings,baseline FROM forecast_books'):
+            ordered += list(db.loads(row['holdings'],{}))
+            ordered += list(db.loads(row['baseline'],{}).get('quantities',{}))
     ordered += s.get('watchlist', [])
     recent = picker.runs(1)
     if recent:
@@ -59,10 +63,11 @@ def payload():
 
 
 def private_snapshot():
-    from . import sim, plan, intraday, training
+    from . import sim, plan, intraday, training, forecast
     return {'time': now().strftime('%Y-%m-%d %H:%M:%S'), 'me': sim.view('me'), 'plan': plan.view(),
             'intraday': intraday.latest(), 'intraday_status': {**intraday.status(), 'transport': dict(STATE)},
-            'training': training.view(), 'look': load_settings().get('look') or {}}
+            'training': training.view(), 'forecast': forecast.view(limit=36,compact=True),
+            'look': load_settings().get('look') or {}}
 
 
 def public_snapshot(quotes=None):
@@ -123,6 +128,8 @@ def _sample_loop():
                         break
                     with _lock:
                         _quotes.update(batch['quotes'])
+                    from .forecast import runtime as forecasting
+                    forecasting.feed(batch['quotes'])
                     training.tick(batch['signals'], batch['quotes'], asof=batch['asof'])
                 else:
                     training.tick({}, {}, asof=now())
@@ -168,9 +175,13 @@ def start():
         worker = threading.Thread(target=target, name=name, daemon=True)
         _threads.append(worker)
         worker.start()
+    from .forecast import runtime as forecasting
+    forecasting.start()
 
 
 def stop(timeout=30):
+    from .forecast import runtime as forecasting
+    forecasting.stop()
     _stop.set()
     deadline = time.monotonic() + timeout
     for worker in _threads:

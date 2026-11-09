@@ -537,5 +537,6 @@ def _safe(full, force):
 
 
 def _private_strategy():
-    from . import intraday, training
-    return {"intraday": intraday.latest(), "intraday_status": intraday.status(), "training": training.view()}
+    from . import intraday, training, forecast
+    return {"intraday": intraday.latest(), "intraday_status": intraday.status(), "training": training.view(),
+            "forecast": forecast.view(limit=72,compact=True)}
