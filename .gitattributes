@@ -1,0 +1,2 @@
+# Pinned upstream hashes must remain byte-identical across Windows and Linux.
+engine/vendor/chan/** -text
