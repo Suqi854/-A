@@ -4,10 +4,18 @@ from unittest.mock import patch
 os.environ['AQ5_DATA']=tempfile.mkdtemp(dir=os.environ['AQ5_DATA'])
 os.environ['AQ5_MOCK']='1'
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from aq5 import live,picker
+from aq5 import live,picker,publisher
 
 
 class ForecastTransport(unittest.TestCase):
+    def test_static_export_includes_forecast_viewer_asset(self):
+        destination=Path(tempfile.mkdtemp(dir=os.environ['AQ5_DATA']))
+        publisher._site(destination)
+        self.assertTrue((destination/'js/forecast.js').is_file())
+        self.assertEqual((destination/'js/forecast.js').read_bytes(),(publisher.WEB/'js/forecast.js').read_bytes())
+        html=(destination/'index.html').read_text('utf-8')
+        self.assertLess(html.index('js/forecast.js'),html.index('js/app.js'))
+
     def test_source_annotated_quote_obeys_deployed_worker_allowlist(self):
         code='sh600000'
         q={'code':code,'price':10.,'time':'20261109143000','source':'Tencent',
