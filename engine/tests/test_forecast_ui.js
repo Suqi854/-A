@@ -130,3 +130,12 @@ test('mobile rules and chart inherit terminal theme variables',()=>{
   const h=harness();const svg=h.ui.chart(fixture().structures['sh600000:day']);assert.match(svg,/var\(--muted\)/);assert.match(svg,/viewBox/);
   assert.doesNotMatch(css.slice(css.indexOf('.fc-shell')),/fc-cards|border-radius:8px/);
 });
+
+test('historical fallback keeps chart and original time visibly historical and hides old predictions',async()=>{
+  const data=fixture();data.analysis_fallback={failed_result_id:'new',previous_result_id:'old',attempted_at:'2026-11-09T14:00:09+08:00'};
+  data.summary.quality={eligible:false,reason:'missing_bars'};data.summary.warnings=['最新行情校验失败，显示上次已验证分析；以下结构仅供历史参考。'];
+  data.status.phase='data_blocked';data.predictions[0]={...data.predictions[0],validated:true,probability:0.8765,quantiles:{p10:0.1,p90:0.2}};
+  const h=harness({initial:data});await h.render();const main=h.root.innerHTML.split('<details')[0];
+  assert.match(main,/历史分析/);assert.match(main,/上次已验证结构/);assert.match(main,/最新行情校验失败，显示上次已验证分析/);assert.match(main,/<svg/);
+  assert.match(main,/2026-11-09 14:00:00/);assert.doesNotMatch(main,/14:00:09|87\.65%|<table/);assert.doesNotMatch(main,/已显示当前可用的概率预测|走势分析已更新/);
+});

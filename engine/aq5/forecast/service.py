@@ -23,12 +23,14 @@ REASONS = {
     "calendar_unavailable": "交易日历暂不可用",
     "source_unavailable": "行情来源暂不可用",
     "availability_unknown": "数据可用时点不明",
+    "adjustment_sources_unavailable": "复权数据来源暂时不可用",
+    "price_basis_cross_check_failed": "不同来源的价格口径尚未通过核对",
 }
 
 
 def _explain(reason):
-    parts = str(reason or "source_unavailable").split(";")
-    return "、".join(dict.fromkeys(REASONS.get(x, "行情校验未通过") for x in parts))
+    parts = re.split(r"[;,]", str(reason or "source_unavailable"))
+    return "、".join(dict.fromkeys(REASONS.get(x.split(':', 1)[0], "行情校验未通过") for x in parts))
 
 
 def _table(name):
@@ -207,6 +209,8 @@ def analyze(code, asof=None, *, feed=None, quote_loader=None, context_loader=Non
             "quote": {k: quote.get(k) for k in ("code", "name", "price", "pct", "source_time", "time", "source")} if quote_valid else None,
             "last_completed_close": {"price": latest[-1]["close"], "source_time": latest[-1]["date"]} if latest else None,
             "predictions": predictions, "structures": out_structures,
+            "data_quality": {tf: {k: frame.get(k) for k in
+                ("source", "quality", "source_attempts", "adjustment_details")} for tf, frame in frames.items()},
             "coverage": [{"code": code, "coverage": f["coverage"], "version": f["version"], "hash": f["hash"], "at": calendar.iso(at)}],
             "features": f["values"], "controls": {}, "ledger": {"books": {}}, "decisions": [], "evaluation": {"evaluations": []},
             "model_status": {"versions": [{k: row[k] for k in ("version", "created", "status")}] if row else []}}

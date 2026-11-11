@@ -489,3 +489,62 @@ test('static forecast cache is scoped to requested code and the current unlocked
   h.S.priv=null;
   assert.equal((await h.context.staticApi('forecast?code=sh600000')).locked,true);
 });
+
+const previousResult=(id,updated=900)=>({id,updated,sha256:'b'.repeat(64)});
+const forecastData=(eligible,code='sh600000')=>({symbol:{code},summary:{updated:'1970-01-01T00:00:00Z',quality:{eligible,reason:eligible?'ok':'missing_bars'},warnings:['原有提示']},
+  status:{phase:'waiting_signal'},structures:{[code+':day']:{asof:'1970-01-01T00:00:00Z',structures:{klines:[{low:1,high:2}]}}},
+  predictions:[{probability:0.8}]});
+
+test('failed current quality shows a verified historical copy without changing its dates or original records',async()=>{
+  const bad=forecastData(false),good=forecastData(true),before=JSON.stringify(good);
+  const h=forecastRequestHarness({fetchTask:()=>Response.json({id:'new',status:'ready',sha256:'a'.repeat(64),previous_results:[previousResult('older',700),previousResult('newest',900)]}),
+    decrypt:(_S,_key,_hash,url)=>url.endsWith('id=new')?bad:good});
+  const {data}=await h.context.requestForecast('sh600000');
+  assert.equal(h.decryptions.length,2);assert.ok(h.decryptions[1][2].endsWith('id=newest'));assert.equal(h.decryptions[1][1],'b'.repeat(64));
+  assert.equal(data.summary.updated,good.summary.updated);assert.equal(data.structures['sh600000:day'].asof,good.structures['sh600000:day'].asof);
+  assert.equal(data.summary.quality.eligible,false);assert.equal(data.summary.quality.reason,'missing_bars');assert.equal(data.status.phase,'data_blocked');assert.equal(data.predictions.length,0);
+  assert.match(data.summary.warnings[0],/最新行情校验失败，显示上次已验证分析/);
+  assert.equal(data.analysis_fallback.failed_result_id,'new');assert.equal(data.analysis_fallback.previous_result_id,'newest');assert.equal(data.analysis_fallback.attempted_at,'1970-01-01T00:00:01.000Z');
+  assert.equal(JSON.stringify(good),before);assert.equal(bad.predictions.length,1);assert.equal(h.S.forecastResults.sh600000.data,data);
+});
+
+test('fallback skips failed integrity, wrong-stock and invalid-quality results and reads at most three',async()=>{
+  const bad=forecastData(false);
+  const h=forecastRequestHarness({fetchTask:()=>Response.json({id:'new',status:'ready',sha256:'a'.repeat(64),previous_results:[1,2,3,4].map(n=>previousResult('old-'+n,1000-n))}),
+    decrypt:(_S,_key,_hash,url)=>{if(url.endsWith('id=new'))return bad;if(url.endsWith('id=old-1'))throw new Error('secret-token must stay private');if(url.endsWith('id=old-2'))return forecastData(true,'sz000001');if(url.endsWith('id=old-3'))return forecastData(false);throw new Error('fourth result must not be read');}});
+  const {data}=await h.context.requestForecast('sh600000');
+  assert.equal(data,bad);assert.equal(h.decryptions.length,4);assert.equal(data.analysis_fallback,undefined);assert.doesNotMatch(JSON.stringify(data),/secret-token/);
+});
+
+test('fallback rejects expired, future, malformed and duplicate references while accepting ISO timestamps',async()=>{
+  const h=forecastRequestHarness({fetchTask:()=>Response.json({id:'new',status:'ready',sha256:'a'.repeat(64),previous_results:[
+    previousResult('expired',-3599000),previousResult('future',1001),previousResult('bad-date','invalid'),previousResult('new'),previousResult('../invalid'),
+    {...previousResult('bad-hash'),sha256:'wrong'},previousResult('valid','1970-01-01T00:00:00.900Z'),previousResult('valid','1970-01-01T00:00:00.800Z')]}),
+    decrypt:(_S,_key,_hash,url)=>forecastData(!url.endsWith('id=new'))});
+  const {data}=await h.context.requestForecast('sh600000');assert.equal(data.analysis_fallback.previous_result_id,'valid');assert.equal(h.decryptions.length,2);
+});
+
+test('a valid new result does not request historical results',async()=>{
+  const good=forecastData(true),h=forecastRequestHarness({fetchTask:()=>Response.json({id:'new',status:'ready',sha256:'a'.repeat(64),previous_results:[previousResult('old')]}),decrypt:()=>good});
+  assert.equal((await h.context.requestForecast('sh600000')).data,good);assert.equal(h.decryptions.length,1);
+});
+
+test('fallback cannot publish after lock, stock change, session replacement or leaving the page',async()=>{
+  for(const mutate of [S=>{S.privateSession=null;S.priv=null;},S=>{S.forecastSelection='sz000001';},S=>{S.privateSession={key:{}};},S=>{S.forecastRequest=null;S.forecastSelection=null;}]){
+    const h=forecastRequestHarness({fetchTask:()=>Response.json({id:'new',status:'ready',sha256:'a'.repeat(64),previous_results:[previousResult('old')]}),
+      decrypt:(S,_key,_hash,url)=>{if(url.endsWith('id=new'))return forecastData(false);mutate(S);return forecastData(true);}});
+    await assert.rejects(h.context.requestForecast('sh600000'),e=>e.code==='FORECAST_CANCELLED');assert.equal(h.S.forecastResults,undefined);
+  }
+});
+
+test('historical fallback verifies actual encrypted bytes before displaying their structure',async()=>{
+  const bad=encryptedPack(forecastData(false)),good=encryptedPack(forecastData(true)),corrupt=encryptedPack(forecastData(true,'sz000001'));
+  const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
+  const h=forecastRequestHarness({fetchTask:url=>url.includes('/result?')?new Response(url.endsWith('id=new')?bad:url.endsWith('id=corrupt')?corrupt:good):
+    Response.json({id:'new',status:'ready',sha256:digest(bad),previous_results:[{...previousResult('corrupt',950),sha256:digest(good)},{...previousResult('good',900),sha256:digest(good)}]})});
+  Object.assign(h.context,{crypto:webcrypto,TextDecoder,DataView,Blob,DecompressionStream});
+  h.S.privateSession.key=await webcrypto.subtle.importKey('raw',new TextEncoder().encode(password),'PBKDF2',false,['deriveBits']);
+  vm.runInContext(functionSource('unlockPrivate'),h.context);
+  const {data}=await h.context.requestForecast('sh600000');assert.equal(data.analysis_fallback.previous_result_id,'good');assert.equal(data.structures['sh600000:day'].structures.klines.length,1);
+  assert.equal(h.requests.filter(r=>r.url.includes('/result?')).length,3);
+});

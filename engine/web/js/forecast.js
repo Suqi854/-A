@@ -73,7 +73,7 @@
   }
   function draw(f,options={}){
     remember(f);if(!currentCode)currentCode=normalize(options.code)||normalize(f.symbol?.code)||knownCodes(f)[0]||'';
-    const selected=f.structures?.[currentCode+':'+currentTF],summary=structureSummary(f,currentCode),request=requests.get(currentCode);
+    const selected=f.structures?.[currentCode+':'+currentTF],summary=structureSummary(f,currentCode),request=requests.get(currentCode),historical=!!f.analysis_fallback;
     const rows=(f.predictions||[]).filter(r=>r.code===currentCode&&r.variant==='fusion'),latest=new Map();
     for(const row of rows)if(!latest.has(row.horizon)||timestamp(row.asof)>timestamp(latest.get(row.horizon).asof))latest.set(row.horizon,row);
     const probabilities=[...latest.values()].filter(r=>r.validated&&finite(r.probability)),updated=summary.updated||selected?.asof;
@@ -88,15 +88,15 @@
     const title=`${esc(names.get(currentCode)||'个股分析')} <small>${esc(short(currentCode))}</small>`;
     const stance=({up:'结构偏强',down:'结构偏弱',neutral:'震荡观察',mixed:'方向分歧',waiting:'方向待确认'}[summary.stance]||summary.stance||'等待分析');
     let analysis;
-    if(summary.available)analysis=`<div class="row"><strong>${esc(explain(stance))}</strong><span class="chip">结构分析</span></div><p class="fc-summary">${esc(summary.summary||'结构已更新，请结合图中的中枢、线段和确认信号观察。')}</p>
+    if(summary.available)analysis=`<div class="row"><strong>${esc(explain(stance))}</strong><span class="chip">${historical?'历史分析':'结构分析'}</span></div><p class="fc-summary">${esc(summary.summary||'结构已更新，请结合图中的中枢、线段和确认信号观察。')}</p>
       <dl class="kv fc-price-levels"><dt>结构支撑参考</dt><dd>${esc(priceArea(summary.support))}</dd><dt>结构阻力参考</dt><dd>${esc(priceArea(summary.resistance))}</dd></dl>
       <p class="hint">${summary.quality?.eligible===false?'当前行情未通过校验，暂不生成新的走势判断。'+(summary.quality.reason?' '+esc(explain(summary.quality.reason)):''):probabilities.length?'已显示当前可用的概率预测。':'走势分析已更新，概率尚未验证。'}${updated?' 更新于 '+esc(displayTime(updated)):''}</p>
       ${stale?'<p class="fc-notice">以下为上次结构分析，行情可能已变化。点击“分析”请求更新。</p>':''}${(summary.warnings||[]).map(w=>`<p class="hint">${esc(explain(typeof w==='object'?w.reason:w))}</p>`).join('')}`;
     else analysis=`<div class="empty">${request?.status==='queued'||request?.status==='requesting'?'正在等待这只股票的云端分析。':'这只股票尚无缓存分析，点击“分析”发起请求。'}<br><span class="hint">将保留当前选择，不会切换到其他股票。</span></div>`;
     const toolbar=`<label class="fc-timeframe-label" for="fc-tf">级别</label><select class="in" id="fc-tf">${Object.entries(levels).map(([key,label])=>`<option value="${key}" ${key===currentTF?'selected':''}>${label}</option>`).join('')}</select>`;
-    const visible=Object.keys(horizons).map(h=>latest.get(h)).filter(r=>r&&r.validated&&finite(r.probability));
+    const visible=historical||summary.quality?.eligible===false?[]:Object.keys(horizons).map(h=>latest.get(h)).filter(r=>r&&r.validated&&finite(r.probability));
     const predictions=visible.length?table(visible,['预测期限','上涨概率','收益区间'],r=>`<tr><td>${esc(horizons[r.horizon])}</td><td>${pct(r.probability)}</td><td>${pct(r.quantiles?.p10)} ～ ${pct(r.quantiles?.p90)}</td></tr>`,'fc-forecast-table'):'<p class="hint">概率尚未验证，暂不显示上涨概率和收益区间。当前可先查看真实行情形成的结构与走势解读。</p>';
-    return `<div class="fc-shell">${header}${notice}${panel(title,analysis)}${panel('缠论结构图',`<div class="fc-chart">${chart(selected)}</div>`,toolbar)}${panel('长短周期预测',predictions)}${diagnostics(f,options)}</div>`;
+    return `<div class="fc-shell">${header}${notice}${panel(title,analysis)}${panel(historical?'上次已验证结构':'缠论结构图',`<div class="fc-chart">${chart(selected)}</div>`,toolbar)}${panel('长短周期预测',predictions)}${diagnostics(f,options)}</div>`;
   }
   function paint(options=lastOptions){const root=document.getElementById('p-forecast');if(root){root.innerHTML=draw(lastData,options);bind(root,options);}}
   function message(text){const el=document.getElementById('fc-search-message');if(el)el.textContent=text;}

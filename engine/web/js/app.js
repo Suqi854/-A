@@ -212,10 +212,39 @@
       if (task.id && task.id !== id) throw new Error('云端任务编号不一致，请重新选择股票');
       if (task.status === 'ready') {
         if (!/^[a-f0-9]{64}$/.test(task.sha256 || '')) throw new Error('云端结果校验信息不完整，请稍后重试');
-        const data = await unlockPrivate(session.key,task.sha256,origin + '/__aq5/forecast/result?id=' + encodeURIComponent(id),Math.min(15000,deadline-Date.now()));
+        let data = await unlockPrivate(session.key,task.sha256,origin + '/__aq5/forecast/result?id=' + encodeURIComponent(id),Math.min(15000,deadline-Date.now()));
         check();
-        const resultCode = data?.code || data?.symbol?.code || (typeof data?.symbol === 'string' && /^(?:sh|sz)?\d{6}$/i.test(data.symbol) ? data.symbol : null);
-        if (!data || typeof data !== 'object' || !resultCode || normCode(resultCode) !== code) throw new Error('云端结果与所选股票不一致，请重试');
+        const matchesCode = result => {
+          const resultCode = result?.code || result?.symbol?.code || (typeof result?.symbol === 'string' && /^(?:sh|sz)?\d{6}$/i.test(result.symbol) ? result.symbol : null);
+          return !!result && typeof result === 'object' && !!resultCode && normCode(resultCode) === code;
+        };
+        if (!matchesCode(data)) throw new Error('云端结果与所选股票不一致，请重试');
+        if (data.summary?.quality?.eligible !== true) {
+          const attemptedAt = new Date(Date.now()).toISOString(), seen = new Set([id]);
+          const previous = (Array.isArray(task.previous_results) ? task.previous_results : [])
+            .map(row => ({...row, at:typeof row?.updated === 'number' ? row.updated : Date.parse(row?.updated)}))
+            .filter(row => /^[a-zA-Z0-9_-]{1,128}$/.test(row.id || '') && /^[a-f0-9]{64}$/.test(row.sha256 || '') &&
+              Number.isFinite(row.at) && row.at <= Date.now() && Date.now()-row.at < 60*60*1000 && !seen.has(row.id) && seen.add(row.id))
+            .sort((a,b) => b.at-a.at).slice(0,3);
+          for (const row of previous) {
+            check();
+            try {
+              const older = await unlockPrivate(session.key,row.sha256,origin + '/__aq5/forecast/result?id=' + encodeURIComponent(row.id),Math.min(15000,deadline-Date.now()));
+              check();
+              if (!matchesCode(older) || older.summary?.quality?.eligible !== true) continue;
+              // Display-only copy: retain historical times and never promote old predictions to a fresh result.
+              data = {...older, predictions:[], status:{...older.status,phase:'data_blocked'},
+                analysis_fallback:{failed_result_id:id,previous_result_id:row.id,attempted_at:attemptedAt},
+                summary:{...older.summary,quality:{...data.summary?.quality,eligible:false},
+                  warnings:['最新行情校验失败，显示上次已验证分析；以下结构仅供历史参考。',...(older.summary.warnings || [])]}};
+              break;
+            } catch {
+              // Unavailable, mismatched or undecryptable history must not expose transport details.
+              check();
+            }
+          }
+        }
+        check();
         S.forecastResults ||= {};
         S.forecastResults[code] = {session,data,id,receivedAt:Date.now()};
         return {status:'ready',data};

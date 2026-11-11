@@ -40,7 +40,7 @@ try{
   assert.equal((await request('request','POST',{code:'sh600000',junk:'x'.repeat(1024)})).status,400);
   const pair=await Promise.all([request('request','POST',{code:'sh600000'}),request('request','POST',{code:'sh600000'})]);
   const task=await pair[0].json();assert.equal(task.id,(await pair[1].json()).id);assert.equal(dispatches,1);
-  assert.equal(task.status,'queued');assert.equal((await request('result?id='+task.id)).status,409);
+  assert.equal(task.status,'queued');assert.ok(!('previous_results'in task));assert.equal((await request('result?id='+task.id)).status,409);
   const poll=await (await request('poll','GET',undefined,'publisher')).json();
   assert.equal(poll.requests.length,1);assert.deepEqual(Object.keys(poll.requests[0]).sort(),['claim','code','id']);
   assert.equal((await (await request('poll','GET',undefined,'publisher')).json()).requests.length,0);
@@ -55,6 +55,7 @@ try{
   assert.equal((await request('complete','POST',completion,'publisher')).status,200);
   assert.equal((await request('complete','POST',completion,'publisher')).status,200);
   const ready=await (await request('request?id='+task.id)).json();assert.equal(ready.sha256,sha256);assert.ok(!('code'in ready)&&!('data_b64'in ready));
+  assert.deepEqual(ready.previous_results,[]);
   const downloaded=await request('result?id='+task.id,'GET',undefined,'none');
   assert.equal(downloaded.headers.get('content-type'),'application/octet-stream');
   assert.deepEqual(new Uint8Array(await downloaded.arrayBuffer()),bytes);
@@ -63,6 +64,37 @@ try{
   now+=61*60*1000;
   assert.equal((await request('result?id='+task.id)).status,404);
   await request('poll','GET',undefined,'publisher');assert.equal(mem.size,0);
+
+  // History is bounded ciphertext metadata, isolated by code and original creation TTL.
+  ({request,mem}=setup());
+  const seed=(number,overrides={})=>{
+    const id=number.toString(16).padStart(32,'0');
+    const row={id,code:'sh600000',status:'ready',created:now-20*60*1000,updated:now-number*1000,
+      sha256:String(number%10).repeat(64),claim:'private-claim',chunks:2,data_b64:'private-ciphertext',message:'private-message',...overrides};
+    mem.set('request:'+id,row);return row;
+  };
+  const current=seed(1,{created:now-60000});
+  const oldest=seed(5), secondNewest=seed(3), newest=seed(2), thirdNewest=seed(4);
+  seed(6,{code:'sz002911',updated:now-1100});
+  seed(7,{created:now-60*60*1000,updated:now-1200}); // Boundary: recently completed but expired.
+  seed(8,{status:'processing',updated:now-1300});
+  seed(9,{updated:now}); // Newer completion is not a previous result.
+  seed(10,{updated:current.updated});
+  const expectedHistory=[newest,secondNewest,thirdNewest].map(({id,sha256,updated})=>({id,sha256,updated}));
+  const beforeDispatches=dispatches;
+  for(const response of [await request('request?id='+current.id),await request('request','POST',{code:current.code})]) {
+    assert.equal(response.status,200);
+    const result=await response.json();
+    assert.equal(result.id,current.id);assert.equal(result.status,'ready');
+    assert.deepEqual(Object.keys(result).sort(),['id','previous_results','sha256','status','updated']);
+    assert.deepEqual(result.previous_results,expectedHistory);
+    for(const candidate of result.previous_results)assert.deepEqual(Object.keys(candidate).sort(),['id','sha256','updated']);
+    assert.ok(!result.previous_results.some(x=>x.id===oldest.id));
+  }
+  assert.equal(dispatches,beforeDispatches);
+  assert.equal((await request('request?id='+current.id,'GET',undefined,'none')).status,403);
+  now+=60*60*1000;
+  assert.equal((await request('request?id='+current.id)).status,404);
 
   ({request,mem}=setup());dispatches=0;
   const queued=await (await request('request','POST',{code:'sz002911'})).json();
@@ -85,5 +117,5 @@ try{
   for(let i=3;i<20;i++){now+=61000;assert.equal((await request('request','POST',{code:'sh600'+String(i).padStart(3,'0')})).status,200);}
   now+=61000;assert.equal((await request('request','POST',{code:'sh600021'})).status,429);
   assert.equal(mem.size,20);
-  console.log('forecast queue: authentication, isolation, concurrency, leases, encryption, chunks, expiry and limits passed');
+  console.log('forecast queue: authentication, isolation, concurrency, leases, encryption, chunks, expiry, limits and bounded ready history passed');
 }finally{globalThis.fetch=originalFetch;Date.now=originalNow;}

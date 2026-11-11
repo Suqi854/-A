@@ -16,9 +16,16 @@ function auth(req,env,kind) {
   return kind === 'publisher' ? equal(env.LIVE_KEY,req.headers.get('x-aq5-live-key'))
     : equal(env.FORECAST_KEY,req.headers.get('x-aq5-forecast-token'));
 }
-function status(row) {
+async function status(row,storage,now) {
   if (row.status === 'error') return {id:row.id,status:'error',error:row.message || '云端分析未完成，请稍后重新提交'};
-  return {id:row.id,status:row.status,updated:row.updated,...(row.sha256?{sha256:row.sha256}:{})};
+  const result={id:row.id,status:row.status,updated:row.updated,...(row.sha256?{sha256:row.sha256}:{})};
+  if(row.status==='ready') {
+    const rows=await storage.list({prefix:'request:'});
+    result.previous_results=[...rows.values()]
+      .filter(x=>x.id!==row.id&&x.code===row.code&&x.status==='ready'&&now-x.created<TTL&&x.updated<row.updated)
+      .sort((a,b)=>b.updated-a.updated).slice(0,3).map(x=>({id:x.id,sha256:x.sha256,updated:x.updated}));
+  }
+  return result;
 }
 async function boundedJson(req,limit) {
   if (Number(req.headers.get('content-length'))>limit) throw new Error('size');
@@ -80,7 +87,7 @@ export async function forecastFetch(req,ctx,env) {
         else if(current)row=current;
       });
     }
-    return reply(status(row),row.status==='error'?503:200);
+    return reply(await status(row,ctx.storage,now),row.status==='error'?503:200);
   }
   if(action==='poll'&&req.method==='GET') {
     const requests=[];
@@ -131,7 +138,7 @@ export async function forecastFetch(req,ctx,env) {
       if(action==='result'&&row.status==='ready')for(let i=0;i<row.chunks;i++)parts.push(await tx.get(`result:${id}:${i}`));
     });
     if(!row)return failure('任务已过期，请重新分析',404);
-    if(action==='request')return reply(status(row));
+    if(action==='request')return reply(await status(row,ctx.storage,now));
     if(row.status!=='ready')return failure('云端结果尚未就绪',409);
     if(parts.some(x=>typeof x!=='string'))return failure('云端结果暂不可用，请重新分析',503);
     return new Response(Uint8Array.from(atob(parts.join('')),c=>c.charCodeAt(0)),{headers:{...HEADERS,'content-type':'application/octet-stream'}});
