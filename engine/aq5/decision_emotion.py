@@ -413,24 +413,52 @@ def collect(snapshot, asof=None, *, max_boards=5, max_history=30, max_seats=12, 
         except (RuntimeError,ValueError,KeyError,TypeError,OSError) as exc:
             failures.append({"stage":"focus_fallback","reason":str(exc)[:180]})
     try:
+        focused_lhb = focus_codes is not None
+        lhb_codes = set(focuses) if focused_lhb else codes
+        if focused_lhb and not lhb_codes:
+            raise ValueError("lhb_no_eligible_focus_codes")
         params = {"reportName": "RPT_DAILYBILLBOARD_DETAILSNEW", "columns": "ALL", "pageNumber": 1, "pageSize": 500,
                   "sortTypes": "-1", "sortColumns": "TRADE_DATE", "source": "WEB", "client": "WEB",
                   "filter": f"(TRADE_DATE>='{(at-timedelta(days=10)).date()}')(TRADE_DATE<='{at.date()}')"}
-        value, lr = _get(ENDPOINT + "?" + urlencode(params)); receipts.append(lr)
-        if value.get("success") is not True or not isinstance(value.get("result"), dict):
-            raise ValueError("lhb_listing_unavailable")
-        result = value["result"]; coverage["lhb_list_complete"] = result.get("pages", 1) == 1
+        listing = []
+        coverage["lhb_list_complete"] = True
+        # Exact per-stock queries avoid spending the single-stock budget on the market list.
+        # Still guard locally: a provider may ignore a supplied filter.
+        for focus in sorted(lhb_codes) if focused_lhb else [None]:
+            query = dict(params)
+            if focus:
+                query["filter"] += f'(SECURITY_CODE="{focus[2:]}")'
+            page, pages = 1, 1
+            while page <= pages:
+                query["pageNumber"] = page
+                value, lr = _get(ENDPOINT + "?" + urlencode(query)); receipts.append(lr)
+                if value.get("success") is not True or not isinstance(value.get("result"), dict):
+                    raise ValueError("lhb_listing_unavailable")
+                result = value["result"]
+                reported_pages = int(result.get("pages", 1))
+                if reported_pages < 1 or focused_lhb and reported_pages > 20:
+                    raise ValueError("lhb_focus_pagination_invalid_or_excessive")
+                if page > 1 and reported_pages != pages:
+                    raise ValueError("lhb_focus_pagination_changed")
+                if not isinstance(result.get("data"), list):
+                    raise ValueError("lhb_listing_rows_invalid")
+                listing.extend(row for row in result["data"] if not focus or row.get("SECURITY_CODE") == focus[2:])
+                if not focused_lhb:
+                    coverage["lhb_list_complete"] = reported_pages == 1
+                    break
+                pages = reported_pages
+                page += 1
         selected = {}
-        for row in result.get("data", []):
+        for row in listing:
             code = ("sh" if str(row.get("SECURITY_CODE", "")).startswith("6") else "sz") + str(row.get("SECURITY_CODE", ""))
             day = str(row.get("TRADE_DATE", ""))[:10]
             available = datetime.fromisoformat(day).replace(hour=15, tzinfo=CN_TZ)
             # Intraday publication time is not supplied. Actual visibility is retrieval time,
             # never inferred as available at the start of the trade date.
-            if code in codes and available <= at and (at.date()-available.date()).days <= 5:
-                selected.setdefault(code, day)
+            if code in lhb_codes and available <= at and (at.date()-available.date()).days <= 5:
+                selected[code] = max(selected.get(code, day), day) if focused_lhb else selected.get(code, day)
         coverage["lhb_candidates"] = len(selected)
-        for code, day in list(selected.items())[:max_seats]:
+        for code, day in list(selected.items())[:len(lhb_codes) if focused_lhb else max_seats]:
             try:
                 seats, sr = [], []
                 for side in ("BUY", "SELL"):
@@ -449,6 +477,7 @@ def collect(snapshot, asof=None, *, max_boards=5, max_history=30, max_seats=12, 
             except (RuntimeError, ValueError, KeyError, TypeError, OSError) as exc:
                 failures.append({"stage": "lhb_details", "code": code, "reason": str(exc)[:180]})
     except (RuntimeError, ValueError, KeyError, TypeError, OSError) as exc:
+        coverage["lhb_list_complete"] = False
         failures.append({"stage": "lhb_list", "reason": str(exc)[:180]})
     chosen,alternatives=select_context(records)
     return {"version": VERSION, "asof": at.isoformat(), "records": chosen, "coverage": coverage,

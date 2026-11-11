@@ -91,8 +91,9 @@ def screen():
     report["scope"] = collection["scope"]
     queried = set(codes) | {r["code"] for group in report["routes"].values() for r in group["candidates"] + group["watch"]}
     report["source_evidence"] = {code: claims for code, claims in evidence.latest(at).items() if code in queried}
-    for route in report["routes"].values():
-        route["note"] += " 本次为有界真实研究，非全市场筛选完成；龙虎榜仅作加分。"
+    for key, route in report["routes"].items():
+        route["note"] += (f" 本次从{len(pool)}股公开快照中按成交额优先核对{len(codes)}股财务，非全市场筛选完成。"
+                          if key == "value" else " 本次仅核对部分强势板块与成分，非全市场筛选完成；龙虎榜仅作加分。")
     return report
 
 

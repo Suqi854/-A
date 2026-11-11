@@ -2,6 +2,7 @@ import os,sys,unittest
 from pathlib import Path
 from datetime import datetime,timedelta
 from unittest.mock import patch
+from urllib.parse import parse_qs,urlsplit
 
 os.environ['AQ5_DATA']=os.environ['AQ5_TEST_DATA']
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
@@ -102,5 +103,56 @@ class EvidenceTests(unittest.TestCase):
         complete=[r('complete','mainline',True),r('complete','core',True),r('complete','cooling',False)]
         result,_=em.select_context(records+complete)
         self.assertEqual({r['provenance']['context_id'] for r in result},{'complete'})
+
+    def focused_lhb(self, pages, focus_codes, *, fail_page=None):
+        at=datetime(2026,11,11,20,tzinfo=CN_TZ)
+        other=[f'sh600{i:03d}' for i in range(1,13)]
+        snapshot=[{'code':c,'name':'样例'} for c in other+['sz002384','sz002916']]
+        requests=[]
+        def get(url,**kwargs):
+            q={k:v[0] for k,v in parse_qs(urlsplit(url).query).items()};requests.append(q)
+            receipt={'source_url':url,'raw_sha256':'a'*64,'retrieved_at':at.isoformat()}
+            if q['reportName']=='RPT_DAILYBILLBOARD_DETAILSNEW':
+                page=int(q['pageNumber'])
+                if page==fail_page:raise RuntimeError('page unavailable')
+                return {'success':True,'result':{'pages':len(pages),'data':[
+                    {'SECURITY_CODE':c[2:],'TRADE_DATE':'2026-11-11 00:00:00'} for c in pages[page-1]]}},receipt
+            code=next(c for c in other+['sz002384','sz002916'] if c[2:] in q['filter'])
+            return {'success':True,'result':{'pages':1,'data':[{'SECURITY_CODE':code[2:],'TRADE_DATE':'2026-11-11',
+                'TRADE_ID':'1','CHANGE_TYPE':'a','OPERATEDEPT_CODE':'1','OPERATEDEPT_NAME':'证券营业部','BUY':100,'SELL':40}]}},receipt
+        with patch.object(em,'_boards',return_value=([],[],0,True)),patch.object(em,'_sina_fallback',return_value=([],[],[],[],{})),\
+             patch.object(em,'_focus_fallback',return_value=([],[],[],[])),patch.object(em,'_get',side_effect=get):
+            result=em.collect(snapshot,at,focus_codes=focus_codes)
+        return result,requests,other
+
+    def test_focus_lhb_after_twelve_other_stocks_is_not_starved(self):
+        others=[f'sh600{i:03d}' for i in range(1,13)]
+        result,requests,_=self.focused_lhb([others+['sz002384']],['sz002384'])
+        self.assertEqual(result['coverage']['lhb_candidates'],1)
+        self.assertEqual([r['code'] for r in result['proxy_metrics']],['sz002384'])
+        self.assertTrue(all('(SECURITY_CODE="002384")' in q['filter'] for q in requests))
+        self.assertEqual(len(requests),3)
+        # The same list without focus retains the existing bounded market behavior.
+        screen,_,_=self.focused_lhb([others+['sz002384']],None)
+        self.assertEqual(screen['coverage']['lhb_details'],12)
+        self.assertNotIn('sz002384',[r['code'] for r in screen['proxy_metrics']])
+
+    def test_focus_lhb_pages_and_multiple_exact_codes(self):
+        others=[f'sh600{i:03d}' for i in range(1,13)]
+        result,requests,_=self.focused_lhb([others,['sz002384','sz002916']],['sz002384','sz002916'])
+        self.assertEqual({r['code'] for r in result['proxy_metrics']},{'sz002384','sz002916'})
+        lists=[q for q in requests if q['reportName']=='RPT_DAILYBILLBOARD_DETAILSNEW']
+        self.assertEqual(len(lists),4)
+        self.assertEqual(sorted(q['pageNumber'] for q in lists),['1','1','2','2'])
+        self.assertTrue(result['coverage']['lhb_list_complete'])
+
+    def test_focus_missing_or_page_failure_stays_unknown(self):
+        others=[f'sh600{i:03d}' for i in range(1,13)]
+        result,requests,_=self.focused_lhb([others],['sz002384'])
+        self.assertEqual(result['proxy_metrics'],[])
+        self.assertEqual(len(requests),1)
+        failed,requests,_=self.focused_lhb([others,['sz002384']],['sz002384'],fail_page=2)
+        self.assertEqual(failed['proxy_metrics'],[])
+        self.assertFalse(failed['coverage']['lhb_list_complete'])
 
 if __name__=='__main__':unittest.main()
