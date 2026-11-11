@@ -994,10 +994,12 @@
     el.hidden = !needed;
     if (!needed || el.dataset.requested) return;
     el.dataset.requested = '1';
-    const r = await api('research/preview').catch(() => null);
+    el.innerHTML = panel('RESEARCH PREVIEW <small>研究预览</small>', '<div class="loading">正在采集真实数据并核对两条路线，云端首次请求可能需要数分钟…</div>', {});
+    let requestError = '';
+    const r = await api('research/preview').catch(e => { requestError = e.message; return null; });
     if (S.page !== 'pick' || el !== $('#researchPreview') || el.hidden) return;
     if (!r || r.kind !== 'research_preview') {
-      el.innerHTML = panel('RESEARCH PREVIEW <small>研究预览</small>', '<div data-nc class="hint">等待下一交易日的真实研究样本</div>', {});
+      el.innerHTML = panel('RESEARCH PREVIEW <small>研究预览</small>', `<div data-nc class="hint">${requestError ? esc(requestError) + '；稍后重新进入选股页重试。' : '等待下一交易日的真实研究样本'}</div>`, {});
       return;
     }
     const stamp = r.quote_time_status === 'known' ? '行情时点 ' + sourceTime(r.asof)
