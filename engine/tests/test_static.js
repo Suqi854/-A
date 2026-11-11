@@ -73,6 +73,21 @@ test('locked overview omits plan, unlocked overview and monitor show its private
   assert.equal((await h.context.staticApi('overview')).accounts.plan, undefined);
 });
 
+test('published trading-session snapshot does not claim the market is currently trading', () => {
+  const body = source.match(/^  function header\(.*?^  }/ms)[0];
+  for (const isStatic of [true, false]) {
+    const h = harness({isStatic});
+    h.context.PHASE = {trading:['交易中','up']};
+    h.context.updateBell = () => {};
+    h.S.seen = new Set();
+    vm.runInContext(body,h.context);
+    h.context.header({...overview(),phase:'trading'});
+    assert.match(h.$('#phase').innerHTML,isStatic ? /行情快照/ : /交易中/);
+    assert.equal(h.$('#phase').className.includes(' live'),!isStatic);
+    if(isStatic) assert.equal(h.$('#mockTag').textContent,'云端版');
+  }
+});
+
 test('static quotes are visible immediately, 0% survives, and old snapshots show placeholders', () => {
   const h = harness();
   const ov = overview();

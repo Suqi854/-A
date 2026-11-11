@@ -393,9 +393,10 @@
   // ------------------------------------------------------------------ 顶栏、跑马灯
   setInterval(() => { const d = new Date(); $('#clock').textContent = d.toTimeString().slice(0, 8); }, 500);
   function header(ov) {
-    const [t, c] = PHASE[ov.phase] || ['--', 'muted'];
-    const ph = $('#phase'); ph.className = 'phase ' + c + (ov.phase === 'trading' || ov.phase === 'auction' ? ' live' : ''); ph.innerHTML = `<i></i>${t}`;
-    $('#mockTag').hidden = !ov.mock && !STATIC; if (STATIC) $('#mockTag').textContent = '公开只读';
+    const snapshot = STATIC && !ov.live_quote_time;
+    const [t, c] = snapshot ? ['行情快照', 'muted'] : PHASE[ov.phase] || ['--', 'muted'];
+    const ph = $('#phase'); ph.className = 'phase ' + c + (!snapshot && (ov.phase === 'trading' || ov.phase === 'auction') ? ' live' : ''); ph.innerHTML = `<i></i>${t}`;
+    $('#mockTag').hidden = !ov.mock && !STATIC; if (STATIC) $('#mockTag').textContent = '云端版';
     $('#lastUpd').textContent = ov.live_quote_time ? '中转报价 ' + sourceTime(ov.live_quote_time)
       : STATIC ? '快照 ' + ov.time.slice(5, 16) : '更新 ' + ov.time.slice(11);
     const items = [...ov.indices, ...ov.overseas, ...ov.watchlist.filter(w => w.price)];
