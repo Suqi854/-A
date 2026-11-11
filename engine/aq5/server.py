@@ -129,7 +129,8 @@ def api_intraday(q):
 
 
 def api_analyze(q):
-    return analysis.analyze(q["code"][0])
+    from . import decision_collect
+    return decision_collect.analysis(q["code"][0])
 
 
 def api_search(q):
@@ -503,8 +504,10 @@ POST = {"/api/picks/run": p_pick_run, "/api/sim/order": p_order, "/api/sim/cance
         "/api/sectors/refresh": lambda b: (sectors.refresh_map_async(force=True), {"started": True})[1]}
 
 
-from . import live, research, fundamentals, training, forecast
-GET.update({"/api/research/preview": lambda q: research.preview(),
+from . import live, research, fundamentals, training, forecast, decision, decision_evidence, decision_collect
+GET.update({"/api/decision": lambda q: decision.view(market.norm_code(q["code"][0])),
+            "/api/decision/status": lambda q: decision.status(market.norm_code(q["code"][0])),
+            "/api/research/preview": lambda q: decision_collect.screen(),
             "/api/t/live": lambda q: live.payload(),
             "/api/research": lambda q: research.shadow_report(),
             "/api/training": lambda q: training.view(),
@@ -512,12 +515,14 @@ GET.update({"/api/research/preview": lambda q: research.preview(),
             "/api/forecast/evaluation": lambda q: forecast.evaluation.view(),
             "/api/forecast/models": lambda q: forecast.models.view()})
 POST.update({"/api/forecast/control": lambda b: forecast.evaluation.control(b.get('action'))})
+POST.update({"/api/decision/confirm": decision.confirm_target,
+             "/api/decision/evidence": lambda b: decision_evidence.import_records(b.get("records"))})
 POST.update({"/api/research/promote": lambda b: research.promote_factor(b["factor_id"], b["version"], enabled=bool(b.get("enabled", True))),
              "/api/model/select": lambda b: learn.select_model(b.get("version")),
              "/api/fundamentals/import": lambda b: fundamentals.import_disclosures(b.get("records", []))})
 
 
-SENSITIVE = {"/api/forecast/control", "/api/research/promote", "/api/model/select", "/api/fundamentals/import", "/api/me/vault", "/api/me/password", "/api/me/restore", "/api/me/token", "/api/me/revoke",
+SENSITIVE = {"/api/decision/confirm", "/api/decision/evidence", "/api/forecast/control", "/api/research/promote", "/api/model/select", "/api/fundamentals/import", "/api/me/vault", "/api/me/password", "/api/me/restore", "/api/me/token", "/api/me/revoke",
              "/api/me/security", "/api/remote/enable", "/api/remote/download", "/api/remote/relay"}
 
 

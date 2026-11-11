@@ -117,5 +117,54 @@ try{
   for(let i=3;i<20;i++){now+=61000;assert.equal((await request('request','POST',{code:'sh600'+String(i).padStart(3,'0')})).status,200);}
   now+=61000;assert.equal((await request('request','POST',{code:'sh600021'})).status,429);
   assert.equal(mem.size,20);
-  console.log('forecast queue: authentication, isolation, concurrency, leases, encryption, chunks, expiry, limits and bounded ready history passed');
+  // Research request kinds stay separate; encrypted target heads outlive request expiry.
+  ({request,mem}=setup());
+  const analysisTask=await(await request('request','POST',{kind:'analysis',code:'sh600000'})).json();
+  const forecastTask=await(await request('request','POST',{code:'sh600000'})).json();
+  const screenTask=await(await request('request','POST',{kind:'screen'})).json();
+  assert.equal(new Set([analysisTask.id,forecastTask.id,screenTask.id]).size,3);
+  assert.equal((await request('request','POST',{kind:'screen',code:'sh600000'})).status,400);
+  assert.equal((await request('context?id='+analysisTask.id)).status,403);
+  const legacyWork=(await(await request('poll','GET',undefined,'publisher')).json()).requests;
+  assert.equal(legacyWork.length,1);assert.equal(legacyWork[0].id,forecastTask.id);
+  const work=(await(await request('poll?protocol=research-v1','GET',undefined,'publisher')).json()).requests;
+  assert.equal(work.find(x=>x.id===screenTask.id).kind,'screen');
+  assert.equal(work.find(x=>x.id===screenTask.id).code,null);
+  const ar=work.find(x=>x.id===analysisTask.id);
+  assert.equal((await request('complete','POST',{...completion,id:ar.id,claim:ar.claim},'publisher')).status,200);
+  now+=61000;
+  const proposal='f'.repeat(64);
+  const confirmBody={kind:'confirm',code:'sh600000',route:'emotion',proposal_id:proposal,source_request_id:ar.id,previous_id:null};
+  const confirmTask=await(await request('request','POST',confirmBody)).json();
+  const cr=(await(await request('poll?protocol=research-v1','GET',undefined,'publisher')).json()).requests.find(x=>x.id===confirmTask.id);
+  const context=await(await request('context?id='+cr.id,'GET',undefined,'publisher')).json();
+  assert.equal(context.source.id,ar.id);assert.equal(context.source.kind,'analysis');assert.deepEqual(context.targets,[]);
+  const small=new Uint8Array(100);small.set(new TextEncoder().encode('AQ5w1'));small.fill(17,5);
+  const targetCipher={data_b64:Buffer.from(small).toString('base64'),sha256:Buffer.from(await crypto.subtle.digest('SHA-256',small)).toString('hex')};
+  const update={code:'sh600000',route:'emotion',id:proposal,previous_id:null,...targetCipher};
+  const final={...completion,id:cr.id,claim:cr.claim,target_update:update};
+  assert.equal((await request('complete','POST',{...final,target_update:{...update,sha256:'0'.repeat(64)}},'publisher')).status,400);
+  assert.equal((await request('complete','POST',final,'publisher')).status,200);
+  assert.equal((await request('complete','POST',final,'publisher')).status,200);
+  assert.equal(mem.get('target-head:sh600000:emotion').id,proposal);
+  assert.equal([...mem.keys()].filter(x=>x.startsWith('target-history:')).length,1);
+  const refreshed=await(await request('request','POST',{kind:'analysis',code:'sh600000'})).json();
+  assert.notEqual(refreshed.id,analysisTask.id); // No five-minute stale analysis after confirmation.
+  assert.equal((await request('result?id='+analysisTask.id)).status,200); // Original evidence retained.
+  now+=61000;
+  const conflictTask=await(await request('request','POST',{...confirmBody,proposal_id:'e'.repeat(64)})).json();
+  const conflict=(await(await request('poll?protocol=research-v1','GET',undefined,'publisher')).json()).requests.find(x=>x.id===conflictTask.id);
+  assert.equal((await request('complete','POST',{...final,id:conflict.id,claim:conflict.claim,target_update:{...update,id:'e'.repeat(64)}},'publisher')).status,200);
+  assert.equal((await(await request('request?id='+conflict.id)).json()).status,'error');
+  assert.equal(mem.get('target-head:sh600000:emotion').id,proposal);
+  now+=5*60*1000;
+  const nextAnalysis=await(await request('request','POST',{kind:'analysis',code:'sh600000'})).json();
+  await request('poll?protocol=research-v1','GET',undefined,'publisher');
+  const nextContext=await(await request('context?id='+nextAnalysis.id,'GET',undefined,'publisher')).json();
+  assert.equal(nextContext.targets[0].id,proposal);assert.equal(nextContext.targets[0].data_b64,targetCipher.data_b64);
+  now+=61*60*1000;await request('poll','GET',undefined,'publisher');
+  assert.equal(mem.get('target-head:sh600000:emotion').id,proposal);
+  assert.equal([...mem.keys()].filter(x=>x.startsWith('target-history:')).length,1);
+  assert.equal([...mem.keys()].filter(x=>x.startsWith('request:')).length,0);
+  console.log('forecast/research queue: auth, kind isolation, CAS target history, encryption, leases, chunks, expiry and limits passed');
 }finally{globalThis.fetch=originalFetch;Date.now=originalNow;}

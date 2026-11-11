@@ -6,6 +6,9 @@ const reply = (body, status=200) => Response.json(body,{status,headers:HEADERS})
 const failure = (message,status=400) => reply({status:'error',error:message},status);
 const validId = id => typeof id === 'string' && /^[a-f0-9]{32}$/.test(id);
 const validCode = code => typeof code === 'string' && /^(sh60[0135]\d{3}|sz00[0-3]\d{3})$/.test(code);
+const validHash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+const kindOf = row => row.kind || 'forecast';
+const validRoute = route => ['value','emotion'].includes(route);
 const uuid = () => crypto.randomUUID().replaceAll('-','');
 function equal(a,b) {
   if (typeof a !== 'string' || !a.length || typeof b !== 'string' || a.length !== b.length) return false;
@@ -22,7 +25,7 @@ async function status(row,storage,now) {
   if(row.status==='ready') {
     const rows=await storage.list({prefix:'request:'});
     result.previous_results=[...rows.values()]
-      .filter(x=>x.id!==row.id&&x.code===row.code&&x.status==='ready'&&now-x.created<TTL&&x.updated<row.updated)
+      .filter(x=>x.id!==row.id&&x.code===row.code&&kindOf(x)===kindOf(row)&&x.status==='ready'&&now-x.created<TTL&&x.updated<row.updated)
       .sort((a,b)=>b.updated-a.updated).slice(0,3).map(x=>({id:x.id,sha256:x.sha256,updated:x.updated}));
   }
   return result;
@@ -34,6 +37,21 @@ async function boundedJson(req,limit) {
   while(true) {const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>limit){await reader.cancel();throw new Error('size');}chunks.push(value);}
   const bytes=new Uint8Array(size);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}
   return JSON.parse(new TextDecoder().decode(bytes));
+}
+async function validCipher(body,limit=512*1024) {
+  if(typeof body?.data_b64!=='string'||!validHash(body.sha256))return false;
+  try {
+    const bytes=Uint8Array.from(atob(body.data_b64),c=>c.charCodeAt(0));
+    if(bytes.length<70||bytes.length>limit||new TextDecoder().decode(bytes.slice(0,5))!=='AQ5w1')return false;
+    const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),b=>b.toString(16).padStart(2,'0')).join('');
+    return hash===body.sha256;
+  }catch{return false;}
+}
+async function encryptedResult(tx,row) {
+  const parts=[];
+  for(let i=0;i<row.chunks;i++)parts.push(await tx.get(`result:${row.id}:${i}`));
+  if(parts.some(x=>typeof x!=='string'))return null;
+  return {id:row.id,code:row.code,kind:kindOf(row),sha256:row.sha256,data_b64:parts.join('')};
 }
 async function cleanup(tx,now) {
   const rows=await tx.list({prefix:'request:'});
@@ -56,27 +74,36 @@ export async function forecastRoute(req,env) {
   if(req.method==='OPTIONS')return new Response(null,{status:204,headers:{...HEADERS,
     'access-control-allow-methods':'GET, POST, OPTIONS','access-control-allow-headers':'content-type, x-aq5-forecast-token, x-aq5-live-key'}});
   const action=url.pathname.slice(ROOT.length);
-  if(!['request','result','poll','complete'].includes(action))return failure('请求地址无效',404);
+  if(!['request','result','poll','complete','context'].includes(action))return failure('请求地址无效',404);
   if(!env.LIVE)return failure('云端分析通道尚未就绪',503);
   if(action==='result') {if(req.method!=='GET')return failure('请求方式无效',405);if(!validId(url.searchParams.get('id')))return failure('任务编号无效');}
-  else if(!auth(req,env,['poll','complete'].includes(action)?'publisher':'reader'))return failure('云端分析授权无效，请重新解锁',403);
+  else if(!auth(req,env,['poll','complete','context'].includes(action)?'publisher':'reader'))return failure('云端分析授权无效，请重新解锁',403);
   return env.LIVE.get(env.LIVE.idFromName('forecast-requests')).fetch(req);
 }
 export async function forecastFetch(req,ctx,env) {
   const url=new URL(req.url), action=url.pathname.slice(ROOT.length),now=Date.now();
   // Repeat authorization inside the object so future routing cannot bypass it.
-  if(action!=='result'&&!auth(req,env,['poll','complete'].includes(action)?'publisher':'reader'))return failure('云端分析授权无效，请重新解锁',403);
+  if(action!=='result'&&!auth(req,env,['poll','complete','context'].includes(action)?'publisher':'reader'))return failure('云端分析授权无效，请重新解锁',403);
   if(action==='request'&&req.method==='POST') {
     let body;try{body=await boundedJson(req,1024);}catch{return failure('股票请求格式无效');}
-    if(!validCode(body?.code))return failure('请选择沪深主板股票');
+    const kind=body?.kind||'forecast';
+    if(!['forecast','analysis','screen','confirm'].includes(kind))return failure('请求类别无效');
+    if(kind!=='screen'&&!validCode(body?.code))return failure('请选择沪深主板股票');
+    if(kind==='screen'&&body.code!==undefined)return failure('全市场研究不接受指定股票范围');
+    if(kind==='confirm'&&(!validRoute(body.route)||!validHash(body.proposal_id)||!validId(body.source_request_id)
+        ||!(body.previous_id===null||validHash(body.previous_id))))return failure('确认请求缺少有效原提案或版本');
     let row,needsDispatch=false,limited=false;
     await ctx.storage.transaction(async tx=>{
       const rows=await cleanup(tx,now);
-      const same=[...rows.values()].filter(x=>x.code===body.code).sort((a,b)=>b.created-a.created)[0];
+      const same=[...rows.values()].filter(x=>x.code===(body.code||null)&&kindOf(x)===kind&&!x.invalidated
+        &&(kind!=='confirm'||(x.proposal_id===body.proposal_id&&x.previous_id===body.previous_id)))
+        .sort((a,b)=>b.created-a.created)[0];
       if(same&&((same.status==='ready'&&now-same.updated<5*60*1000)||(['queued','processing'].includes(same.status)&&now-same.created<8*60*1000))) {row=same;return;}
       // Bound both retained requests and dispatch cost, including failed attempts.
       if(rows.size>=20||[...rows.values()].filter(x=>now-x.created<60000).length>=3){limited=true;return;}
-      row={id:uuid(),code:body.code,status:'queued',created:now,updated:now};
+      row={id:uuid(),code:body.code||null,status:'queued',created:now,updated:now,
+        ...(kind==='forecast'?{}:{kind}),...(kind==='confirm'?{route:body.route,proposal_id:body.proposal_id,
+          source_request_id:body.source_request_id,previous_id:body.previous_id}:{})};
       await tx.put('request:'+row.id,row);needsDispatch=true;
     });
     if(limited)return failure('云端分析任务较多，请稍后再试',429);
@@ -95,26 +122,46 @@ export async function forecastFetch(req,ctx,env) {
       const rows=await cleanup(tx,now);
       for(const row of [...rows.values()].sort((a,b)=>a.created-b.created)) {
         if(requests.length>=3)break;
+        if(kindOf(row)!=='forecast'&&url.searchParams.get('protocol')!=='research-v1')continue;
         if(row.status!=='queued'&&!(row.status==='processing'&&now-row.updated>=LEASE))continue;
         if((row.attempts||0)>=3){await tx.put('request:'+row.id,{...row,status:'error',message:'云端分析多次超时，请稍后重新提交',updated:now});continue;}
         const claim=uuid();await tx.put('request:'+row.id,{...row,status:'processing',claim,attempts:(row.attempts||0)+1,updated:now});
-        requests.push({id:row.id,code:row.code,claim});
+        requests.push({id:row.id,code:row.code,claim,...(kindOf(row)==='forecast'?{}:{kind:row.kind}),
+          ...(row.kind==='confirm'?{route:row.route,proposal_id:row.proposal_id,source_request_id:row.source_request_id,previous_id:row.previous_id}:{})});
       }
     });
     return reply({requests});
   }
+  if(action==='context'&&req.method==='GET') {
+    const id=url.searchParams.get('id');if(!validId(id))return failure('任务编号无效');
+    let context=null,error=null;
+    await ctx.storage.transaction(async tx=>{
+      const row=await tx.get('request:'+id);
+      if(!row||row.status!=='processing'||now-row.created>=TTL)return;
+      context={targets:[]};
+      if(row.code)for(const route of ['value','emotion']) {
+        const target=await tx.get(`target-head:${row.code}:${route}`);
+        if(target)context.targets.push(target);
+      }
+      if(row.kind==='confirm') {
+        const source=await tx.get('request:'+row.source_request_id);
+        if(!source||source.status!=='ready'||source.kind!=='analysis'||source.code!==row.code||now-source.created>=TTL) {
+          error='原分析已过期或股票不匹配，请重新分析';return;
+        }
+        context.source=await encryptedResult(tx,source);
+        if(!context.source)error='原分析密文不完整，请重新分析';
+      }
+    });
+    if(error)return failure(error,409);
+    return context?reply(context):failure('任务已过期或尚未领取',404);
+  }
   if(action==='complete'&&req.method==='POST') {
     let body;try{body=await boundedJson(req,768*1024);}catch{return failure('结果格式或大小无效');}
     if(!validId(body?.id)||!validId(body?.claim))return failure('任务编号或执行凭据无效');
-    if(body.error!==true){
-      try{
-        if(typeof body.data_b64!=='string'||!/^[a-f0-9]{64}$/.test(body.sha256||''))throw new Error('shape');
-        const bytes=Uint8Array.from(atob(body.data_b64),c=>c.charCodeAt(0));
-        if(bytes.length<70||bytes.length>512*1024||new TextDecoder().decode(bytes.slice(0,5))!=='AQ5w1')throw new Error('encrypted');
-        const digest=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),b=>b.toString(16).padStart(2,'0')).join('');
-        if(digest!==body.sha256)throw new Error('digest');
-      }catch{return failure('加密结果校验失败');}
-    }
+    if(body.error!==true&&!await validCipher(body))return failure('加密结果校验失败');
+    const target=body.target_update;
+    if(target&&(!validCode(target.code)||!validRoute(target.route)||!validHash(target.id)
+        ||!(target.previous_id===null||validHash(target.previous_id))||!await validCipher(target,48*1024)))return failure('研究目标密文无效');
     let result=409;
     await ctx.storage.transaction(async tx=>{
       const row=await tx.get('request:'+body.id);
@@ -123,6 +170,21 @@ export async function forecastFetch(req,ctx,env) {
       if(row.status==='ready'){result=row.sha256===body.sha256?200:409;return;}
       if(row.status!=='processing')return;
       if(body.error===true){await tx.put('request:'+row.id,{...row,status:'error',updated:now,message:'云端未取得完整分析数据，请稍后重试'});result=200;return;}
+      if(row.kind==='confirm') {
+        if(!target||target.code!==row.code||target.route!==row.route||target.id!==row.proposal_id||target.previous_id!==row.previous_id)return;
+        const key=`target-head:${row.code}:${row.route}`, old=await tx.get(key);
+        if(old?.id!==target.id&&(old?.id||null)!==target.previous_id) {
+          await tx.put('request:'+row.id,{...row,status:'error',updated:now,message:'另一页面已更新目标，请重新分析后确认'});result=200;return;
+        }
+        if(old?.id!==target.id) {
+          const saved={...target,updated:now};
+          await tx.put(`target-history:${row.code}:${row.route}:${target.id}`,saved);
+          await tx.put(key,saved);
+          for(const [requestKey,prior] of await tx.list({prefix:'request:'})) {
+            if(prior.kind==='analysis'&&prior.code===row.code)await tx.put(requestKey,{...prior,invalidated:true});
+          }
+        }
+      } else if(target) return;
       const chunks=Math.ceil(body.data_b64.length/CHUNK);
       for(let i=0;i<chunks;i++)await tx.put(`result:${row.id}:${i}`,body.data_b64.slice(i*CHUNK,(i+1)*CHUNK));
       await tx.put('request:'+row.id,{...row,status:'ready',sha256:body.sha256,chunks,updated:now});result=200;

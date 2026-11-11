@@ -5,6 +5,7 @@ import base64
 import gzip
 import hashlib
 import hmac
+import io
 import json
 import os
 import sqlite3
@@ -57,19 +58,108 @@ def load_models(password):
         src.close()
 
 
-def fulfill(item, password, analyze):
+def _encrypt(result, password, limit=512*1024):
     from .. import vault
-    result = analyze(item['code'])
-    if (result.get('symbol') or {}).get('code') != item['code']:
-        raise ValueError('analysis symbol mismatch')
     plain = json.dumps(result, ensure_ascii=False, allow_nan=False,
                        separators=(',', ':')).encode()
     cipher = vault.seal_web(gzip.compress(plain), password)
-    if len(cipher) > 512 * 1024:
+    if len(cipher) > limit:
         raise ValueError('analysis result exceeds queue limit')
+    return {'data_b64': base64.b64encode(cipher).decode(), 'sha256': hashlib.sha256(cipher).hexdigest()}
+
+
+def _decrypt(envelope, password, limit=512*1024):
+    from .. import vault
+    raw = base64.b64decode(envelope['data_b64'], validate=True)
+    if len(raw) > limit or not raw.startswith(b'AQ5w1') or not hmac.compare_digest(
+            hashlib.sha256(raw).hexdigest(), envelope.get('sha256', '')):
+        raise ValueError('research ciphertext integrity failure')
+    with gzip.GzipFile(fileobj=io.BytesIO(vault.unseal_web(raw, password))) as stream:
+        plain = stream.read(8*1024*1024+1)
+    if len(plain) > 8*1024*1024:
+        raise ValueError('research plaintext exceeds limit')
+    result = json.loads(plain)
+    if not isinstance(result, dict):
+        raise ValueError('research result must be an object')
+    return result
+
+
+def _restore_targets(code, envelopes, password):
+    """The Durable Object owns research target heads; only this ephemeral table is replaced."""
+    from .. import db, decision, decision_evidence as evidence
+    if not isinstance(envelopes, list) or len(envelopes) > 2:
+        raise ValueError('target head collection invalid')
+    records, routes = [], set()
+    for envelope in envelopes:
+        record = _decrypt(envelope, password, 48*1024)
+        route = record.get('route')
+        if (record.get('code') != code or envelope.get('code') != code or route not in ('value','emotion')
+                or route != envelope.get('route') or route in routes or record.get('id') != envelope.get('id')):
+            raise ValueError('target identity mismatch')
+        evidence.stamp(record['created_at']); evidence.stamp(record['confirmed_at'])
+        routes.add(route); records.append(record)
+    decision.init()
+    with db.tx() as conn:
+        # This function is called only after require_isolated_mode in the worker entry path.
+        conn.execute('DELETE FROM decision_targets WHERE code=?', (code,))
+        for record in records:
+            conn.execute('INSERT INTO decision_targets VALUES(?,?,?,?,?,?,?)',
+                         (record['id'],code,record['route'],record['created_at'],record['confirmed_at'],
+                          None,db.dumps({k:v for k,v in record.items() if k!='confirmed_at'})))
+
+
+def fulfill(item, password, analyze, *, context=None, handlers=None):
+    kind = item.get('kind', 'forecast')
+    target_update = None
+    if kind == 'forecast':
+        result = analyze(item['code'])
+        if (result.get('symbol') or {}).get('code') != item['code']:
+            raise ValueError('analysis symbol mismatch')
+    elif kind in ('analysis','screen','confirm'):
+        require_isolated_mode()
+        if not isinstance(context, dict):
+            raise ValueError('research context missing')
+        if kind != 'screen':
+            _restore_targets(item['code'], context.get('targets', []), password)
+        if handlers is None:
+            from .. import decision_collect
+            handlers = {'analysis': decision_collect.analysis, 'screen': decision_collect.screen}
+        if kind == 'analysis':
+            result = handlers['analysis'](item['code'])
+            if result.get('code') != item['code'] or result.get('fusion', {}).get('code') != item['code']:
+                raise ValueError('analysis result identity mismatch')
+        elif kind == 'screen':
+            result = handlers['screen']()
+            if result.get('kind') not in ('research_preview','screen') or not isinstance(result.get('routes'), dict):
+                raise ValueError('screen result contract mismatch')
+            result = {**result, 'kind':'screen'}
+        else:
+            from .. import decision
+            source = context.get('source') or {}
+            if (source.get('id') != item.get('source_request_id') or source.get('code') != item['code']
+                    or source.get('kind') != 'analysis'):
+                raise ValueError('confirmation source identity mismatch')
+            original = _decrypt(source, password)
+            route = item.get('route')
+            if route not in ('value','emotion') or original.get('code') != item['code']:
+                raise ValueError('confirmation route mismatch')
+            candidate = original.get('fusion', {}).get('routes', {}).get(route, {}).get('proposal')
+            if not isinstance(candidate, dict) or candidate.get('id') != item.get('proposal_id'):
+                raise ValueError('confirmation proposal mismatch')
+            # Collect current evidence before decision.confirm_target recomputes the current structure.
+            fresh = handlers['analysis'](item['code'])
+            if fresh.get('code') != item['code']:
+                raise ValueError('fresh analysis identity mismatch')
+            decision.remember({'routes': {route: {'proposal': candidate}}})
+            saved = decision.confirm_target({'code':item['code'],'route':route,
+                                             'proposal_id':candidate['id'],'previous_id':item.get('previous_id')})
+            target_update = {'code':item['code'],'route':route,'id':saved['id'],
+                             'previous_id':item.get('previous_id'), **_encrypt(saved,password,48*1024)}
+            result = {'kind':'confirm','code':item['code'],'route':route,'confirmed_target':saved}
+    else:
+        raise ValueError('unsupported cloud request kind')
     return {'id': item['id'], 'claim': item['claim'],
-            'data_b64': base64.b64encode(cipher).decode(),
-            'sha256': hashlib.sha256(cipher).hexdigest()}
+            **_encrypt(result,password), **({'target_update':target_update} if target_update else {})}
 
 
 def complete(relay, key, payload, transport, wait):
@@ -88,7 +178,7 @@ def complete(relay, key, payload, transport, wait):
         wait(2 ** attempt)
 
 
-def run(*, budget=900, transport=exchange, analyze=None, clock=time.monotonic, wait=time.sleep):
+def run(*, budget=900, transport=exchange, analyze=None, clock=time.monotonic, wait=time.sleep, research=False):
     require_isolated_mode()
     password = os.environ.get('AQ5_KEY', '')
     relay = os.environ.get('AQ5_RELAY', '')
@@ -100,12 +190,13 @@ def run(*, budget=900, transport=exchange, analyze=None, clock=time.monotonic, w
     key = hmac.new(password.encode(), b'aq5-live-publish-v1', hashlib.sha256).hexdigest()
     deadline, count, delivery_failures = clock() + budget, 0, 0
     while clock() < deadline and count < 20:
-        jobs = transport(relay, key, 'poll').get('requests', [])
+        jobs = transport(relay, key, 'poll?protocol=research-v1' if research else 'poll').get('requests', [])
         if not jobs:
             break
         for item in jobs:
             try:
-                payload = fulfill(item, password, analyze)
+                context = transport(relay, key, 'context?id='+item['id']) if item.get('kind','forecast')!='forecast' else None
+                payload = fulfill(item, password, analyze, context=context)
             except Exception:
                 # Logs and the queue never contain credentials, holdings, or provider bodies.
                 payload = {'id': item['id'], 'claim': item['claim'], 'error': True}
@@ -130,7 +221,7 @@ def main():
     except Exception:
         # Structural analysis is useful without a trained probability bundle.
         print('Model snapshot unavailable; probabilities remain unverified.', flush=True)
-    run()
+    run(research=True)
 
 
 if __name__ == '__main__':

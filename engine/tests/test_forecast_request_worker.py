@@ -18,6 +18,85 @@ from aq5 import vault
 
 
 class WorkerTest(unittest.TestCase):
+    @patch.dict(os.environ, {'AQ5_KEY':'test-password','AQ5_RELAY':'https://example.test','AQ5_FORECAST_REQUEST':'1'})
+    def test_research_worker_advertises_protocol_without_changing_legacy_poll(self):
+        calls=[]
+        def transport(relay,key,action,body=None):calls.append(action);return {'requests':[]}
+        self.assertEqual(worker.run(transport=transport,analyze=lambda code:{},research=True),0)
+        self.assertEqual(calls,['poll?protocol=research-v1'])
+
+    @patch.dict(os.environ, {'AQ5_FORECAST_REQUEST':'1'})
+    def test_research_analysis_restores_only_encrypted_target_heads(self):
+        from aq5 import db, decision
+        db.init()
+        before = db.q1('SELECT COUNT(*) n FROM accounts')['n']
+        target = {'id':'d'*64,'code':'sh600000','route':'emotion','created_at':'2026-11-11T10:00:00+08:00',
+                  'confirmed_at':'2026-11-11T10:01:00+08:00','target_zone':[11,12],'stop':9}
+        envelope = {'code':target['code'],'route':target['route'],'id':target['id'],**worker._encrypt(target,'password')}
+        item = {'id':'a'*32,'claim':'b'*32,'kind':'analysis','code':'sh600000'}
+        called = []
+        def analyze(code):
+            called.append(decision.confirmed(code,'emotion'))
+            return {'code':code,'fusion':{'code':code,'routes':{}},'name':'test'}
+        payload = worker.fulfill(item,'password',None,context={'targets':[envelope]},handlers={'analysis':analyze})
+        self.assertEqual(called[0]['target_zone'],[11,12])
+        self.assertEqual(worker._decrypt(payload,'password')['code'],'sh600000')
+        self.assertNotIn('target_update',payload)
+        self.assertEqual(db.q1('SELECT COUNT(*) n FROM accounts')['n'],before)
+        # Durable head is authoritative even if a prior failed CAS left local staged confirmation.
+        worker._restore_targets('sh600000',[],'password')
+        self.assertIsNone(decision.confirmed('sh600000','emotion'))
+
+    @patch.dict(os.environ, {'AQ5_FORECAST_REQUEST':'1'})
+    def test_screen_kind_has_no_stock_binding(self):
+        item = {'id':'a'*32,'claim':'b'*32,'kind':'screen','code':None}
+        result = worker.fulfill(item,'password',None,context={'targets':[]},
+                               handlers={'screen':lambda:{'kind':'research_preview','routes':{'value':{},'emotion':{}}}})
+        self.assertEqual(worker._decrypt(result,'password')['kind'],'screen')
+        self.assertNotIn('target_update',result)
+
+    @patch.dict(os.environ, {'AQ5_FORECAST_REQUEST':'1'})
+    def test_confirmation_uses_original_ciphertext_and_refreshes_before_confirm(self):
+        from aq5 import db, decision
+        db.init()
+        candidate = {'id':'c'*64,'code':'sh600000','route':'emotion','target_zone':[11,12]}
+        original = {'code':'sh600000','fusion':{'routes':{'emotion':{'proposal':candidate}}}}
+        source = {'id':'f'*32,'code':'sh600000','kind':'analysis',**worker._encrypt(original,'password')}
+        item = {'id':'a'*32,'claim':'b'*32,'kind':'confirm','code':'sh600000','route':'emotion',
+                'source_request_id':'f'*32,'proposal_id':'c'*64,'previous_id':None}
+        events = []
+        saved = {**candidate,'confirmed_at':'2026-11-11T10:01:00+08:00'}
+        def refresh(code):events.append('refresh');return {'code':code}
+        def remember(value):events.append('remember');self.assertEqual(value['routes']['emotion']['proposal'],candidate)
+        def confirm(value):events.append('confirm');self.assertEqual(value['proposal_id'],'c'*64);return saved
+        with patch.object(decision,'remember',side_effect=remember),patch.object(decision,'confirm_target',side_effect=confirm):
+            payload = worker.fulfill(item,'password',None,context={'targets':[],'source':source},handlers={'analysis':refresh})
+        self.assertEqual(events,['refresh','remember','confirm'])
+        self.assertEqual(worker._decrypt(payload,'password')['confirmed_target'],saved)
+        self.assertEqual(worker._decrypt(payload['target_update'],'password'),saved)
+        self.assertEqual(payload['target_update']['previous_id'],None)
+        with self.assertRaises(ValueError):
+            worker.fulfill({**item,'proposal_id':'d'*64},'password',None,
+                           context={'targets':[],'source':source},handlers={'analysis':refresh})
+        with self.assertRaises(ValueError):
+            worker.fulfill(item,'password',None,
+                           context={'targets':[],'source':{**source,'id':'e'*32}},handlers={'analysis':refresh})
+
+    @patch.dict(os.environ, {'AQ5_FORECAST_REQUEST':''})
+    def test_research_mutations_require_explicit_isolated_mode(self):
+        with self.assertRaises(RuntimeError):
+            worker.fulfill({'id':'a'*32,'claim':'b'*32,'kind':'screen'},'password',None,
+                           context={'targets':[]},handlers={'screen':lambda:{}})
+
+    def test_research_cipher_hash_and_encrypted_identity_are_checked(self):
+        from aq5 import db
+        db.init()
+        target = {'id':'c'*64,'code':'sz000001','route':'value','created_at':'2026-11-11T10:00:00+08:00',
+                  'confirmed_at':'2026-11-11T10:01:00+08:00'}
+        envelope={'id':target['id'],'code':'sh600000','route':'value',**worker._encrypt(target,'password')}
+        with self.assertRaises(ValueError):worker._restore_targets('sh600000',[envelope],'password')
+        with self.assertRaises(ValueError):worker._decrypt({**envelope,'sha256':'0'*64},'password')
+
     def test_result_is_encrypted_and_bound_to_stock_and_claim(self):
         item = {'id': 'a'*32, 'code': 'sz002911', 'claim': 'b'*32}
         body = worker.fulfill(item, 'test-password', lambda code: {'symbol': {'code': code}, 'summary': {'stance': '观察'}})

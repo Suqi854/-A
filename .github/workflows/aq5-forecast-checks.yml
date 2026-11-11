@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main, 'feat/forecast-*', 'fix/forecast-*']
-    paths: ['engine/aq5/forecast/**', 'engine/tests/test_forecast*', 'engine/web/**', 'engine/cloudflare-relay/**', 'engine/requirements-forecast.txt', '.github/workflows/aq5-forecast*.yml']
+    paths: ['engine/aq5/forecast/**', 'engine/aq5/decision*', 'engine/tests/test_decision*', 'engine/tests/test_forecast*', 'engine/web/**', 'engine/cloudflare-relay/**', 'engine/requirements-forecast.txt', '.github/workflows/aq5-forecast*.yml']
 permissions:
   contents: read
 jobs:
@@ -32,6 +32,8 @@ jobs:
       - name: 结构、预测、模拟、评估与集成
         run: |
           for test in engine/tests/test_forecast*.py; do python -B "$test"; done
+          for test in engine/tests/test_decision*.py; do python -B "$test"; done
+          node --test engine/tests/test_decision_cloud.mjs
           python -B engine/tests/test_execution_guards.py
           python -B engine/tests/test_handoff.py
           python -B engine/tests/test_release_integration.py

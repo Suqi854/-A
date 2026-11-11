@@ -126,7 +126,7 @@ def _quote_stamp(row: dict) -> str | None:
         return None
 
 
-def preview(snapshot: list[dict] | None = None, asof: str | None = None) -> dict:
+def preview(snapshot: list[dict] | None = None, asof: str | None = None, *, include_decision=False) -> dict:
     """只读研究视图。行情时标由供源给出，当前生成时刻不作为行情时标。"""
     from . import sectors
 
@@ -156,6 +156,11 @@ def preview(snapshot: list[dict] | None = None, asof: str | None = None) -> dict
     report, _ = screen(rows, earliest or cutoff, industries)
     status = "unknown" if not times else "known" if len(times) == len(rows) else "partial"
     report["value_quality"]["quote_time_status"] = status
+    if include_decision:
+        from . import decision_evidence
+        # Current research may use a newly obtained disclosure, while retaining
+        # each quote's original timestamp. This is never a historical signal.
+        report["routes"] = decision_evidence.screen(rows, cutoff)
     return {**report, "kind": "research_preview", "not_new_selection": True, "asof": latest,
             "generated_at": generated_at, "quote_time_status": status, "quote_time_rows": len(times),
             "quote_time_min": earliest, "active_factors": sorted(active_factors())}
