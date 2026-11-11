@@ -1,0 +1,38 @@
+name: A量化 云端模拟账本恢复
+
+on:
+  push:
+    branches: ['recovery/aq5-sim-20261111']
+    paths: ['.github/workflows/aq5-sim-recovery-20261111.yml']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: aq5-cloud
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    if: github.repository == 'Suqi854/-A'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 恢复并校验加密账本
+        working-directory: engine
+        env:
+          AQ5_CLOUD: '1'
+          AQ5_MOCK: '0'
+          AQ5_DATA: ${{ runner.temp }}/aq5-recovery
+          AQ5_KEY: ${{ secrets.AQ5_KEY }}
+          AQ5_RELAY: ${{ vars.AQ5_RELAY || 'https://aq5-relay.phehwm62784.workers.dev' }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONUNBUFFERED: '1'
+        run: python -B tools/recover_ai_checkpoint.py --publish
