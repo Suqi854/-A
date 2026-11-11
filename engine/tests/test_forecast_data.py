@@ -97,12 +97,75 @@ class DataContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'no_verified_adjustment_days'):
             data._affine_evidence({'bfq': [raw], 'qfq': [adjusted], 'observed_at': self.t.isoformat()})
 
-    def test_raw_payload_cannot_be_relabelled_as_qfq(self):
+    def test_day_identity_requires_two_matching_responses_and_retains_basis(self):
         payload = {'data': {'sh600000': {'day': [['2026-11-06', '10', '10', '11', '9', '100']]}}}
         import json
+        with patch.object(market, 'http_get', return_value=json.dumps(payload).encode()) as request:
+            pair = data._daily_pair('sh600000')
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(pair['basis'], 'qfq_request_day_crosschecked_identity')
+        self.assertEqual(pair['response_fields'], {'qfq': 'day', 'bfq': 'day'})
+        self.assertNotEqual(pair['basis'], 'explicit_qfq')
+
+    def test_day_identity_rejects_different_dates_prices_or_volume(self):
+        import json
+        good = {'data': {'sh600000': {'day': [['2026-11-06', '10', '10', '11', '9', '100']]}}}
+        for index, value, error in ((0, '2026-11-05', 'dates_mismatch'), (1, '9.5', 'ohlc_mismatch'), (5, '200', 'volume_mismatch')):
+            bad = copy.deepcopy(good); bad['data']['sh600000']['day'][0][index] = value
+            with patch.object(market, 'http_get', side_effect=[json.dumps(good).encode(), json.dumps(bad).encode()]):
+                with self.assertRaisesRegex(ValueError, error):
+                    data._daily_pair('sh600000')
+
+    def test_missing_both_daily_fields_remains_unverified(self):
+        import json
+        payload = {'data': {'sh600000': {'version': 'test'}}}
         with patch.object(market, 'http_get', return_value=json.dumps(payload).encode()):
             with self.assertRaisesRegex(ValueError, 'explicit_daily_basis_missing'):
                 data._daily_pair('sh600000')
+
+    def test_blocked_tencent_uses_verified_eastmoney_pair_without_relaxing_gate(self):
+        pair = {'qfq': self.daily, 'bfq': self.daily, 'observed_at': self.t.isoformat(),
+                'source': 'Eastmoney', 'basis': 'explicit_qfq'}
+        with patch.object(data, 'MOCK', False), patch.object(data, 'now', return_value=self.t), \
+             patch.object(data, '_daily_pair', side_effect=market.Blocked('test blocked')), \
+             patch.object(data, '_eastmoney_pair', return_value=pair):
+            result = data.fetch('sh600000', 'day')
+        self.assertTrue(result['quality']['eligible'], result['quality'])
+        self.assertIn('Eastmoney', result['source'])
+        self.assertEqual(result['source_attempts'], [{'source': 'tencent', 'reason': 'blocked'}, {'source': 'eastmoney', 'reason': 'verified'}])
+        self.assertEqual(result['adjustment_evidence']['source'], 'Eastmoney')
+
+    def test_all_evidence_sources_failed_preserves_distinct_failure_causes(self):
+        with patch.object(data, 'MOCK', False), patch.object(data, 'now', return_value=self.t), \
+             patch.object(data, '_daily_pair', side_effect=market.Blocked('test blocked')), \
+             patch.object(data, '_eastmoney_pair', side_effect=ValueError('explicit_daily_basis_missing')), \
+             patch.object(market, '_kline_sina', return_value=self.daily):
+            result = data.fetch('sh600000', 'day')
+        self.assertFalse(result['quality']['eligible'])
+        for error in ('adjustment_unverified', 'tencent_blocked', 'eastmoney_explicit_daily_basis_missing'):
+            self.assertIn(error, result['quality']['reason'])
+
+    def test_partial_affine_evidence_tries_full_verified_fallback(self):
+        bad = copy.deepcopy(self.daily)
+        bad[3].update(open=8, close=9, high=20, low=2)
+        broken = {'qfq': bad, 'bfq': self.daily, 'observed_at': self.t.isoformat()}
+        good = {'qfq': self.daily, 'bfq': self.daily, 'observed_at': self.t.isoformat(), 'source': 'Eastmoney'}
+        with patch.object(data, 'MOCK', False), patch.object(data, 'now', return_value=self.t), \
+             patch.object(data, '_daily_pair', return_value=broken), patch.object(data, '_eastmoney_pair', return_value=good):
+            result = data.fetch('sh600000', 'day')
+        self.assertTrue(result['quality']['eligible'], result['quality'])
+        self.assertEqual(result['source_attempts'][0]['reason'], 'completed_ohlc_dates_unverified')
+
+    def test_minute_cross_source_range_mismatch_still_blocks(self):
+        ev = {'verified': True, 'observed_at': self.t.isoformat(), 'input_hash': 'test',
+              'days': {day: {'a': 1, 'b': 0, 'raw_low': 10, 'raw_high': 10.2} for day in ('2026-11-05', '2026-11-06', '2026-11-09')}}
+        bundle = {'evidence': ev, 'pair': {}, 'attempts': [{'source': 'eastmoney', 'reason': 'verified'}]}
+        with patch.object(data, 'MOCK', False), patch.object(data, 'now', return_value=self.t), \
+             patch.object(data, 'adjustment_factors', return_value=bundle), \
+             patch.object(market, '_try_sources', return_value=(self.minute, 'Sina raw minute')):
+            result = data.fetch('sh600000', '5m')
+        self.assertFalse(result['quality']['eligible'])
+        self.assertIn('minute_raw_daily_range_mismatch', result['quality']['reason'])
 
     def test_real_time_fetch_observes_after_acquisition(self):
         pair = {'qfq': self.daily, 'bfq': self.daily, 'observed_at': self.t.isoformat()}

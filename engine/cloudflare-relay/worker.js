@@ -1,8 +1,9 @@
 import { liveRoute } from './live.js';
+import { forecastRoute } from './forecast-requests.js';
 export { LiveSnapshot } from './live.js';
 // A量化 固定地址中转：https://aq5-relay.<你的子域>.workers.dev
-// 电脑在线：原样转发到电脑的 trycloudflare 隧道（完整版）；
-// 电脑离线：自动改为提供 GitHub 网页版（只读 + 手机本地分析 + 云端代跑的数据），不再报错。
+// 默认网页始终由云端 Pages 提供，不因电脑在线而切回旧的本机页面。
+// 仅用户显式连接电脑时的 /api/ 请求转发至本机隧道。
 // 电脑引擎每次隧道地址变化都会带密钥 POST /__aq5/target 更新。
 const PAGES = "https://suqi854.github.io/-A";
 
@@ -78,6 +79,8 @@ export default {
     ctx.waitUntil(kickCloud(env));
   },
   async fetch(req, env) {
+    const forecast = await forecastRoute(req, env);
+    if (forecast) return forecast;
     const live = await liveRoute(req, env);
     if (live) return live;
     const url = new URL(req.url);
@@ -100,6 +103,12 @@ export default {
       }
       return Response.json({ ok: true, online: !!(await env.KV.get("target")) });
     }
+    const isApi = url.pathname.startsWith("/api/");
+    if (!isApi && url.pathname !== "/__aq5/alive") {
+      if (url.pathname.startsWith("/__aq5/")) return Response.json({ error: "not found" }, { status: 404 });
+      if (!["GET", "HEAD"].includes(req.method)) return new Response("method not allowed", { status: 405 });
+      return pages(url);
+    }
     const target = await env.KV.get("target", { cacheTtl: 30 });
     // 电脑是否真的在线（云端代跑据此决定要不要接手）
     if (url.pathname === "/__aq5/alive") {
@@ -107,12 +116,10 @@ export default {
       const r = await upstream(target, new Request(url.origin + "/api/auth/me"), new URL(url.origin + "/api/auth/me"), 6000);
       return Response.json({ alive: !!(r && r.status === 200) }, { headers: { "cache-control": "no-store" } });
     }
-    const isApi = url.pathname.startsWith("/api/");
     if (target) {
-      const r = await upstream(target, req, url, isApi ? 25000 : 6000);
+      const r = await upstream(target, req, url, 25000);
       if (r) return new Response(r.body, { status: r.status, headers: new Headers(r.headers) });
     }
-    if (isApi) return Response.json({ error: "电脑离线" }, { status: 503 });
-    return pages(url);
+    return Response.json({ error: "手动连接的电脑暂不可用" }, { status: 503 });
   },
 };

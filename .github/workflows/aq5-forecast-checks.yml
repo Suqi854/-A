@@ -2,8 +2,8 @@ name: 预测闭环工程验收
 on:
   workflow_dispatch:
   push:
-    branches: [main, 'feat/forecast-*']
-    paths: ['engine/aq5/forecast/**', 'engine/tests/test_forecast*', 'engine/requirements-forecast.txt', '.github/workflows/aq5-forecast-checks.yml']
+    branches: [main, 'feat/forecast-*', 'fix/forecast-*']
+    paths: ['engine/aq5/forecast/**', 'engine/tests/test_forecast*', 'engine/web/**', 'engine/cloudflare-relay/**', 'engine/requirements-forecast.txt', '.github/workflows/aq5-forecast*.yml']
 permissions:
   contents: read
 jobs:
@@ -36,6 +36,11 @@ jobs:
           python -B engine/tests/test_handoff.py
           python -B engine/tests/test_release_integration.py
           node --check engine/web/js/forecast.js
+          node engine/tests/test_forecast_ui.js
+          node engine/tests/test_static.js
+          node engine/tests/test_forecast_queue.mjs
+          node engine/tests/test_forecast_routing.mjs
+          node engine/tests/test_live_relay.mjs
       - name: 单股票公开行情实际读取（缺口保留）
         working-directory: engine
         env:

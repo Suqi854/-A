@@ -1,0 +1,32 @@
+name: 云端个股分析
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: aq5-forecast-requests
+  cancel-in-progress: false
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 云端读取行情并分析（不启动交易引擎）
+        working-directory: engine
+        env:
+          AQ5_DATA: ${{ runner.temp }}/aq5-forecast-request
+          AQ5_FORECAST_REQUEST: '1'
+          AQ5_CLOUD: '1'
+          AQ5_MOCK: '0'
+          AQ5_KEY: ${{ secrets.AQ5_KEY }}
+          AQ5_RELAY: ${{ vars.AQ5_RELAY || 'https://aq5-relay.phehwm62784.workers.dev' }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONUNBUFFERED: '1'
+        run: python -B -m aq5.forecast.request_worker

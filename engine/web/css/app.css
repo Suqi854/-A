@@ -391,29 +391,39 @@ table.ob tr.obmid td { border-top: 1px solid var(--line2); border-bottom: 1px so
 .mkti > div { border-left: 2px solid var(--line2); padding-left: 8px; }
 .mkts { border-left: 1px dashed var(--line2); padding-left: 10px; max-height: 150px; overflow: auto; }
 .livep { gap: 6px; font-size: 12px; }
-.fc-shell { max-width: 1440px; margin: 0 auto; padding: 14px; }
-.fc-title { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:18px; }
-.fc-title h2 { margin:0 0 6px; font-size:24px; }
-.fc-cards { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-bottom:18px; }
-.fc-cards article,.fc-coverage article { border:1px solid var(--line2); border-radius:8px; padding:14px; min-width:0; }
-.fc-cards span,.fc-cards small,.fc-coverage small { display:block; opacity:.7; font-size:12px; overflow-wrap:anywhere; }
-.fc-cards b { display:block; font-size:20px; margin:8px 0; }
-.fc-coverage { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
-.fc-coverage b { display:block; font-size:13px; margin-bottom:6px; }
-.fc-coverage span { display:block; margin-bottom:5px; }
-.fc-chart { border:1px solid var(--line2); padding:12px; margin:12px 0 20px; border-radius:8px; }
+.fc-shell { display:grid; gap:var(--pad); min-width:0; }
+html[data-ui] .fc-shell > .panel:first-child { overflow:visible; z-index:2; }
+html .fc-shell > .panel:first-child > .pb { overflow:visible; }
+.fc-search-row { align-items:flex-end; }
+.fc-search { display:grid; gap:5px; flex:1; min-width:0; max-width:520px; }
+.fc-input-wrap { position:relative; display:block; min-width:0; }
+.fc-search input.in { width:100%; min-width:0; }
+.fc-search .suggest { top:30px; left:0; right:0; max-height:280px; overflow:auto; z-index:50; }
+.fc-search .suggest [role=option] { gap:12px; min-height:32px; align-items:center; }
+.fc-search .suggest [role=option] span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.fc-shell #fc-search-message:not(:empty) { margin-top:7px; }
+.fc-summary { line-height:1.75; margin:9px 0; overflow-wrap:anywhere; }
+.fc-price-levels { max-width:440px; padding:8px 0; margin:0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
+.fc-chart { min-width:0; }
 .fc-chart svg { width:100%; height:auto; display:block; }
-.fc-warning { padding:12px; border-left:3px solid #dba64c; background:#dba64c12; margin-bottom:12px; overflow-wrap:anywhere; }
-.fc-shell h3 { margin:24px 0 10px; }
+.fc-chart .hint { margin-top:6px; line-height:1.6; }
+.fc-timeframe-label { font-size:12px; color:var(--muted); }
+.fc-notice { margin:0; padding:9px 10px; border-left:2px solid var(--amber); background:var(--panel2); color:var(--text); font-size:12px; line-height:1.6; overflow-wrap:anywhere; }
 .fc-shell .scroll { max-width:100%; overflow:auto; }
-.fc-shell details { margin:20px 0; }
+.fc-forecast-table td,.fc-forecast-table th { white-space:normal; }
+.fc-diagnostics { min-width:0; }
+.fc-diagnostics > summary { color:var(--muted); cursor:pointer; font-size:12px; padding:7px 0; }
+.fc-diagnostics h4 { font-size:12px; color:var(--muted); margin:15px 0 6px; }
+.fc-controls { margin-top:12px; }
 @media (max-width: 700px) {
-  .fc-shell { padding:10px 4px; }
-  .fc-cards,.fc-coverage { grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; }
-  .fc-cards article,.fc-coverage article { padding:10px; }
-  .fc-cards b { font-size:16px; }
-  .fc-title h2 { font-size:19px; }
-  .fc-chart { padding:5px; }
-  .fc-shell .row { flex-wrap:wrap; }
+  .fc-search { max-width:none; }
+  .fc-search-row .btn { min-height:32px; }
+  .fc-search input.in { height:32px; font-size:14px; }
+  .fc-search .suggest { top:34px; }
+  .fc-search .suggest [role=option] { min-height:40px; }
+  .fc-shell .ph { min-height:var(--ph-h); height:auto; padding-top:5px; padding-bottom:5px; }
+  .fc-shell .ph h3 { white-space:normal; }
+  .fc-price-levels { max-width:none; }
+  .fc-forecast-table { table-layout:fixed; font-size:11px; }
 }
 @media (max-width: 900px) { .mkt { grid-template-columns: 1fr; } .mkti { grid-template-columns: 1fr 1fr; } .mkts { border-left: 0; padding-left: 0; } }

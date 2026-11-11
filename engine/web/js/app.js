@@ -62,7 +62,11 @@
       case 'intraday': return sj('intraday/' + code + '.json').catch(() => Lite.intraday(code));
       case 'sim': { const priv = privateForDisplay(); return q.get('acct') === 'me' && priv ? priv.me : sj('ai.json'); }
       case 't/live': { const priv = privateForDisplay(); return { signals: priv?.intraday || {}, status: priv?.intraday_status, training: priv?.training }; }
-      case 'forecast': return privateForDisplay()?.forecast || {locked: !S.priv, status:{phase:'awaiting_private_snapshot'},predictions:[]};
+      case 'forecast': {
+        const cached = code && S.forecastResults?.[code];
+        if (S.priv && cached?.session === S.privateSession) return cached.data;
+        return privateForDisplay()?.forecast || {locked: !S.priv, status:{phase:'awaiting_private_snapshot'},predictions:[]};
+      }
       case 'forecast/evaluation': return privateForDisplay()?.forecast?.evaluation || {};
       case 'forecast/models': return privateForDisplay()?.forecast?.model_status || {};
       case 'plan': {
@@ -129,13 +133,14 @@
     if (body !== undefined) { opt.method = 'POST'; opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
     let r;
     try { r = await fetch(S.remote.url + '/api/' + path, opt); }
-    catch (e) { S.remote = null; STATIC = true; document.body.classList.add('static'); setRemoteBadge(); toast('和电脑的连接断开了，已切回只读版（每分钟自动重连）', 1); return staticApi(path, body); }
+    catch (e) { S.remote = null; STATIC = true; document.body.classList.add('static'); setRemoteBadge(); toast('本机连接已结束，已切回云端数据', 1); return staticApi(path, body); }
     const j = await r.json().catch(() => ({ error: '电脑引擎没有响应' }));
     if (!r.ok || (j && j.error)) throw new Error(j.error || r.statusText);
     return j;
   }
   function setRemoteBadge() { const b = $('#unlockBtn'); if (!b) return; b.textContent = S.remote ? '已连电脑' : S.priv ? '已解锁' : '解锁个人'; b.classList.toggle('pri', !S.remote); }
-  async function connectRemote(quiet) {
+  async function connectRemote(explicit = false) {
+    if (!explicit) return false; // 本机探测只由用户点击触发，云端解锁不触发。
     const session = S.privateSession, r = session?.remote; if (!r || !r.url || S.remote) return !!S.remote;
     const tryOnce = async url => { const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 15000);
       try { return await fetch(url + '/api/auth/me', { headers: { Authorization: 'Bearer ' + r.token }, signal: ctl.signal, cache: 'no-store' }).then(x => x.json()); }
@@ -144,7 +149,7 @@
       let m = null;  // 固定地址优先，连不上再试一次、再试隧道直连地址（网络抖动时常常第二次就通）
       for (const u of [r.url, r.url, r.tunnel].filter(Boolean)) { try { m = await tryOnce(u); if (m && m.authorized) { r.url = u; break; } } catch { } }
       if (S.privateSession !== session) return false;
-      if (!m || !m.authorized) { if (!quiet) toast('暂时连不上电脑：先显示网页版数据，每分钟会自动重试', 1); return false; }
+      if (!m || !m.authorized) { toast('本机服务暂不可用，继续使用云端数据', 1); return false; }
       S.remote = { url: r.url, token: r.token }; STATIC = false; document.body.classList.remove('static'); document.body.classList.add('remote');
       setRemoteBadge(); restartPoll(); initAssistant(); toast('已连上你的电脑：现在是完整版，可以下单、改设置、用 AI');
       api('settings').then(s => syncLook(s.look)).catch(() => { }); return true;
@@ -159,6 +164,75 @@
     if (r.status === 401 && j.need_login) { showLogin(); throw new Error('请先登录'); }
     if (!r.ok || (j && j.error)) throw new Error(j.error || r.statusText);
     return j;
+  }
+  async function requestForecast(code, options = {}) {
+    code = normCode(code);
+    if (!/^(sh|sz)\d{6}$/.test(code)) throw new Error('请选择有效的股票代码');
+    const session = S.privateSession;
+    if (!S.priv || !session?.key) throw new Error('请先解锁个人数据，再请求云端预测');
+    const origin = relayBase();
+    if (!origin) throw new Error('云端分析地址暂未就绪，请刷新后重试');
+    const request = { code, session };
+    S.forecastRequest = request;
+    S.forecastSelection = code;
+    const deadline = Date.now() + 8 * 60 * 1000;
+    const current = () => S.privateSession === session && !!S.priv && S.forecastRequest === request && S.forecastSelection === code;
+    const check = () => {
+      if (!current()) throw Object.assign(new Error('已切换股票或锁定，本次预测请求已停止等待'), { code: 'FORECAST_CANCELLED' });
+      if (Date.now() >= deadline) throw Object.assign(new Error('云端预测等待超时，请稍后刷新；后台任务可能仍在运行'), { code: 'FORECAST_TIMEOUT' });
+    };
+    const progress = status => {
+      if (current() && typeof options.onProgress === 'function') options.onProgress(status === 'processing' ? '云端正在分析，请稍候…' : '云端任务已排队，等待运行…', status);
+    };
+    const bits = new Uint8Array(await crypto.subtle.deriveBits({name:'PBKDF2',salt:new TextEncoder().encode('aq5-forecast-request-v1'),iterations:200000,hash:'SHA-256'},session.key,256));
+    check();
+    const token = Array.from(bits, b => b.toString(16).padStart(2,'0')).join('');
+    const headers = {'x-aq5-forecast-token':token};
+    const endpoint = origin + '/__aq5/forecast/request';
+    const readResponse = async response => {
+      const body = await response.json().catch(() => null);
+      check();
+      if (!response.ok || body?.error) throw new Error(body?.error?.message || (typeof body?.error === 'string' ? body.error : '云端请求暂不可用，请稍后重试'));
+      if (!body || !['queued','processing','ready'].includes(body.status)) throw new Error('云端返回的任务状态无法确认，请稍后刷新');
+      return body;
+    };
+    let response;
+    try {
+      response = await fetch(endpoint, {method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({code}),cache:'no-store',signal:AbortSignal.timeout(Math.min(15000,deadline-Date.now()))});
+    } catch {
+      check();
+      throw new Error('请求状态暂无法确认，请稍后刷新；为避免重复任务，本次不会重复提交');
+    }
+    let task = await readResponse(response);
+    const id = task.id;
+    if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(id)) throw new Error('云端任务编号无效，请稍后重试');
+    let networkFailures = 0;
+    while (true) {
+      check();
+      if (task.id && task.id !== id) throw new Error('云端任务编号不一致，请重新选择股票');
+      if (task.status === 'ready') {
+        if (!/^[a-f0-9]{64}$/.test(task.sha256 || '')) throw new Error('云端结果校验信息不完整，请稍后重试');
+        const data = await unlockPrivate(session.key,task.sha256,origin + '/__aq5/forecast/result?id=' + encodeURIComponent(id),Math.min(15000,deadline-Date.now()));
+        check();
+        const resultCode = data?.code || data?.symbol?.code || (typeof data?.symbol === 'string' && /^(?:sh|sz)?\d{6}$/i.test(data.symbol) ? data.symbol : null);
+        if (!data || typeof data !== 'object' || !resultCode || normCode(resultCode) !== code) throw new Error('云端结果与所选股票不一致，请重试');
+        S.forecastResults ||= {};
+        S.forecastResults[code] = {session,data,id,receivedAt:Date.now()};
+        return {status:'ready',data};
+      }
+      progress(task.status);
+      await new Promise(resolve => setTimeout(resolve,Math.min(5000,Math.max(1,deadline-Date.now()))));
+      check();
+      try {
+        response = await fetch(endpoint + '?id=' + encodeURIComponent(id),{headers,cache:'no-store',signal:AbortSignal.timeout(Math.min(15000,deadline-Date.now()))});
+      } catch {
+        check();
+        if (++networkFailures >= 3) throw new Error('云端状态暂时不可用，请稍后刷新查看结果');
+        continue;
+      }
+      task = await readResponse(response);
+      networkFailures = 0;
+    }
   }
   function toast(msg, err) {
     const t = document.createElement('div'); t.className = 'toast' + (err ? ' err' : ''); t.textContent = msg;
@@ -261,12 +335,20 @@
     else show(p);
   }
   function show(p, arg) {
+    if (p !== 'forecast') { S.forecastRequest = null; S.forecastSelection = null; }
+    else if (arg) {
+      const selected = normCode(arg);
+      if (S.forecastSelection && S.forecastSelection !== selected) S.forecastRequest = null;
+      S.forecastSelection = selected;
+    }
     S.page = p;
     $$('#nav a').forEach(a => a.classList.toggle('on', a.dataset.p === p));
     $$('.page').forEach(s => s.classList.toggle('on', s.id === 'p-' + p));
     $('#main').scrollTop = 0;
     ({ mon: renderMon, pick: renderPick, anly: () => renderAnly(arg), sim: renderSim, learn: renderLearn, bt: renderBt, log: renderLog, set: renderSet,
-      forecast: () => window.ForecastUI.render({api,staticMode:STATIC,unlock:showUnlock}) })[p]();
+      forecast: () => window.ForecastUI.render({api,code:arg ? normCode(arg) : null,staticMode:STATIC,unlock:showUnlock,
+        search:q => api('search?q=' + encodeURIComponent(q)),selectCode:code => go('forecast',normCode(code)),
+        analyze:code => api('analyze?code=' + normCode(code)),requestForecast}) })[p]();
   }
   window.addEventListener('hashchange', () => { const [p, a] = location.hash.slice(1).split('/'); show(PAGES.includes(p) ? p : 'mon', a); });
   document.addEventListener('keydown', e => {
@@ -306,7 +388,7 @@
     }
   });
   $('#cmd').addEventListener('blur', () => setTimeout(() => $('#suggest').style.display = 'none', 150));
-  function pickCode(c) { $('#cmd').value = ''; $('#suggest').style.display = 'none'; $('#cmd').blur(); go('anly', c); }
+  function pickCode(c) { $('#cmd').value = ''; $('#suggest').style.display = 'none'; $('#cmd').blur(); go(S.page === 'forecast' ? 'forecast' : 'anly', normCode(c)); }
 
   // ------------------------------------------------------------------ 顶栏、跑马灯
   setInterval(() => { const d = new Date(); $('#clock').textContent = d.toTimeString().slice(0, 8); }, 500);
@@ -398,7 +480,7 @@
         await renderSim();
       }
     } catch (e) {
-      if (wasStatic === STATIC && remote === S.remote) $('#lastUpd').textContent = '连接中断';
+      if (wasStatic === STATIC && remote === S.remote) $('#lastUpd').textContent = STATIC ? '云端数据暂未更新' : '服务暂未更新';
     } finally { S.polling = false; }
   }
   function restartPoll() { clearInterval(S.timers.poll); const sec = STATIC ? +(lsGet('aq5_refresh') || 60) : 5; S.timers.poll = setInterval(() => { if (!document.hidden) poll(); }, sec * 1000); }
@@ -607,8 +689,6 @@
       ${panel('MARKET <small>大盘状态 · 放量/缩量/阴跌/异动 · 每分钟更新</small>', '<div id="mktBox" class="loading">载入</div>', { cls: 'c12' })}
       ${panel('BREADTH <small>市场温度 · 沪深主板</small>', '<div id="breadth" class="loading">载入</div>', { cls: 'c4' })}
       ${panel('SIGNAL <small>最新选股</small>', '<div id="monPick" class="loading">载入</div>', { cls: 'c4', right: '<button class="btn sm" onclick="location.hash=\'pick\'">全部 ›</button>' })}
-      ${panel('INTRADAY <small>日内做 T · 影子信号</small>', '<div id="tLive"></div>', { cls: 'c12' })}
-      ${STATIC && !S.priv ? '' : panel('T LAB <small>独立做 T 模拟训练</small>', '<div id="tTraining"></div>', { cls: 'c12' })}
       ${panel('ACCOUNT <small>模拟账户</small>', '<div id="monAcct"></div>', { cls: 'c4', right: '<button class="btn sm" onclick="location.hash=\'sim\'">模拟盘 ›</button>' })}
       ${panel('SECTORS <small>板块热度</small>', '<div id="secBox" class="scroll" style="max-height:380px"><div class="loading">载入</div></div>', { cls: 'c8', np: true, right: '<div class="seg" id="secSeg"><button data-m="ind" class="on">行业强度</button><button data-m="con">热门概念</button></div>' })}
       ${panel('AI BRIEF <small>AI 今日简报</small>', '<div id="aiBrief" class="scroll" style="max-height:380px"><div class="loading">载入</div></div>', { cls: 'c4', right: '<button class="btn sm rw" id="aiBriefGo">生成</button>' })}
@@ -1530,7 +1610,14 @@
       ${STATIC ? '' : panel('AI REVIEW <small>AI 盘后复盘（每天15:40自动）</small>', '<div id="aiRev" class="hint">载入中…</div>', { cls: 'c7', right: '<select class="in" id="aiRevSel" style="height:22px"></select><button class="btn sm" id="aiRevGo">立即生成</button>' })}
       ${STATIC ? '' : panel('AI ITERATE <small>AI 迭代建议 · 回测把关</small>', '<div id="aiSug" class="hint">载入中…</div>', { cls: 'c5', right: '<button class="btn sm" id="aiSugGo">让 AI 提建议</button>' })}
       ${panel('HISTORY <small>迭代记录</small>', `<div class="scroll" style="max-height:320px"><table class="t"><tr><th>版本</th><th>时间</th><th class="l">主要变化</th></tr>${hist.map(h => `<tr><td class="amber">v${h.version}</td><td class="muted">${h.created}</td><td class="l nm">${esc(h.note)}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">还没有迭代记录：有效样本≥' + L.min_ic + ' 个后，每天15:30自动迭代</td></tr>'}</table></div>`, { cls: 'c12', np: true })}
+      <details id="legacyDiagnostics" class="c12"><summary class="hint">查看历史模拟研究记录</summary><div id="legacyDiagnosticsBody"></div></details>
     </div>`;
+    const diagnostics = $('#legacyDiagnostics');
+    if (diagnostics) diagnostics.ontoggle = () => {
+      const body = $('#legacyDiagnosticsBody');
+      body.innerHTML = diagnostics.open ? panel('SIGNALS <small>历史日内信号</small>', '<div id="tLive"></div>') + panel('RECORDS <small>历史模拟对照记录</small>', '<div id="tTraining"></div>') : '';
+      if (diagnostics.open) drawLive();
+    };
     if (!STATIC) loadAiLearn(L);
     $('#lrBoot').onclick = async () => { try { const r = await api('learn/bootstrap', {}); toast(r.started ? '冷启动开始，约需1-3分钟' : r.message); setTimeout(() => S.page === 'learn' && renderLearn(), 4000); } catch (e) { toast(e.message, 1); } };
     if (L.boot.running) setTimeout(() => S.page === 'learn' && renderLearn(), 3000);
@@ -1589,7 +1676,7 @@
     const box = $('#rmBox'); if (!box) return;
     let st; try { st = await api('remote/status'); } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
     box.className = '';
-    box.innerHTML = `<p>开启后，电脑会通过 Cloudflare 免费隧道得到一个 https 地址。手机在 GitHub 网页上「解锁个人」后会<b class="amber">自动连上电脑</b>，变成完整版：下单、改设置、AI、任意个股完整分析都能用，不在同一个 WiFi 也可以。</p>
+    box.innerHTML = `<p>开启后，电脑会通过 Cloudflare 免费隧道得到一个 https 地址。手机在云端网页解锁后默认查看云端数据；如需使用本机功能，可在设置里主动选择<b class="amber">连接本机</b>，进入完整版：下单、改设置、AI、任意个股完整分析都能用，不在同一个 WiFi 也可以。</p>
       ${!st.installed ? `<div class="row"><span class="hint">需要先下载 cloudflared（Cloudflare 官方工具，约 60MB，来自 github.com/cloudflare/cloudflared，存到 data\\tools）</span><span class="sp"></span>
         <button class="btn pri" id="rmDl" ${st.downloading ? 'disabled' : ''}>${st.downloading ? '下载中 ' + st.progress + '%' : '下载 cloudflared'}</button></div>` : ''}
       <div class="row" style="margin-top:6px"><label class="hint"><input type="checkbox" id="rmOn" ${st.enabled ? 'checked' : ''} ${st.installed ? '' : 'disabled'}> 开启手机远程</label><span class="sp"></span>
@@ -1653,11 +1740,11 @@
     const refresh = +(lsGet('aq5_refresh') || 60), rem = !!lsGet('aq5_pw');
     $('#p-set').innerHTML = `<div class="grid">${lookPanel()}
       ${panel('PHONE <small>手机设置 · 只保存在这台手机</small>', `<dl class="kv"><dt>个人数据</dt><dd>${p ? '<b class="down">已解锁</b> · 数据时间 ' + esc(p.time.slice(5, 16)) : '<b class="up">未解锁</b>'}</dd>
-        <dt>连接电脑</dt><dd>${!p ? '解锁后自动尝试' : S.privateSession?.remote ? '<span class="amber">电脑远程已开启，但现在连不上（电脑可能关机或休眠）</span> <button class="btn sm" id="phRe">重试</button>' : '<span class="muted">电脑端没开「手机远程」</span>'}</dd></dl>
+        <dt>数据来源</dt><dd>云端加密实时数据 / 最近快照</dd><dt>本机连接（可选）</dt><dd>${!p ? '解锁后可手动选择，不影响云端查看' : S.privateSession?.remote ? '<button class="btn sm" id="phRe">连接本机</button> <span class="muted">仅点击时尝试</span>' : '<span class="muted">未配置本机连接，云端查看照常使用</span>'}</dd></dl>
         <div class="ticket"><label>自动刷新<select class="in" id="phRef">${[30, 60, 120, 300].map(x => `<option value="${x}" ${x === refresh ? 'selected' : ''}>${x < 60 ? x + ' 秒' : x / 60 + ' 分钟'}</option>`).join('')}</select></label>
           <label>解锁密码<select class="in" id="phRem"><option value="1" ${rem ? 'selected' : ''}>记住（自动解锁）</option><option value="0" ${rem ? '' : 'selected'}>不记住</option></select></label></div>
         <div class="row" style="margin-top:8px"><button class="btn ${p ? '' : 'pri'}" id="phLock">${p ? '锁定并清除密码' : '解锁个人数据'}</button><span class="sp"></span><button class="btn" id="phClear">清除本机缓存</button></div>
-        <p class="hint">公开数据每 10 分钟（盘中）由电脑自动发布一次；页面刷新只是去拿最新发布的那份。</p>`, { cls: 'c6' })}
+        <p class="hint">云端行情和个人数据按服务更新节奏发布；优先使用可用的加密实时数据，过期时显示最近快照及数据时间。电脑关闭不影响云端查看。</p>`, { cls: 'c6' })}
       ${panel('EDIT <small>在手机上改设置</small>', `<p>这里是 GitHub 上的只读版，不能直接改电脑上的设置。要在手机上改 AI 接口、选股参数、自选股或下单：</p>
         <ul class="why"><li>手机连上和电脑同一个 WiFi</li><li>打开 ${p && p.lan ? `<a class="amber mono" href="${esc(p.lan)}">${esc(p.lan)}</a>` : '电脑端「设置 → 手机访问」里的地址'}</li><li>用你的账号登录，就是完整版，所有设置都能改，和电脑上一样</li></ul>
         <p class="hint">不在家时：之后可以装 Tailscale，让手机在外面也能安全连回电脑。</p>`, { cls: 'c6' })}
@@ -1666,11 +1753,11 @@
         <dt>每次最多</dt><dd>${s.pick ? s.pick.max_picks + ' 只' : '--'}</dd><dt>止损</dt><dd>${s.risk ? s.risk.stop_atr + ' × ATR，最多 ' + num(s.risk.max_stop_pct * 100, 0) + '%' : '--'}</dd>
         <dt>AI 模型</dt><dd>${s.ai ? esc(s.ai.provider + ' · ' + (s.ai.model || '默认')) : '--'}</dd></dl>`, { cls: 'c6' })}
     </div>`;
-    const pr = $('#phRe'); if (pr) pr.onclick = async () => { if (await connectRemote()) renderSet(); else toast('还是连不上电脑', 1); };
+    const pr = $('#phRe'); if (pr) pr.onclick = async () => { if (await connectRemote(true)) renderSet(); };
     bindLook();
     $('#phRef').onchange = e => { lsSet('aq5_refresh', e.target.value); restartPoll(); toast('已保存'); };
     $('#phRem').onchange = e => { if (e.target.value === '0') lsSet('aq5_pw', null); else if (!S.priv) toast('下次解锁时勾选「记住」即可'); toast('已保存'); };
-    $('#phLock').onclick = () => { if (S.priv) { S.priv = null; S.privateSession = null; S.livePrivate = null; lsSet('aq5_pw', null); location.reload(); } else showUnlock(); };
+    $('#phLock').onclick = () => { if (S.priv) { S.priv = null; S.privateSession = null; S.livePrivate = null; S.forecastRequest = null; S.forecastResults = {}; lsSet('aq5_pw', null); location.reload(); } else showUnlock(); };
     $('#phClear').onclick = () => { if (!confirm('清除这台手机上保存的密码和设置？')) return; ['aq5_pw', 'aq5_refresh', 'aq5_chat'].forEach(k => lsSet(k, null)); location.reload(); };
   }
   async function renderSet() {
@@ -1839,7 +1926,7 @@
   async function unlockPrivate(key, expectedHash, url, timeout = 15000) {
     const r = await fetch(url || 'data/private.enc?t=' + Date.now(),
       { cache: 'no-store', signal: globalThis.AbortSignal?.timeout?.(timeout) });
-    if (!r.ok) throw new Error('还没有加密的个人数据：请在电脑端「设置 → 密钥保险箱」设置「手机查看密码」，等 1–2 分钟发布完成再试');
+    if (!r.ok) throw new Error('云端加密数据暂未就绪，请稍后刷新重试');
     const buf = new Uint8Array(await r.arrayBuffer());
     if (expectedHash) {
       const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', buf));
@@ -1893,14 +1980,14 @@
     document.body.classList.add('unlocked');
     syncLook(S.priv.look);
     const b = $('#unlockBtn'); if (b) b.textContent = '已解锁 ' + (S.priv.profile.nickname || '');
-    toast('个人数据已解锁（数据时间 ' + S.priv.time.slice(5, 16) + '）' + (S.priv.remote ? '，正在连接电脑…' : ''));
-    await connectRemote();
+    toast('云端个人数据已解锁（数据时间 ' + S.priv.time.slice(5, 16) + '）');
+    await pollLive();
     await poll(); const [p, a] = location.hash.slice(1).split('/'); show(PAGES.includes(p) ? p : 'mon', a);
-    clearInterval(S.timers.rc);  // 网页版：每分钟悄悄重连一次电脑，连上就自动切回完整版
-    S.timers.rc = setInterval(async () => { if (!S.remote && S.priv && !document.hidden && await connectRemote(true)) { poll(); const [p2, a2] = location.hash.slice(1).split('/'); show(PAGES.includes(p2) ? p2 : 'mon', a2); } }, 60000);
+    clearInterval(S.timers.rc); // 清理旧版本遗留的本机重连计时器；不再自动探测。
+    delete S.timers.rc;
   }
   function showUnlock() {
-    if (S.priv) { if (confirm('锁定并清除本机记住的密码？')) { S.priv = null; S.privateSession = null; S.livePrivate = null; lsSet('aq5_pw', null); location.reload(); } return; }
+    if (S.priv) { if (confirm('锁定并清除本机记住的密码？')) { S.priv = null; S.privateSession = null; S.livePrivate = null; S.forecastRequest = null; S.forecastResults = {}; lsSet('aq5_pw', null); location.reload(); } return; }
     const m = document.createElement('div'); m.className = 'modal';
     m.innerHTML = `<div class="box" style="max-width:380px">${panel('UNLOCK <small>解锁个人数据</small>', `<p class="hint">输入电脑端设置的「手机查看密码」。自选股、我的模拟盘只在你的浏览器里解密，GitHub 上只有密文。</p>
       <div class="ticket"><label class="full">密码<input class="in" id="ulP" type="password" autocomplete="current-password"></label>

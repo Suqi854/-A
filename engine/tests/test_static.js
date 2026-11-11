@@ -320,3 +320,157 @@ test('an incomplete private analysis cannot hide published daily candles', async
   assert.equal((await h.context.staticApi('analyze?code=sh600000')).score, 55);
   assert.equal((await h.context.staticApi('kline?code=sh600000')).rows.length, 1);
 });
+
+const functionSource = name => source.match(new RegExp(`^  (?:async )?function ${name}\\(.*?^  }`, 'ms'))[0];
+
+test('cloud unlock prefers encrypted cloud data without probing or warning about the computer', async () => {
+  const calls=[], notices=[], S={timers:{rc:123}};
+  const context=vm.createContext({S,TextEncoder,DecompressionStream,crypto:webcrypto,window:{crypto:webcrypto},
+    document:{body:{classList:{add(){}}}},$:()=>({}),syncLook(){},lsSet(){},
+    unlockPrivate:async()=>({...pack(newTime,100),profile:{},remote:{url:'https://computer.invalid',token:'private'}}),
+    pollLive:async()=>calls.push('cloud-live'),poll:async()=>calls.push('cloud-snapshot'),
+    connectRemote:async()=>{throw new Error('must not probe computer');},
+    toast:message=>notices.push(message),show(){},location:{hash:'#mon'},PAGES:['mon'],
+    clearInterval:id=>calls.push('clear-old-reconnect'),setInterval:()=>{throw new Error('must not schedule reconnect');}});
+  vm.runInContext(functionSource('doUnlock'),context);
+  await context.doUnlock('synthetic-password',false,{time:newTime,private_pack_sha256:'synthetic-hash'});
+  assert.equal(calls[0],'cloud-live');
+  assert.equal(calls[1],'cloud-snapshot');
+  assert.equal(S.timers.rc,undefined);
+  assert.equal(notices.length,1);
+  assert.match(notices[0],/云端个人数据已解锁/);
+  assert.doesNotMatch(notices.join(' '),/连不上|连接电脑|重连|重试/);
+});
+
+test('computer connection is opt-in even when an encrypted snapshot contains remote credentials', async () => {
+  let requests=0;
+  const context=vm.createContext({S:{privateSession:{remote:{url:'https://computer.invalid',token:'private'}}},
+    fetch:async()=>{requests++;return Response.json({authorized:false});},AbortController,setTimeout,clearTimeout,
+    toast(){},Response});
+  vm.runInContext(functionSource('connectRemote'),context);
+  assert.equal(await context.connectRemote(),false);
+  assert.equal(requests,0);
+  assert.equal(await context.connectRemote(true),false);
+  assert.ok(requests>0);
+});
+
+test('cloud refresh failure is described as cloud staleness, not a computer disconnection', async () => {
+  const h=harness();h.context.fetch=async()=>{throw new Error('cloud unavailable');};
+  await h.context.poll();
+  assert.equal(h.$('#lastUpd').textContent,'云端数据暂未更新');
+});
+
+test('default monitoring page retains original panels and omits internal training diagnostics', () => {
+  const main={innerHTML:''};
+  const context=vm.createContext({S:{priv:{},timers:{}},STATIC:true,$:sel=>sel==='#p-mon'?main:null,$$:()=>[],
+    panel:(title,body)=>title+body,drawLive(){},loadSectors(){},loadBrief(){},loadMarket(){},loadIdxSpark(){},
+    clearInterval(){},setInterval(){return 1;}});
+  vm.runInContext(functionSource('renderMon'),context);context.renderMon();
+  assert.match(main.innerHTML,/主要指数/);assert.match(main.innerHTML,/模拟账户/);
+  assert.doesNotMatch(main.innerHTML,/INTRADAY|T LAB|id="tLive"|id="tTraining"/);
+  const learn=functionSource('renderLearn');
+  assert.match(learn,/<details id="legacyDiagnostics" class="c12">/);
+  assert.doesNotMatch(learn,/<details[^>]*legacyDiagnostics[^>]*\bopen\b/);
+});
+
+test('global stock selection stays on forecast but preserves existing analysis navigation elsewhere', () => {
+  const calls=[],node={style:{},blur(){}};
+  const context=vm.createContext({S:{page:'forecast'},$:()=>node,normCode:x=>x==='600000'?'sh600000':x,
+    go:(...args)=>calls.push(args)});
+  vm.runInContext(source.match(/^  function pickCode.*$/m)[0],context);
+  context.pickCode('600000');assert.deepEqual(calls[0],['forecast','sh600000']);
+  context.S.page='mon';context.pickCode('sz000001');assert.deepEqual(calls[1],['anly','sz000001']);
+});
+
+test('forecast route passes the selected stock and existing app services to its viewer', () => {
+  let options;
+  const noOp=()=>{},node={classList:{toggle(){}},dataset:{},id:'p-forecast'};
+  const context=vm.createContext({S:{},STATIC:true,$:()=>({}),$$:()=>[node],normCode:x=>'sh'+x,
+    window:{ForecastUI:{render:o=>{options=o;}}},api:noOp,showUnlock:noOp,go:noOp,requestForecast:noOp,
+    renderMon:noOp,renderPick:noOp,renderAnly:noOp,renderSim:noOp,renderLearn:noOp,renderBt:noOp,renderLog:noOp,renderSet:noOp});
+  vm.runInContext(functionSource('show'),context);context.show('forecast','600000');
+  assert.equal(options.code,'sh600000');
+  for(const key of ['api','search','selectCode','analyze','requestForecast','unlock'])assert.equal(typeof options[key],'function');
+});
+
+function forecastRequestHarness({fetchTask,decrypt,derive}={}) {
+  let clock=1000;
+  class Clock extends Date {static now(){return clock;}}
+  const S={priv:{},privateSession:{key:{synthetic:true}},page:'forecast'};
+  const requests=[],derivations=[],decryptions=[];
+  const context=vm.createContext({S,Date:Clock,TextEncoder,Uint8Array,AbortSignal,Response,
+    normCode:c=>/^[0-9]{6}$/.test(c)?'sh'+c:c,
+    relayBase:()=> 'https://cloud.invalid',
+    crypto:{subtle:{deriveBits:async(...args)=>{derivations.push(args);return derive?derive(...args):new Uint8Array(32).fill(42).buffer;}}},
+    fetch:async(url,options)=>{requests.push({url,options});return fetchTask?fetchTask(url,options,S,requests.length):Response.json({id:'job-1',status:'ready',sha256:'a'.repeat(64)});},
+    unlockPrivate:async(...args)=>{decryptions.push(args);return decrypt?decrypt(S,...args):{symbol:{code:'sh600000'},summary:'synthetic'};},
+    setTimeout:(fn,ms)=>{clock+=ms;fn();},
+  });
+  vm.runInContext(functionSource('requestForecast'),context);
+  return {context,S,requests,derivations,decryptions};
+}
+
+test('cloud forecast derives dedicated token and decrypts verified ready result without contacting the computer',async()=>{
+  const progress=[];
+  const h=forecastRequestHarness({fetchTask:(url,options,S,n)=>Response.json({id:'job-1',status:n===1?'queued':n===2?'processing':'ready',sha256:'a'.repeat(64)})});
+  const result=await h.context.requestForecast('600000',{onProgress:(text,status)=>progress.push([text,status])});
+  assert.equal(result.status,'ready');assert.equal(result.data.symbol.code,'sh600000');
+  assert.equal(h.derivations.length,1);
+  const [algorithm,key,bits]=h.derivations[0];
+  assert.equal(new TextDecoder().decode(algorithm.salt),'aq5-forecast-request-v1');
+  assert.equal(algorithm.iterations,200000);assert.equal(algorithm.hash,'SHA-256');assert.equal(bits,256);
+  assert.equal(key,h.S.privateSession.key);
+  assert.equal(h.requests.filter(r=>r.options.method==='POST').length,1);
+  assert.equal(h.requests[0].options.headers['x-aq5-forecast-token'],'2a'.repeat(32));
+  assert.equal(h.requests[0].options.body,'{"code":"sh600000"}');
+  assert.ok(h.requests.every(r=>r.url.startsWith('https://cloud.invalid/__aq5/forecast/request')));
+  assert.equal(h.decryptions[0][1],'a'.repeat(64));
+  assert.equal(h.decryptions[0][2],'https://cloud.invalid/__aq5/forecast/result?id=job-1');
+  assert.deepEqual(progress.map(x=>x[1]),['queued','processing']);
+  assert.doesNotMatch(progress.map(x=>x[0]).join(' '),/电脑|本机/);
+  assert.equal(h.S.forecastResults.sh600000.data,result.data);
+});
+
+test('cloud forecast stops polling after eight minutes and never repeats an uncertain POST',async()=>{
+  const timeout=forecastRequestHarness({fetchTask:()=>Response.json({id:'job-1',status:'queued'})});
+  await assert.rejects(timeout.context.requestForecast('sh600000'),e=>e.code==='FORECAST_TIMEOUT');
+  assert.equal(timeout.requests.filter(r=>r.options.method==='POST').length,1);
+  assert.ok(timeout.requests.length<=96);
+  assert.equal(timeout.S.forecastResults,undefined);
+  const uncertain=forecastRequestHarness({fetchTask:()=>{throw new Error('network');}});
+  await assert.rejects(uncertain.context.requestForecast('sh600000'),/不会重复提交/);
+  assert.equal(uncertain.requests.length,1);
+});
+
+test('late cloud forecast result cannot survive locking or a stock selection change',async()=>{
+  for(const mutate of [S=>{S.privateSession=null;S.priv=null;},S=>{S.forecastSelection='sz000001';}]){
+    const h=forecastRequestHarness({decrypt:S=>{mutate(S);return {symbol:{code:'sh600000'}};}});
+    await assert.rejects(h.context.requestForecast('sh600000'),e=>e.code==='FORECAST_CANCELLED');
+    assert.equal(h.S.forecastResults,undefined);
+  }
+});
+
+test('cloud forecast requires unlock, validates response identity, and bounds network retries',async()=>{
+  const locked=forecastRequestHarness();locked.S.priv=null;
+  await assert.rejects(locked.context.requestForecast('sh600000'),/先解锁/);assert.equal(locked.requests.length,0);
+  const wrong=forecastRequestHarness({decrypt:()=>({symbol:{code:'sz000001'}})});
+  await assert.rejects(wrong.context.requestForecast('sh600000'),/所选股票不一致/);
+  const missingIdentity=forecastRequestHarness({decrypt:()=>({summary:'no stock identity'})});
+  await assert.rejects(missingIdentity.context.requestForecast('sh600000'),/所选股票不一致/);
+  const retry=forecastRequestHarness({fetchTask:(url,opt,S,n)=>{if(n===1)return Response.json({id:'job-1',status:'queued'});throw new Error('network');}});
+  await assert.rejects(retry.context.requestForecast('sh600000'),/云端状态暂时不可用/);
+  assert.equal(retry.requests.length,4);
+});
+
+test('static forecast cache is scoped to requested code and the current unlocked session',async()=>{
+  const h=harness();h.S.priv={...pack(oldTime,100),forecast:{marker:'original'}};h.S.privateSession={key:{}};
+  const result={symbol:{code:'sh600000'},summary:'requested'};
+  h.S.forecastResults={sh600000:{session:h.S.privateSession,data:result}};
+  assert.equal(await h.context.staticApi('forecast?code=sh600000'),result);
+  assert.equal((await h.context.staticApi('forecast?code=sz000001')).marker,'original');
+  assert.equal((await h.context.staticApi('forecast')).marker,'original');
+  h.S.privateSession={key:{}};
+  assert.equal((await h.context.staticApi('forecast?code=sh600000')).marker,'original');
+  h.S.priv=null;
+  assert.equal((await h.context.staticApi('forecast?code=sh600000')).locked,true);
+});

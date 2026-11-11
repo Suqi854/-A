@@ -20,6 +20,22 @@ PERIODS = {"day": 0, "60m": 60, "15m": 15, "5m": 5}
 PRICE_FIELDS = ("open", "high", "low", "close")
 
 
+class AdjustmentError(ValueError):
+    def __init__(self, attempts):
+        self.attempts = attempts
+        super().__init__('adjustment_sources_unavailable:' + ';'.join(a['source'] + '_' + a['reason'] for a in attempts))
+
+
+def _source_reason(exc):
+    if isinstance(exc, market.Blocked):
+        return 'blocked'
+    if isinstance(exc, json.JSONDecodeError):
+        return 'invalid_json'
+    if isinstance(exc, ValueError) and str(exc).replace('_', '').isalnum() and len(str(exc)) < 80:
+        return str(exc)
+    return 'request_failed' if isinstance(exc, RuntimeError) else 'invalid_payload'
+
+
 def _hash(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
 
@@ -121,22 +137,85 @@ def normalize(feed, timeframe, asof):
         row["continuity_verified"] = "missing_bars" not in issues
     return {"rows": rows, "source": feed.get("source"), "timeframe": timeframe, "asof": t.isoformat(),
             "observed_at": feed.get("observed_at"), "quality": {"eligible": not issues, "reason": ",".join(sorted(issues)) or None},
-            "adjustment": feed.get("adjustment"), "adjustment_evidence": copy.deepcopy(evidence), "bar_time": feed.get("bar_time")}
+            "adjustment": feed.get("adjustment"), "adjustment_evidence": copy.deepcopy(evidence), "bar_time": feed.get("bar_time"),
+            "source_attempts": copy.deepcopy(feed.get('source_attempts', [])),
+            "adjustment_details": copy.deepcopy(feed.get('adjustment_details', {}))}
 
 
 def _daily_pair(code):
-    """Same-source explicit qfq and bfq payloads; never relabel fallback day bars."""
-    pair = {}
+    """Tencent explicit qfq/bfq requests, including a cross-verified identity basis."""
+    pair = {'source': 'Tencent', 'response_fields': {}, 'response_hashes': {}}
     for mode, field in (("qfq", "qfqday"), ("bfq", "day")):
         url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={code},day,,,320,{mode}"
         payload = json.loads(market.http_get(url, timeout=12, retries=1))
         node = (payload.get("data") or {}).get(code) or {}
         values = node.get(field)
+        if mode == 'qfq' and not values and node.get('day'):
+            field, values = 'day', node['day']
         if not isinstance(values, list) or not values:
             raise ValueError("explicit_daily_basis_missing")
+        pair['response_fields'][mode] = field
+        pair['response_hashes'][mode] = _hash(values)
         pair[mode] = [{"date": x[0], "open": float(x[1]), "close": float(x[2]), "high": float(x[3]),
                        "low": float(x[4]), "vol": float(x[5]) * 100} for x in values if len(x) >= 6]
     pair["observed_at"] = now().isoformat()
+    if pair['response_fields']['qfq'] == 'day':
+        _verify_identity_pair(pair)
+        pair['basis'] = 'qfq_request_day_crosschecked_identity'
+    else:
+        pair['basis'] = 'explicit_qfq'
+    return pair
+
+
+def _verify_identity_pair(pair):
+    """A day fallback is accepted only when both completed OHLCV histories agree.
+
+    This establishes the returned window's observed identical basis; it does not
+    claim a corporate-action audit or label arbitrary raw prices as qfqday.
+    """
+    observed = stamp(pair['observed_at'])
+    def completed(rows):
+        out = {}
+        for row in rows:
+            end = stamp(row['date'])
+            if not end:
+                raise ValueError('identity_basis_invalid_date')
+            if end.replace(hour=15, minute=0, second=0, microsecond=0) > observed:
+                continue
+            day = end.date().isoformat()
+            if day in out:
+                raise ValueError('identity_basis_duplicate_date')
+            out[day] = row
+        return out
+    adjusted, plain = completed(pair['qfq']), completed(pair['bfq'])
+    if not adjusted or adjusted.keys() != plain.keys():
+        raise ValueError('identity_basis_dates_mismatch')
+    for day, row in adjusted.items():
+        raw = plain[day]
+        if any(not finite(row[k]) or not finite(raw[k]) or row[k] <= 0 or raw[k] <= 0
+               or abs(row[k] - raw[k]) > max(.002, row[k] * .00002) for k in PRICE_FIELDS):
+            raise ValueError('identity_basis_ohlc_mismatch')
+        if not finite(row['vol']) or not finite(raw['vol']) or abs(row['vol'] - raw['vol']) > 1e-6:
+            raise ValueError('identity_basis_volume_mismatch')
+
+
+def _eastmoney_pair(code):
+    """Independently labelled same-provider fqt=1/fqt=0 fallback, full OHLC checked."""
+    secid = ('1.' if code.startswith('sh') else '0.') + code[2:]
+    pair = {'source': 'Eastmoney', 'basis': 'explicit_qfq', 'response_fields': {}, 'response_hashes': {}}
+    for mode, fqt in (('qfq', 1), ('bfq', 0)):
+        url = (f'https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}'
+               f'&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56&klt=101&fqt={fqt}&lmt=320&end=20500101')
+        payload = json.loads(market.http_get(url, 'https://quote.eastmoney.com/', timeout=8, retries=1))
+        node = payload.get('data') or {}
+        if str(node.get('code')) != code[2:] or not isinstance(node.get('klines'), list) or not node['klines']:
+            raise ValueError('explicit_daily_basis_missing')
+        values = [x.split(',') for x in node['klines']]
+        pair[mode] = [{'date': x[0], 'open': float(x[1]), 'close': float(x[2]), 'high': float(x[3]),
+                       'low': float(x[4]), 'vol': float(x[5]) * 100} for x in values if len(x) >= 6]
+        pair['response_fields'][mode] = 'klines_fqt_' + str(fqt)
+        pair['response_hashes'][mode] = _hash(node['klines'])
+    pair['observed_at'] = now().isoformat()
     return pair
 
 
@@ -168,6 +247,8 @@ def _affine_evidence(pair):
     if not transforms:
         raise ValueError("no_verified_adjustment_days")
     return {"verified": True, "method": "same_source_qfq_bfq_ohlc_affine",
+            "source": pair.get('source'), "basis": pair.get('basis', 'explicit_qfq'),
+            "response_fields": pair.get('response_fields', {}), "response_hashes": pair.get('response_hashes', {}),
             "observed_at": pair["observed_at"], "input_hash": _hash(pair), "days": transforms}
 
 
@@ -177,8 +258,22 @@ def adjustment_factors(code, t=None):
     with _lock:
         cached = _adjustments.get(key)
     if cached is None:
-        pair = _daily_pair(code)
-        cached = {"pair": pair, "evidence": _affine_evidence(pair)}
+        attempts = []
+        for source, loader in (('tencent', _daily_pair), ('eastmoney', _eastmoney_pair)):
+            try:
+                pair = loader(code)
+                evidence = _affine_evidence(pair)
+                observed = stamp(pair['observed_at'])
+                required = {r['date'][:10] for r in pair['qfq'] if stamp(r['date']).replace(hour=15, minute=0, second=0) <= observed}
+                if not required or not required <= evidence['days'].keys():
+                    raise ValueError('completed_ohlc_dates_unverified')
+                attempts.append({'source': source, 'reason': 'verified'})
+                cached = {"pair": pair, "evidence": evidence, 'attempts': attempts}
+                break
+            except (RuntimeError, ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
+                attempts.append({'source': source, 'reason': _source_reason(exc)})
+        if cached is None:
+            raise AdjustmentError(attempts)
         with _lock:
             for old in list(_adjustments):
                 if old[0] == code:
@@ -208,14 +303,17 @@ def fetch(code, timeframe, asof=None):
         raw = {**market.kline_period(code, period, 320), "adjustment": "unknown", "adjustment_verified": False,
                "bar_time": "end", "observed_at": now().isoformat()}
     else:
-        bundle = None
+        bundle, adjustment_failure, attempts = None, None, []
         try:
             bundle = adjustment_factors(code)
-        except (RuntimeError, ValueError, KeyError, TypeError):
-            pass
+        except AdjustmentError as exc:
+            adjustment_failure, attempts = str(exc), exc.attempts
+        except (RuntimeError, ValueError, KeyError, TypeError) as exc:
+            adjustment_failure = 'adjustment_' + _source_reason(exc)
         if not minutes:
             if bundle:
-                raw = {"rows": bundle["pair"]["qfq"], "source": "Tencent qfqday explicit payload"}
+                pair = bundle['pair']
+                raw = {"rows": pair["qfq"], "source": (pair.get('source') or 'verified provider') + ' ' + pair.get('basis', 'explicit_qfq')}
             else:
                 rows, source = market._try_sources("forecast day " + code, [("Sina raw daily", lambda: market._kline_sina(code, 320, 240))])
                 raw = {"rows": rows, "source": source}
@@ -225,6 +323,9 @@ def fetch(code, timeframe, asof=None):
                 ("Sina raw minute", lambda: market._kline_sina(code, 320, minutes))])
             raw = {"rows": rows, "source": source}
         raw.update(bar_time="end", adjustment="unknown", adjustment_verified=False)
+        raw['source_attempts'] = bundle.get('attempts', []) if bundle else attempts
+        if adjustment_failure:
+            raw['input_issue'] = adjustment_failure
         cutoff = now()
         raw['rows'] = [r for r in raw['rows'] if stamp(r.get('date')) and
                        (stamp(r['date']) if minutes else stamp(r['date']).replace(hour=15, minute=0, second=0)) <= cutoff]
@@ -232,11 +333,14 @@ def fetch(code, timeframe, asof=None):
             ev = bundle["evidence"]
             dates = {str(r.get("date", ""))[:10] for r in raw["rows"] if stamp(r.get("date")) and stamp(r["date"]).date() <= t.date()}
             all_verified = bool(dates) and dates <= ev["days"].keys()
+            if not all_verified:
+                raw['adjustment_details'] = {'reason': 'adjustment_date_coverage_missing', 'dates': sorted(dates - ev['days'].keys())}
             if minutes and all_verified:
                 converted = []
                 for row in raw["rows"]:
                     f = ev["days"].get(row["date"][:10])
                     if not f or row["low"] < f["raw_low"] - .02 or row["high"] > f["raw_high"] + .02:
+                        raw['adjustment_details'] = {'reason': 'minute_raw_daily_range_mismatch', 'date': row['date'][:10]}
                         all_verified = False; break
                     converted.append({**row, **{k: row[k] * f["a"] + f["b"] for k in PRICE_FIELDS}})
                 if all_verified:
@@ -246,7 +350,7 @@ def fetch(code, timeframe, asof=None):
                            adjustment_evidence={k: v for k, v in ev.items() if k != "days"})
                 raw["adjustment_evidence"]["verified_dates"] = sorted(dates)
             else:
-                raw["input_issue"] = "price_basis_cross_check_failed"
+                raw["input_issue"] = "price_basis_cross_check_failed:" + raw.get('adjustment_details', {}).get('reason', 'unknown')
         raw["observed_at"] = now().isoformat()
     with _lock:
         for old in list(_cache):
