@@ -103,7 +103,7 @@ class WorkerTest(unittest.TestCase):
         finally:
             source.close()
         encrypted=vault.seal(json.dumps(body).encode(),'test-password')
-        with patch.object(cloud,'_gh_raw',return_value=encrypted):
+        with patch.object(cloud,'read_remote_state',return_value=encrypted):
             worker.load_models('test-password')
         self.assertEqual(db.q1('SELECT COUNT(*) AS n FROM accounts')['n'],before)
         self.assertIsNone(db.q1("SELECT id FROM accounts WHERE id='synthetic-private'"))

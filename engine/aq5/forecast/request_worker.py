@@ -36,7 +36,7 @@ def load_models(password):
     from .. import cloud, db, vault
     from . import models
     models.init()
-    blob = cloud._gh_raw('state.bin')
+    blob = cloud.read_remote_state()
     if not blob:
         return
     state = json.loads(vault.unseal(blob, password))

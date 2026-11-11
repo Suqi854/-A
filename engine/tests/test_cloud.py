@@ -13,7 +13,7 @@ cloud.time.time = lambda: clock["t"]
 cloud.now = lambda: datetime(2026, 10, 28, 10, 0, tzinfo=CN_TZ).replace(minute=int(clock["t"] // 60) % 60)
 market.is_trading_day = lambda: True
 cloud.remote_meta = lambda: {"owner": "pc", "updated": "2026-10-28 09:58:00"}
-cloud._gh_raw = lambda p: b"x"
+cloud.read_remote_state = lambda ref=None: b"x"
 cloud.unpack = lambda blob, take_settings: {"tables": 7}
 log = []
 cloud.upload = lambda active, final=False: log.append(("upload", active, final)) or {"ok": True}

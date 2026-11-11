@@ -96,7 +96,7 @@ class HandoffTests(unittest.TestCase):
             return (1, "") if args[0] == "commit" else (0, "")
 
         with patch.object(cloud, "_cfg", return_value=self.config), patch.object(cloud, "_key", return_value="fake"), \
-                patch.object(cloud, "pack", return_value=b"synthetic-only"), patch.object(cloud, "_git", side_effect=git) as mocked:
+                patch.object(cloud, "pack", return_value=b"AQ5v1" + b"x" * 80), patch.object(cloud, "_git", side_effect=git) as mocked:
             result = cloud.upload(active=True)
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "状态提交失败")
@@ -169,7 +169,7 @@ class HandoffTests(unittest.TestCase):
             stack.enter_context(patch.object(cloud, "remote_meta", side_effect=metadata))
             stack.enter_context(patch.object(backup, "db_snapshot", return_value=None))
             stack.enter_context(patch.object(cloud, "save_settings"))
-            download = stack.enter_context(patch.object(cloud, "_gh_raw", return_value=b"synthetic"))
+            download = stack.enter_context(patch.object(cloud, "read_remote_state", return_value=b"synthetic"))
             unpack = stack.enter_context(patch.object(cloud, "unpack", return_value={"tables": 7}))
             upload = stack.enter_context(patch.object(cloud, "upload", return_value=upload_result or {"ok": True}))
             result = cloud.reconcile(max_wait=max_wait)
@@ -178,7 +178,7 @@ class HandoffTests(unittest.TestCase):
     def meta(self, active, *, stale=False):
         t = self.timestamp - timedelta(hours=3) if stale else self.timestamp
         stamp = t.strftime("%Y-%m-%d %H:%M:%S")
-        return {"owner": "cloud", "active": active, "heartbeat": stamp, "updated": stamp}
+        return {"owner": "cloud", "active": active, "heartbeat": stamp, "updated": stamp, "_state_commit": "a" * 40}
 
     def test_unfinished_cloud_owner_is_not_overwritten_after_timeout_or_stale_heartbeat(self):
         for metadata in [self.meta(True), self.meta(True, stale=True)]:
@@ -198,7 +198,7 @@ class HandoffTests(unittest.TestCase):
     def test_final_metadata_changing_during_download_blocks_import(self):
         result, download, unpack, upload = self.reconcile([self.meta(False), self.meta(True)])
         self.assertTrue(result["waiting"])
-        download.assert_called_once_with("state.bin")
+        download.assert_called_once_with(ref="a" * 40)
         unpack.assert_not_called()
         upload.assert_not_called()
 
@@ -214,7 +214,7 @@ class HandoffTests(unittest.TestCase):
 
     def test_cloud_replacement_cannot_import_predecessors_unfinished_ledger(self):
         with patch.object(cloud, "remote_meta", return_value=self.meta(True, stale=True)), \
-                patch.object(cloud, "_gh_raw") as download, self.assertRaisesRegex(RuntimeError, "未完成交接"):
+                patch.object(cloud, "read_remote_state") as download, self.assertRaisesRegex(RuntimeError, "未完成交接"):
             cloud._take_over(None, None, None)
         download.assert_not_called()
 

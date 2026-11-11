@@ -35,11 +35,14 @@ jobs:
           python -B engine/tests/test_execution_guards.py
           python -B engine/tests/test_handoff.py
           python -B engine/tests/test_release_integration.py
+          python -B engine/tests/test_cloud.py
+          python -B engine/tests/test_cloud_chunks.py
           node --check engine/web/js/forecast.js
           node engine/tests/test_forecast_ui.js
           node engine/tests/test_static.js
           node engine/tests/test_forecast_queue.mjs
           node engine/tests/test_forecast_routing.mjs
+          node engine/tests/test_cloud_kick.mjs
           node engine/tests/test_live_relay.mjs
       - name: 单股票公开行情实际读取（缺口保留）
         working-directory: engine

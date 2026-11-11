@@ -2,7 +2,8 @@
 
 状态交接（都在 GitHub 仓库的 state 分支，只有一次提交，强制覆盖）：
   cloud.json  明文元数据：谁在跑（pc / cloud）、是否在运行、心跳时间、状态版本时间
-  state.bin   加密的核心数据库（选股、模拟盘、学习样本、迭代权重、信号、AI 笔记…，不含行情缓存和账号会话）
+  state.manifest.json / state-part-*.bin：同一加密状态的有校验分片（兼容读取旧 state.bin）
+              核心数据库（选股、模拟盘、学习样本、迭代权重、信号、AI 笔记…，不含行情缓存和账号会话）
               + settings.json；用「手机查看密码」加密（云端用 GitHub Secret AQ5_KEY 解密）
 
 规则：
@@ -15,15 +16,18 @@ from __future__ import annotations
 
 import base64
 import gzip
+import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -32,6 +36,8 @@ from .config import DATA, DB_PATH, SETTINGS_PATH, load_settings, now, save_setti
 
 CLOUD = os.environ.get("AQ5_CLOUD") == "1"
 BRANCH = "state"
+STATE_MANIFEST = "state.manifest.json"
+STATE_CHUNK_BYTES = 16 * 1024 * 1024
 EXCLUDE = {"intraday_samples", "klines", "kline_meta", "fundflow", "news", "auth_user", "auth_session", "sqlite_sequence"}
 STATE = {"role": "cloud" if CLOUD else "pc", "last_up": None, "last_pull": None, "error": None, "waiting": False,
          "remote": None}
@@ -79,7 +85,7 @@ def pc_alive() -> bool:
 
 
 # ----------------------------------------------------------------------------- 读远端 state 分支
-def _gh_raw(path: str) -> bytes | None:
+def _gh_raw(path: str, ref: str | None = None) -> bytes | None:
     repo = _cfg()["repo"]
     if not repo:
         return None
@@ -88,16 +94,87 @@ def _gh_raw(path: str) -> bytes | None:
     if tok:
         hdr["Authorization"] = "Bearer " + tok
     try:
-        return _http(f"https://api.github.com/repos/{repo}/contents/{path}?ref={BRANCH}&t={int(time.time())}", hdr, timeout=60)
+        ref = urllib.parse.quote(ref or BRANCH, safe="")
+        return _http(f"https://api.github.com/repos/{repo}/contents/{path}?ref={ref}&t={int(time.time())}", hdr, timeout=60)
     except urllib.error.HTTPError as e:
         if e.code == 404:
             return None
         raise
 
 
+def _state_ref() -> str | None:
+    """Resolve the mutable branch once; every file is then read at this commit."""
+    repo = _cfg()["repo"]
+    if not repo:
+        return None
+    headers = {"Accept": "application/vnd.github+json"}
+    if os.environ.get("GITHUB_TOKEN"):
+        headers["Authorization"] = "Bearer " + os.environ["GITHUB_TOKEN"]
+    try:
+        result = json.loads(_http(f"https://api.github.com/repos/{repo}/git/ref/heads/{BRANCH}?t={int(time.time())}", headers, timeout=60))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+    commit = (result.get("object") or {}).get("sha")
+    if not isinstance(commit, str) or not re.fullmatch(r"[a-f0-9]{40}", commit):
+        raise ValueError("state_commit_invalid")
+    return commit
+
+
 def remote_meta() -> dict | None:
-    b = _gh_raw("cloud.json")
-    return json.loads(b) if b else None
+    commit = _state_ref()
+    if not commit:
+        return None
+    b = _gh_raw("cloud.json", ref=commit)
+    if not b:
+        return None
+    meta = json.loads(b)
+    if not isinstance(meta, dict):
+        raise ValueError("state_metadata_invalid")
+    return {**meta, "_state_commit": commit}
+
+
+def read_remote_state(ref: str | None = None) -> bytes | None:
+    """Reassemble immutable encrypted bytes; authenticate only after all checks.
+
+    Legacy state.bin is also pinned to the same resolved commit. No live branch
+    fallback is permitted when a manifest exists but is incomplete or invalid.
+    """
+    commit = ref or _state_ref()
+    if not commit:
+        return None
+    if not re.fullmatch(r"[a-f0-9]{40}", commit):
+        raise ValueError("state_commit_invalid")
+    raw = _gh_raw(STATE_MANIFEST, ref=commit)
+    if raw is None:
+        return _gh_raw("state.bin", ref=commit)
+    if len(raw) > 1024 * 1024:
+        raise ValueError("state_manifest_too_large")
+    manifest = json.loads(raw)
+    chunks = manifest.get("chunks") if isinstance(manifest, dict) else None
+    sha = manifest.get("sha256") if isinstance(manifest, dict) else None
+    total = manifest.get("size") if isinstance(manifest, dict) else None
+    if (not isinstance(manifest, dict) or manifest.get("version") != 1 or manifest.get("format") != "AQ5v1-chunks" or
+            not isinstance(chunks, list) or not 1 <= len(chunks) <= 4096 or
+            type(total) is not int or total < 70 or not isinstance(sha, str) or not re.fullmatch(r"[a-f0-9]{64}", sha)):
+        raise ValueError("state_manifest_invalid")
+    for index, chunk in enumerate(chunks):
+        if (not isinstance(chunk, dict) or chunk.get("path") != f"state-part-{index:05d}.bin" or
+                type(chunk.get("size")) is not int or not 1 <= chunk["size"] <= STATE_CHUNK_BYTES or
+                not isinstance(chunk.get("sha256"), str) or not re.fullmatch(r"[a-f0-9]{64}", chunk["sha256"])):
+            raise ValueError("state_chunk_descriptor_invalid")
+    if sum(chunk["size"] for chunk in chunks) != total:
+        raise ValueError("state_manifest_size_mismatch")
+    result = bytearray()
+    for chunk in chunks:
+        value = _gh_raw(chunk["path"], ref=commit)
+        if value is None or len(value) != chunk["size"] or hashlib.sha256(value).hexdigest() != chunk["sha256"]:
+            raise ValueError("state_chunk_integrity_failed")
+        result.extend(value)
+    if hashlib.sha256(result).hexdigest() != sha or result[:5] != b"AQ5v1":
+        raise ValueError("state_package_integrity_failed")
+    return bytes(result)
 
 
 def _age(ts: str | None) -> float:
@@ -181,10 +258,66 @@ def _git(args, cwd, timeout=120):
     return g(args, cwd, timeout)
 
 
+def _state_owned(name: str) -> bool:
+    return name in ("state.bin", STATE_MANIFEST, "cloud.json") or bool(re.fullmatch(r"state-part-\d{5}\.bin", name))
+
+
+def _state_path(root: Path, name: str) -> Path:
+    """Only app-owned direct children; refuse links escaping the staging root."""
+    expected = DATA.resolve() / "state_repo"
+    if root.resolve() != expected or root.is_symlink() or not _state_owned(name):
+        raise ValueError("state_staging_path_invalid")
+    result = root / name
+    if result.resolve().parent != expected or result.is_symlink():
+        raise ValueError("state_staging_path_invalid")
+    return result
+
+
+def _write_state_chunks(root: Path, blob: bytes) -> list[str]:
+    if not isinstance(blob, bytes) or len(blob) < 70 or not blob.startswith(b"AQ5v1"):
+        raise ValueError("state_package_invalid")
+    if len(blob) > STATE_CHUNK_BYTES * 4096:
+        raise ValueError("state_package_too_large")
+    previous = {path.name for path in root.iterdir() if _state_owned(path.name)}
+    chunks = []
+    for index, start in enumerate(range(0, len(blob), STATE_CHUNK_BYTES)):
+        part = blob[start:start + STATE_CHUNK_BYTES]
+        name = f"state-part-{index:05d}.bin"
+        _state_path(root, name).write_bytes(part)
+        chunks.append({"path": name, "size": len(part), "sha256": hashlib.sha256(part).hexdigest()})
+    manifest = {"version": 1, "format": "AQ5v1-chunks", "size": len(blob),
+                "sha256": hashlib.sha256(blob).hexdigest(), "chunks": chunks}
+    _state_path(root, STATE_MANIFEST).write_text(json.dumps(manifest, separators=(",", ":")), "utf-8")
+    current = {STATE_MANIFEST, "cloud.json", *(part["path"] for part in chunks)}
+    # Only obsolete encrypted transport files are removed from local staging.
+    # The encrypted database contents (all included historical rows) are intact.
+    for name in previous - current:
+        path = _state_path(root, name)
+        if not path.is_file():
+            raise ValueError("state_staging_file_invalid")
+        path.unlink()
+    return sorted(current | previous)
+
+
+def _safe_git_error(detail) -> str:
+    text = str(detail or "")
+    for name in ("GITHUB_TOKEN", "GH_TOKEN", "AQ5_KEY", "AQ5_AI_KEY"):
+        secret = os.environ.get(name)
+        if secret:
+            text = text.replace(secret, "[redacted]")
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
+    text = re.sub(r"(?i)https?://[^\s<>\"']+", "[url]", text)
+    text = re.sub(r"(?i)(?:github_pat_|gh[pousr]_)[a-z0-9_]+", "[redacted]", text)
+    text = re.sub(r"(?i)(authorization|password|token)\s*[:=]\s*[^\r\n]+", r"\1=[redacted]", text)
+    text = re.sub(r"[A-Za-z]:[\\/][^\r\n]*?(?=:\s|$)", "[path]", text, flags=re.MULTILINE)
+    return " ".join(text.split())[:700]
+
+
 def upload(active: bool, final: bool = False) -> dict:
-    def failed(reason):
+    def failed(reason, detail=""):
         STATE["error"] = reason
-        return {"ok": False, "error": reason}
+        STATE["error_detail"] = _safe_git_error(detail) or None
+        return {"ok": False, "error": reason, **({"detail": STATE["error_detail"]} if STATE["error_detail"] else {})}
 
     if final and (active or not db.writes_frozen()):
         return failed("最终状态只能从已冻结的账本上传")
@@ -194,31 +327,51 @@ def upload(active: bool, final: bool = False) -> dict:
     with _lock:
         root = DATA / "state_repo"
         root.mkdir(exist_ok=True)
+        _state_path(root, "cloud.json")
         if not (root / ".git").exists():
             setup = (["init", "-q"], ["checkout", "-q", "-b", BRANCH], ["config", "user.name", "aq5-state"],
                      ["config", "user.email", "aq5-state@users.noreply.github.com"])
-            if any(_git(step, root)[0] for step in setup):
-                return failed("状态仓库初始化失败")
+            for step in setup:
+                code, output = _git(step, root)
+                if code:
+                    return failed("状态仓库初始化失败", output)
         rc, remotes = _git(["remote"], root)
+        if rc:
+            return failed("状态仓库远端读取失败", remotes)
         verb = "set-url" if "origin" in remotes.split() else "add"
-        if rc or _git(["remote", verb, "origin", cfg["remote"]], root)[0]:
-            return failed("状态仓库远端设置失败")
+        code, output = _git(["remote", verb, "origin", cfg["remote"]], root)
+        if code:
+            return failed("状态仓库远端设置失败", output)
         ts = now().strftime("%Y-%m-%d %H:%M:%S")
-        (root / "state.bin").write_bytes(pack())
+        try:
+            paths = _write_state_chunks(root, pack())
+        except Exception as exc:  # noqa: BLE001
+            return failed(f"状态打包或分片失败（{type(exc).__name__}）")
         meta = {"owner": STATE["role"], "active": bool(active), "heartbeat": ts, "updated": ts,
-                "note": "A量化云端交接状态（state.bin 已加密）。请勿手工修改。"}
-        (root / "cloud.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), "utf-8")
-        if _git(["add", "-A"], root)[0]:
-            return failed("状态文件暂存失败")
+                "state_format": "AQ5v1-chunks", "state_manifest": STATE_MANIFEST,
+                "note": "A量化云端交接状态（完整加密状态按块保存）。请勿手工修改。"}
+        _state_path(root, "cloud.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), "utf-8")
+        rc, tracked = _git(["ls-files"], root)
+        if rc:
+            return failed("状态暂存文件读取失败", tracked)
+        if any(not _state_owned(name) for name in tracked.splitlines()):
+            return failed("状态仓库包含未识别文件，未提交或推送")
+        tracked_paths = set(tracked.splitlines())
+        paths = sorted({name for name in paths if _state_path(root, name).exists()} | tracked_paths)
+        code, output = _git(["add", "-A", "--", *paths], root)
+        if code:
+            return failed("状态文件暂存失败", output)
         has_head = _git(["rev-parse", "--verify", "HEAD"], root)[0] == 0
         commit = ["commit", "-q", "--amend"] if has_head else ["commit", "-q"]
-        if _git(commit + ["-m", f"state {ts}"], root)[0]:
-            return failed("状态提交失败")
-        code, _ = _git(["push", "-q", "--force", "origin", f"HEAD:{BRANCH}"], root, timeout=180)
+        code, output = _git(commit + ["-m", f"state {ts}"], root)
         if code:
-            return failed("状态推送未确认")
+            return failed("状态提交失败", output)
+        code, output = _git(["push", "-q", "--force", "origin", f"HEAD:{BRANCH}"], root, timeout=300)
+        if code:
+            return failed("状态推送未确认", output)
         STATE["last_up"] = ts
         STATE["error"] = None
+        STATE["error_detail"] = None
         if not CLOUD:
             save_settings({"cloud": {"last_sync": ts}})
         return {"ok": True, "time": ts}
@@ -257,7 +410,7 @@ def reconcile(max_wait: int = 330) -> dict:
             return _reconcile_error("云端最终状态尚未确认，需等待交接成功或人工核验后恢复。", waiting=True)
         res = {"pulled": False}
         if confirmed_final and (meta.get("updated") or "") > (cfg["last_sync"] or ""):
-            blob = _gh_raw("state.bin")
+            blob = read_remote_state(ref=meta.get("_state_commit"))
             confirmed_meta = remote_meta()
             STATE["remote"] = confirmed_meta
             if not blob or confirmed_meta != meta:
@@ -412,7 +565,7 @@ def run_cloud(max_minutes: int = 340) -> int:
             return 1
         if not res.get("ok"):
             STATE["error"] = "云端最终状态推送未确认"
-            print("云端最终状态推送未确认，交接失败。", flush=True)
+            print("云端最终状态推送未确认，交接失败。", res, flush=True)
             return 1
         print("云端最终状态已上传，交接完成。", reason, flush=True)
     else:
@@ -427,7 +580,7 @@ def _take_over(sim, hf, scheduler) -> None:
     meta = remote_meta()
     if not meta or _unfinished(meta):
         raise RuntimeError("上次云端状态未完成交接")
-    blob = _gh_raw("state.bin")
+    blob = read_remote_state(ref=meta.get("_state_commit"))
     if not blob or remote_meta() != meta:
         raise RuntimeError("远端状态缺失或已变化")
     r = unpack(blob, take_settings=True)
@@ -454,9 +607,9 @@ def diag() -> int:
     print("state 分支：", meta, flush=True)
     if os.environ.get("AQ5_KEY"):
         try:
-            blob = _gh_raw("state.bin")
+            blob = read_remote_state(ref=meta.get("_state_commit") if meta else None)
             d = json.loads(vault.unseal(blob, os.environ["AQ5_KEY"])) if blob else None
-            print("AQ5_KEY：", "正确，能解开电脑上传的状态" if d else "state.bin 还不存在", flush=True)
+            print("AQ5_KEY：", "正确，能解开电脑上传的状态" if d else "加密状态还不存在", flush=True)
         except Exception as e:  # noqa: BLE001
             print("AQ5_KEY：错误 ——", e, "（请确认填的是电脑上设置的「手机查看密码」）", flush=True)
     else:
@@ -464,7 +617,7 @@ def diag() -> int:
     print("AQ5_AI_KEY：", "已设置" if os.environ.get("AQ5_AI_KEY") else "未设置", flush=True)
     if os.environ.get("AQ5_AI_KEY") and meta:
         try:
-            st = json.loads(vault.unseal(_gh_raw("state.bin"), os.environ["AQ5_KEY"]))["settings"]
+            st = json.loads(vault.unseal(read_remote_state(ref=meta.get("_state_commit")), os.environ["AQ5_KEY"]))["settings"]
             from . import config
             config.SETTINGS_PATH.write_text(json.dumps(st, ensure_ascii=False), "utf-8")
             vault.set_many({"ai_key": os.environ["AQ5_AI_KEY"]})

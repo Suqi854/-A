@@ -56,8 +56,9 @@ async function kickCloud(env, force = false) {
       const runs = (await r.json()).workflow_runs || [];
       const live = runs.find(x => x.status !== "completed");
       const today = bj.toISOString().slice(0, 10);
-      // 今天已经有一次 8:30 以后启动、几分钟就结束的运行：多半是休市或没有状态，1 小时内不再重复启动
-      const quick = runs.find(x => x.status === "completed" && x.created_at.slice(0, 10) === new Date(Date.now()).toISOString().slice(0, 10)
+      // Only a successful short exit may indicate a closed day or absent state.
+      // Failed handoffs must remain eligible for the normal five-minute retry.
+      const quick = runs.find(x => x.status === "completed" && x.conclusion === "success" && x.created_at.slice(0, 10) === new Date(Date.now()).toISOString().slice(0, 10)
         && (new Date(x.updated_at) - new Date(x.run_started_at)) < 180e3 && Date.now() - new Date(x.updated_at) < 3600e3
         && new Date(new Date(x.run_started_at).getTime() + 8 * 3600e3).getUTCHours() * 100 + new Date(new Date(x.run_started_at).getTime() + 8 * 3600e3).getUTCMinutes() >= 830);
       if (live) out = { ok: true, msg: `云端值守在运行（#${live.run_number} ${live.status}）` };
