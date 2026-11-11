@@ -123,6 +123,42 @@ class DataContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'explicit_daily_basis_missing'):
                 data._daily_pair('sh600000')
 
+    def test_tencent_trims_only_excess_oldest_requested_window_and_preserves_hashes(self):
+        import json
+        dates = [(self.t - timedelta(days=i+1)).date().isoformat() for i in range(321)]
+        values = [[day, '10', '10.1', '10.2', '9.9', '100'] for day in dates]
+        for field in ('qfqday', 'day'):
+            for raw_count in (320, 321):
+                with self.subTest(field=field, raw_count=raw_count):
+                    raw = list(reversed(values[:raw_count]))
+                    payloads = [{'data': {'sh600000': {field: values}}}, {'data': {'sh600000': {'day': raw}}}]
+                    with patch.object(data, 'now', return_value=self.t), patch.object(market, 'http_get', side_effect=[json.dumps(p).encode() for p in payloads]):
+                        pair = data._daily_pair('sh600000')
+                    self.assertEqual([r['date'] for r in pair['qfq']], sorted(dates[:320]))
+                    self.assertEqual(pair['qfq'], pair['bfq'])
+                    expected = {'requested': 320, 'returned_counts': {'qfq': 321, 'bfq': raw_count},
+                                'excluded_leading_dates': {'qfq': [dates[-1]], 'bfq': [dates[-1]] if raw_count == 321 else []}}
+                    self.assertEqual(pair['window'], expected)
+                    self.assertEqual(pair['response_hashes'], {'qfq': data._hash(values), 'bfq': data._hash(raw)})
+                    evidence = data._affine_evidence(pair)
+                    self.assertEqual(len(evidence['days']), 320)
+                    self.assertEqual(evidence['window'], expected)
+                    self.assertEqual(evidence['response_hashes'], pair['response_hashes'])
+
+    def test_requested_window_does_not_hide_internal_or_latest_missing_dates(self):
+        import json
+        values = [[(self.t-timedelta(days=i+1)).date().isoformat(), '10', '10.1', '10.2', '9.9', '100'] for i in range(321)]
+        for missing_side in ('qfq', 'bfq'):
+            for missing_index in (0, 100):
+                with self.subTest(side=missing_side, missing_index=missing_index):
+                    data._adjustments.clear()
+                    rows = {mode: [r for i, r in enumerate(values) if mode != missing_side or i != missing_index] for mode in ('qfq', 'bfq')}
+                    payloads = [{'data': {'sh600000': {'qfqday': rows['qfq']}}}, {'data': {'sh600000': {'day': rows['bfq']}}}]
+                    with patch.object(data, 'now', return_value=self.t), patch.object(market, 'http_get', side_effect=[json.dumps(p).encode() for p in payloads]), \
+                         patch.object(data, '_eastmoney_pair', side_effect=ValueError('test_fallback_unavailable')):
+                        with self.assertRaisesRegex(data.AdjustmentError, 'completed_ohlc_dates_unverified'):
+                            data.adjustment_factors('sh600000')
+
     def test_blocked_tencent_uses_verified_eastmoney_pair_without_relaxing_gate(self):
         pair = {'qfq': self.daily, 'bfq': self.daily, 'observed_at': self.t.isoformat(),
                 'source': 'Eastmoney', 'basis': 'explicit_qfq'}

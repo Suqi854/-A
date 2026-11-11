@@ -144,9 +144,11 @@ def normalize(feed, timeframe, asof):
 
 def _daily_pair(code):
     """Tencent explicit qfq/bfq requests, including a cross-verified identity basis."""
-    pair = {'source': 'Tencent', 'response_fields': {}, 'response_hashes': {}}
+    requested = 320
+    pair = {'source': 'Tencent', 'response_fields': {}, 'response_hashes': {},
+            'window': {'requested': requested, 'returned_counts': {}, 'excluded_leading_dates': {}}}
     for mode, field in (("qfq", "qfqday"), ("bfq", "day")):
-        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={code},day,,,320,{mode}"
+        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={code},day,,,{requested},{mode}"
         payload = json.loads(market.http_get(url, timeout=12, retries=1))
         node = (payload.get("data") or {}).get(code) or {}
         values = node.get(field)
@@ -158,6 +160,11 @@ def _daily_pair(code):
         pair['response_hashes'][mode] = _hash(values)
         pair[mode] = [{"date": x[0], "open": float(x[1]), "close": float(x[2]), "high": float(x[3]),
                        "low": float(x[4]), "vol": float(x[5]) * 100} for x in values if len(x) >= 6]
+        # Trim only excess leading bars, never align histories by intersection.
+        pair[mode].sort(key=lambda row: row['date'])
+        pair['window']['returned_counts'][mode] = len(values)
+        pair['window']['excluded_leading_dates'][mode] = [r['date'] for r in pair[mode][:-requested]]
+        pair[mode] = pair[mode][-requested:]
     pair["observed_at"] = now().isoformat()
     if pair['response_fields']['qfq'] == 'day':
         _verify_identity_pair(pair)
@@ -249,6 +256,7 @@ def _affine_evidence(pair):
     return {"verified": True, "method": "same_source_qfq_bfq_ohlc_affine",
             "source": pair.get('source'), "basis": pair.get('basis', 'explicit_qfq'),
             "response_fields": pair.get('response_fields', {}), "response_hashes": pair.get('response_hashes', {}),
+            "window": copy.deepcopy(pair.get('window', {})),
             "observed_at": pair["observed_at"], "input_hash": _hash(pair), "days": transforms}
 
 
@@ -264,7 +272,8 @@ def adjustment_factors(code, t=None):
                 pair = loader(code)
                 evidence = _affine_evidence(pair)
                 observed = stamp(pair['observed_at'])
-                required = {r['date'][:10] for r in pair['qfq'] if stamp(r['date']).replace(hour=15, minute=0, second=0) <= observed}
+                required = {r['date'][:10] for mode in ('qfq', 'bfq') for r in pair[mode]
+                            if stamp(r['date']).replace(hour=15, minute=0, second=0) <= observed}
                 if not required or not required <= evidence['days'].keys():
                     raise ValueError('completed_ohlc_dates_unverified')
                 attempts.append({'source': source, 'reason': 'verified'})
