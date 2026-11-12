@@ -203,6 +203,15 @@ class LatestScreenTests(unittest.TestCase):
                 _,relay=self.call(cached)
                 relay.assert_called_once_with('start',{})
 
+    def test_user_accepted_missing_stays_unknown_without_auto_retry(self):
+        cached=self.cached(scan_complete=False)
+        cached['summary']['scope'].update(universe_verified=True,universe_count=3195,accounted_count=3195,
+                                         missing_data_policy='retain_unknown_no_automatic_retry')
+        result,relay=self.call(cached)
+        relay.assert_called_once_with('status')
+        self.assertFalse(result['scope']['scan_complete'])
+        self.assertFalse(result['scope']['data_complete'])
+
     def test_queue_view_omits_full_ledger_and_stays_under_limit(self):
         cached=self.cached()
         cached['summary']['coverage_manifest']={f'sh{i:06d}':{'audit':'x'*1000} for i in range(3195)}

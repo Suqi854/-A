@@ -72,7 +72,11 @@ def latest_screen(*,start_if_needed=True):
     if summary:
         try:
             age=(now()-datetime.fromisoformat(summary["generated_at"]).astimezone(CN_TZ)).total_seconds()
-            fresh=0<=age<6*3600 and summary.get("scope",{}).get("scan_complete") is True
+            scope=summary.get("scope",{})
+            accepted_missing=(scope.get("missing_data_policy")=="retain_unknown_no_automatic_retry" and
+                              scope.get("universe_verified") is True and scope.get("universe_count",0)>0 and
+                              scope.get("accounted_count")==scope.get("universe_count"))
+            fresh=0<=age<6*3600 and (scope.get("scan_complete") is True or accepted_missing)
         except (ValueError,TypeError,KeyError):pass
     try:
         status=relay("status") if fresh or not start_if_needed else relay("start",{})
@@ -165,6 +169,7 @@ def make_summary(universe, rows, growth, emotion):
         "scope":{"all_mainboard_requested":True,"universe_verified":universe.get("verified"),"universe_count":total,
                  "sse":universe["coverage"]["sse"],"szse":universe["coverage"]["szse"],"st_in_denominator":universe["coverage"]["st_name_markers"],
                  "accounted_count":len(ledger),"scan_complete":scan_complete,"data_complete":bool(data_complete),
+                 "missing_data_policy":"retain_unknown_no_automatic_retry",
                  "quote_missing_count":len(quote_missing),"lhb_missing_count":len(lhb_missing),
                  "input_row_issues":{"missing":sorted(missing_rows),"duplicates":sorted(duplicates),"extra":sorted(extras)},
                  "selection":"官方全部沪深主板目录；不按成交额、市值或报价是否存在缩小采集范围"},
