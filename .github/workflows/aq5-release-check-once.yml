@@ -8,9 +8,6 @@ jobs:
   chrome:
     runs-on: ubuntu-latest
     timeout-minutes: 13
-    env:
-      AQ5_DATA: ${{ runner.temp }}/aq5-release-check
-      PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -20,6 +17,8 @@ jobs:
       - name: Verify production from Chrome
         working-directory: engine
         env:
+          AQ5_DATA: ${{ runner.temp }}/aq5-release-check
+          PYTHONDONTWRITEBYTECODE: '1'
           AQ5_KEY: ${{ secrets.AQ5_KEY }}
           NODE_PATH: ${{ runner.temp }}/aq5-browser/node_modules
           ENCRYPTED_CASES: QVE1dzHfppsNMQ7HZZJiytyVUbWt/1jpB61nm7mEADJMnYn8+6yWTPX/ywXSDERBCgmTpr8RGsTdRPCWhOfidG1sKwWD5WZ+lhwO7ZOJlJws3MAUO6HU0MQ=
