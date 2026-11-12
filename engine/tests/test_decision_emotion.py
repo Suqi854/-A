@@ -1,4 +1,4 @@
-import os,sys,unittest,json,uuid,hashlib
+import os,sys,unittest,json,uuid,hashlib,time
 from pathlib import Path
 from datetime import datetime,timedelta
 from unittest.mock import patch
@@ -57,6 +57,18 @@ class EvidenceTests(unittest.TestCase):
         anonymous=[{**row,'OPERATEDEPT_CODE':'0','OPERATEDEPT_NAME':'机构专用'},
                    {**row,'OPERATEDEPT_CODE':'0','OPERATEDEPT_NAME':'机构专用','BUY':200}]
         self.assertEqual(len(em.seat_proxy(anonymous+anonymous,'sz002384','2026-11-11')['seats']),2)
+
+    def test_single_sided_disclosure_never_fills_unknown_with_zero(self):
+        row={'SECURITY_CODE':'600001','TRADE_DATE':'2026-11-11','TRADE_ID':'1','CHANGE_TYPE':'a',
+             'OPERATEDEPT_CODE':'1','OPERATEDEPT_NAME':'证券营业部','BUY':100,'SELL':None,'NET':100}
+        result=em.seat_proxy([row],'sh600001','2026-11-11')
+        self.assertEqual(result['seats'][0]['buy'],100)
+        self.assertIsNone(result['seats'][0]['sell']);self.assertIsNone(result['seats'][0]['net'])
+        self.assertIsNone(result['non_institution_net']);self.assertFalse(result['disclosure_complete'])
+        self.assertEqual(result['known_non_institution_buy'],100)
+        merged=em.seat_proxy([row,{**row,'BUY':None,'SELL':30}],'sh600001','2026-11-11')
+        self.assertEqual(merged['non_institution_net'],70)
+        self.assertTrue(merged['disclosure_complete'])
 
     def test_record_expiry_is_source_fixed_and_known_time_not_backdated(self):
         at=datetime(2026,11,11,20,tzinfo=CN_TZ);src=at.replace(hour=15)
@@ -303,5 +315,63 @@ class FullScopeTests(unittest.TestCase):
             result=em._full_lhb_listing(self.at.replace(hour=10),lambda *a:None)
         self.assertEqual(result['window']['end'],'2026-11-10')
         self.assertIn("TRADE_DATE<='2026-11-10'",fetch.call_args.args[0]['filter'])
+
+    def test_provider_deferred_stops_stage_without_spending_stock_attempts(self):
+        run=em._FullRun(self.snapshot,self.at,self.run_id,2,30)
+        calls=[]
+        def blocked():
+            calls.append(1);raise em._SourceDeferred('example.test',time.time()+60,'cooldown')
+        result=run.jobs({'history:'+c:blocked for c in self.codes},stage='daily_histories')
+        self.assertLessEqual(len(calls),2)
+        self.assertTrue(all(v is None for v in result.values()))
+        self.assertTrue(all(run.read('history:'+c) is None for c in self.codes))
+        self.assertIn('example.test',run.deferred_sources)
+        self.assertEqual(run.jobs({'lhb:test':lambda:{'ok':True}},stage='lhb_details')['lhb:test']['status'],'ok')
+
+    def test_history_network_requests_share_two_per_second_limit(self):
+        fake=[0.];sleeps=[]
+        def sleep(delay):sleeps.append(delay);fake[0]+=delay
+        with patch.object(em.time,'monotonic',side_effect=lambda:fake[0]),patch.object(em.time,'sleep',side_effect=sleep),\
+             patch.object(em,'_get',return_value=({'synthetic':True},self.receipt)),patch.object(em,'_guard_provider'):
+            run=em._FullRun(self.snapshot,self.at,self.run_id,3,30,history_rps=99)
+            for code in self.codes[:4]:run.fetch('https://example.test/api/qt/stock/kline/get?code='+code)
+        self.assertEqual(sleeps,[.5,.5,.5])
+
+    def test_verified_independent_fallback_rejects_basis_or_code_mismatch(self):
+        def fetch(url,**kwargs):
+            if 'gtimg.cn' in url:raise em._SourceDeferred('web.ifzq.gtimg.cn',time.time()+60,'limited')
+            q=parse_qs(urlsplit(url).query);adjusted=q['fqt']==['1'];items=[]
+            for r in self.bars:
+                price=r['close'];values=[price-.1,price,price+.2,price-.2]
+                if adjusted:values=[v*.8+1 for v in values]
+                items.append(','.join([r['date'],*map(str,values),'100']))
+            raw={'rc':0,'data':{'code':'600001','klines':items}}
+            return raw,{**self.receipt,'source_url':url,'raw_sha256':hashlib.sha256(json.dumps(raw).encode()).hexdigest()}
+        rows,receipt=em._history('sh600001',self.at,fetch=fetch)
+        self.assertEqual(len(rows),65);self.assertTrue(receipt['adjustment_verified'])
+        self.assertEqual(len(receipt['raw_receipts']),2)
+        self.assertAlmostEqual(rows[-1]['close'],self.bars[-1]['close']*.8+1)
+        def wrong(url,**kwargs):
+            raw,receipt=fetch(url,**kwargs)
+            if 'fqt=0' in url:raw['data']['klines']=raw['data']['klines'][1:]
+            return raw,receipt
+        with self.assertRaises(RuntimeError):em._history('sh600001',self.at,fetch=wrong)
+
+    def test_v2_migration_keeps_only_verified_successes_and_original_failures(self):
+        self.collect()
+        source=Path(em.DATA)/'decision-public'/'emotion'/'full'/self.run_id
+        manifest=json.loads((source/'manifest.json').read_text('utf-8'));manifest['version']='emotion-full-mainboard-v2'
+        em._save_json(source/'manifest.json',manifest)
+        run=object.__new__(em._FullRun);run.root=source;run.deadline=time.monotonic()+30
+        run.work('history:old-failure',lambda:(_ for _ in ()).throw(RuntimeError('old limit')))
+        run.work('lhb:sh600001:2026-11-11',lambda:{'old_parser':True})
+        before=(source/'manifest.json').read_bytes();destination='migrated-'+uuid.uuid4().hex
+        migrated=em.migrate_full_successes(self.run_id,destination)
+        self.assertGreater(migrated['copied_successes'],0)
+        self.assertEqual((source/'manifest.json').read_bytes(),before)
+        new=em._FullRun(self.snapshot,None,destination,1,30)
+        self.assertIsNotNone(new.read('history:'+self.codes[0]))
+        self.assertIsNone(new.read('history:old-failure'))
+        self.assertIsNone(new.read('lhb:sh600001:2026-11-11'))
 
 if __name__=='__main__':unittest.main()

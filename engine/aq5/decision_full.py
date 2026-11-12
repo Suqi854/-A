@@ -214,6 +214,12 @@ def build(*,budget_seconds=4500,persist=True):
            and previous.get("collector_versions")==collector_versions)
     started_at=previous["started_at"] if reuse else now().isoformat()
     run_id=previous["run_id"] if reuse else now().strftime("%Y%m%d")+"-"+scope_hash[:12]+"-"+version_hash
+    if (not reuse and previous.get("scope_hash")==scope_hash and previous.get("started_at","")[:10]==now().date().isoformat()
+            and previous.get("collector_versions",{}).get("emotion")=="emotion-full-mainboard-v2"
+            and decision_emotion.FULL_VERSION=="emotion-full-mainboard-v3"):
+        migration=decision_emotion.migrate_full_successes(previous["run_id"],run_id)
+        started_at=migration["asof"];reuse=True
+        print(json.dumps({"stage":"verified_checkpoint_migration",**migration}),flush=True)
     _save(state_path,{"scope_hash":scope_hash,"started_at":started_at,"run_id":run_id,"universe":universe,"collector_versions":collector_versions})
     rows=[];quotes=market.quotes(codes);quote_at=now()
     for official in universe["rows"]:

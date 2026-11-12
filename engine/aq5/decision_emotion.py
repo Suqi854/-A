@@ -13,7 +13,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from . import market
 from .config import CN_TZ, DATA, now
@@ -22,6 +22,37 @@ VERSION = "emotion-public-v1"
 ENDPOINT = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 BOARD_HOSTS = ("https://push2.eastmoney.com", "https://79.push2.eastmoney.com", "https://17.push2.eastmoney.com")
 STYLE = re.compile("昨日|融资|融券|指数|沪股通|深股通|百元|低价|高价|风格|MSCI|标准普尔|富时罗素|预盈|预增|注册制")
+_backoff_lock = threading.RLock()
+
+
+class _SourceDeferred(RuntimeError):
+    def __init__(self, host, until, reason):
+        self.host, self.until = host, until
+        super().__init__(f"source_deferred:{host}:until={until:.0f}:{reason}")
+
+
+def _backoff_path(host):
+    return Path(DATA) / "decision-public" / "emotion" / "backoff" / (_sha(host.encode()) + ".json")
+
+
+def _guard_provider(url):
+    host = urlsplit(url).hostname or "unknown"
+    path = _backoff_path(host)
+    with _backoff_lock:
+        if path.exists():
+            state = json.loads(path.read_text("utf-8"))
+            if state.get("until", 0) > time.time():
+                raise _SourceDeferred(host, state["until"], "persisted_provider_cooldown")
+
+
+def _defer_provider(url, reason):
+    host = urlsplit(url).hostname or "unknown"
+    match = re.search(r"(\d+)\s*秒后再试", str(reason))
+    seconds = min(900, max(1, int(match.group(1)))) if match else 900
+    until = time.time() + seconds
+    with _backoff_lock:
+        _save_json(_backoff_path(host), {"host": host, "until": until, "reason": str(reason), "observed_at": now().isoformat()})
+    return _SourceDeferred(host, until, str(reason))
 
 
 def _at(value=None):
@@ -41,7 +72,9 @@ def _sha(value):
 
 def _get(url, *, sina_var=False):
     """Save byte-exact responses under configured AQ5_DATA, never under user home."""
-    raw = market.http_get(url, "https://data.eastmoney.com/", timeout=12, retries=0)
+    _guard_provider(url)
+    try:raw = market.http_get(url, "https://data.eastmoney.com/", timeout=12, retries=0)
+    except market.Blocked as exc:raise _defer_provider(url, exc) from exc
     if len(raw) > 8 * 1024 * 1024:
         raise ValueError("oversize_public_response")
     if sina_var:
@@ -110,15 +143,55 @@ def _history(code, at, *, fetch=None, minimum_bars=21, max_stale_days=5):
     fetch = fetch or _get
     if not code.startswith('BK'):
         url='https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?'+urlencode({'param':code+',day,,,80,qfq'})
-        raw,receipt=fetch(url)
-        node=(raw.get('data') or {}).get(code) or {}
-        bars=node.get('qfqday') or (node.get('day') if code=='sh000300' else None)
-        if not isinstance(bars,list):raise ValueError('tencent_qfq_history_missing')
-        klines=[','.join([str(p[0]),str(p[1]),str(p[2]),str(p[3]),str(p[4]),str(p[5]),'0']) for p in bars if len(p)>=6]
-        raw={'rc':0,'data':{'klines':klines}}
+        try:
+            raw,receipt=fetch(url)
+            node=(raw.get('data') or {}).get(code) or {}
+            bars=node.get('qfqday') or (node.get('day') if code=='sh000300' else None)
+            if not isinstance(bars,list):raise ValueError('tencent_qfq_history_missing')
+            klines=[','.join([str(p[0]),str(p[1]),str(p[2]),str(p[3]),str(p[4]),str(p[5]),'0']) for p in bars if len(p)>=6]
+            raw={'rc':0,'data':{'klines':klines}}
+            rows,receipt=_normalize_history(raw,receipt,at,minimum_bars=minimum_bars,max_stale_days=max_stale_days)
+            receipt={**receipt,'price_basis':'qfq' if node.get('qfqday') else 'unadjusted_index'}
+            return rows,receipt
+        except (RuntimeError,ValueError,OSError) as primary:
+            rows,receipt=_daily_eastmoney_checked(code,at,fetch,minimum_bars,max_stale_days)
+            receipt['source_attempts']=[{'source':'Tencent','reason':str(primary)[:180]},{'source':'Eastmoney','status':'verified_qfq_raw_pair'}]
+            return rows,receipt
     else:
         return _board_history(code,at,fetch=fetch)
     return _normalize_history(raw,receipt,at,minimum_bars=minimum_bars,max_stale_days=max_stale_days)
+
+
+def _daily_eastmoney_checked(code, at, fetch, minimum_bars, max_stale_days):
+    """Independent fallback; explicit qfq/raw OHLC pair must agree for every completed day."""
+    from .forecast.data import _affine_evidence
+    failures=[]
+    for host in ('push2his.eastmoney.com','91.push2his.eastmoney.com'):
+        try:
+            pair={'source':'Eastmoney','basis':'explicit_qfq','response_hashes':{}};receipts=[]
+            for mode,fqt in (('qfq',1),('bfq',0)):
+                secid=('1.' if code.startswith('sh') else '0.')+code[2:]
+                url=(f'https://{host}/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3'
+                     f'&fields2=f51,f52,f53,f54,f55,f56&klt=101&fqt={fqt}&lmt=80&end=20500101')
+                raw,receipt=fetch(url);node=raw.get('data') or {}
+                if str(node.get('code'))!=code[2:] or not isinstance(node.get('klines'),list):
+                    raise ValueError('fallback_code_or_explicit_basis_missing')
+                normalized={'rc':raw.get('rc'),'data':{'klines':[r+',0' for r in node['klines']]}}
+                rows,_=_normalize_history(normalized,receipt,at,minimum_bars=minimum_bars,max_stale_days=max_stale_days)
+                pair[mode]=rows;pair['response_hashes'][mode]=receipt['raw_sha256'];receipts.append(receipt)
+            if [r['date'] for r in pair['qfq']]!=[r['date'] for r in pair['bfq']]:
+                raise ValueError('fallback_adjustment_date_mismatch')
+            pair['observed_at']=max(r['retrieved_at'] for r in receipts)
+            adjustment=_affine_evidence(pair) if pair['qfq'] else {'days':{}}
+            if set(adjustment['days'])!={r['date'] for r in pair['qfq']}:
+                raise ValueError('fallback_adjustment_ohlc_mismatch')
+            return pair['qfq'],{**receipts[0],'raw_receipts':receipts,'price_basis':'qfq',
+                                'adjustment_verified':bool(pair['qfq']),'adjustment_method':'same_source_qfq_bfq_ohlc_affine',
+                                'adjustment_dates':sorted(adjustment['days'])}
+        except (RuntimeError,ValueError,OSError) as exc:failures.append(exc)
+    deferred=next((e for e in failures if isinstance(e,_SourceDeferred)),None)
+    if deferred:raise deferred
+    raise RuntimeError('daily_fallback_unavailable:'+';'.join(str(e)[:120] for e in failures))
 
 
 def _board_history(code, at, *, fetch=None):
@@ -144,8 +217,8 @@ def _normalize_history(raw, receipt, at, *, minimum_bars=21, max_stale_days=5):
             raise ValueError("incomplete_history_fields")
         date = datetime.fromisoformat(p[0]).replace(hour=15, tzinfo=CN_TZ)
         if date <= at:
-            row = {"date": p[0], "close": float(p[2]), "high": float(p[3]), "low": float(p[4]), "vol": float(p[5]), "amount": float(p[6])}
-            if not all(_finite(row[k]) and row[k] >= 0 for k in ("close", "high", "low", "vol", "amount")) or row["close"] <= 0:
+            row = {"date": p[0], "open":float(p[1]), "close": float(p[2]), "high": float(p[3]), "low": float(p[4]), "vol": float(p[5]), "amount": float(p[6])}
+            if not all(_finite(row[k]) and row[k] >= 0 for k in ("open", "close", "high", "low", "vol", "amount")) or row["close"] <= 0:
                 raise ValueError("invalid_history_number")
             rows.append(row)
     if len({r["date"] for r in rows}) != len(rows) or rows != sorted(rows, key=lambda r: r["date"]):
@@ -206,34 +279,47 @@ def seat_proxy(rows, code, trade_date):
     for row in rows:
         if row.get("SECURITY_CODE") != code[2:] or str(row.get("TRADE_DATE", ""))[:10] != trade_date:
             continue
-        if not all(_finite(row.get(k)) and row[k] >= 0 for k in ("BUY", "SELL")):
+        row=dict(row)
+        if any(row.get(k) not in (None,"","-","--") and (not _finite(row.get(k)) or row[k]<0) for k in ("BUY","SELL")):
             continue
+        for k in ('BUY','SELL'):
+            if row.get(k) in (None,"","-","--"):row[k]=None
+        if row['BUY'] is None and row['SELL'] is None:continue
         key = (str(row.get("CHANGE_TYPE")), str(row.get("TRADE_ID")))
         group=groups.setdefault(key, {}); seat_id=str(row.get("OPERATEDEPT_CODE"))
         if seat_id in ('0','None',''):
             # '机构专用' uses code 0 for several distinct anonymous disclosure rows.
             # Keep different amounts; only byte-equivalent numerical rows deduplicate.
             seat_id=('anonymous',str(row.get('OPERATEDEPT_NAME')),row['BUY'],row['SELL'])
-        if seat_id in group and any(group[seat_id].get(k)!=row.get(k) for k in ('BUY','SELL','OPERATEDEPT_NAME')):
-            raise ValueError('conflicting_duplicate_seat')
+        if seat_id in group:
+            previous=group[seat_id]
+            if previous.get('OPERATEDEPT_NAME')!=row.get('OPERATEDEPT_NAME') or any(
+                previous.get(k) is not None and row.get(k) is not None and previous[k]!=row[k] for k in ('BUY','SELL')):
+                raise ValueError('conflicting_duplicate_seat')
+            for k in ('BUY','SELL'):
+                if row.get(k) is None:row[k]=previous.get(k)
         group[seat_id] = row
     # Different abnormal-period lists may overlap: never sum all of them together.
-    seats = list(max(groups.values(), key=lambda group: sum(x["BUY"] + x["SELL"] for x in group.values())).values()) if groups else []
+    seats = list(max(groups.values(), key=lambda group: sum((x["BUY"] or 0) + (x["SELL"] or 0) for x in group.values())).values()) if groups else []
     def category(name):
         if re.search("机构专用|股通专用|自营|交易单元", name):
             return "institution_or_connect"
         return "brokerage_seat_proxy" if re.search("营业部|分公司", name) else "unknown"
     detail = [{"name": r.get("OPERATEDEPT_NAME"), "seat_code": r.get("OPERATEDEPT_CODE"),
                "category": category(str(r.get("OPERATEDEPT_NAME", ""))), "buy": r["BUY"], "sell": r["SELL"],
-               "net": r["BUY"] - r["SELL"]} for r in seats]
+               "net": r["BUY"] - r["SELL"] if r["BUY"] is not None and r["SELL"] is not None else None} for r in seats]
     ordinary = [r for r in detail if r["category"] == "brokerage_seat_proxy"]
-    total_buy = sum(r["buy"] for r in detail)
+    def complete_sum(items,key):return sum(r[key] for r in items) if all(r[key] is not None for r in items) else None
+    total_buy = complete_sum(detail,'buy');ordinary_buy=complete_sum(ordinary,'buy')
     return {"code": code, "trade_date": trade_date, "seats": detail,
-            "non_institution_buy": sum(r["buy"] for r in ordinary),
-            "non_institution_net": sum(r["net"] for r in ordinary),
-            "non_institution_buy_share": sum(r["buy"] for r in ordinary) / total_buy if total_buy else None,
+            "non_institution_buy": ordinary_buy,
+            "non_institution_net": complete_sum(ordinary,'net'),
+            "known_non_institution_buy":sum(r['buy'] for r in ordinary if r['buy'] is not None),
+            "known_non_institution_sell":sum(r['sell'] for r in ordinary if r['sell'] is not None),
+            "disclosure_complete":all(r['buy'] is not None and r['sell'] is not None for r in detail),
+            "non_institution_buy_share": ordinary_buy / total_buy if ordinary_buy is not None and total_buy else None,
             "hot_money_identity": "UNKNOWN", "eligible_hot_money_fact": False,
-            "note": "营业部席位是非机构参与代理，不能识别实际投资者；不据此断言知名游资。多异常期榜单取一组，未累加。代码0的匿名机构保留不同金额披露行，仅完全相同行去重，不能据此确认机构数量。"}
+            "note": "营业部席位是非机构参与代理，不能识别实际投资者；不据此断言知名游资。单边披露的另一侧与净额保持UNKNOWN，不把未披露当0。多异常期榜单取一组，未累加。代码0的匿名机构保留不同金额披露行，仅完全相同行去重，不能据此确认机构数量。"}
 
 
 def _focus_fallback(codes, at):
@@ -493,7 +579,7 @@ def collect(snapshot, asof=None, *, max_boards=5, max_history=30, max_seats=12, 
             "full_market_screen": False, "note": "部分强势概念扫描；主线/核心/冷却是可解释规则推断。龙虎榜仅加分参考，未识别游资身份保持UNKNOWN。"}
 
 
-FULL_VERSION = "emotion-full-mainboard-v2"
+FULL_VERSION = "emotion-full-mainboard-v3"
 _SINA_ROOT = "https://vip.stock.finance.sina.com.cn"
 
 
@@ -515,13 +601,16 @@ def _save_json(path, value, *, compressed=False):
 
 class _FullRun:
     """One frozen universe/data cutoff, resumable task and byte-source checkpoints."""
-    def __init__(self, snapshot, asof, run_id, max_workers, budget_seconds, progress=None):
+    def __init__(self, snapshot, asof, run_id, max_workers, budget_seconds, progress=None, history_rps=2.0):
         self.at = _at(asof)
         if self.at > now() + timedelta(seconds=5):
             raise ValueError("future_asof")
         self.deadline = time.monotonic() + max(1, min(float(budget_seconds), 7200))
         self.workers = max(1, min(int(max_workers), 4))
         self.progress, self.last_progress = progress, 0.0
+        self.history_interval = 1 / max(.1, min(float(history_rps), 2.0))
+        self.rate_lock, self.next_history_request = threading.Lock(), 0.0
+        self.deferred_sources = {}
         self.rows, self.invalid = {}, []
         for index, row in enumerate(snapshot):
             code = market.norm_code(str(row.get("code", "")))
@@ -573,8 +662,7 @@ class _FullRun:
                         if not candidate.exists() or _sha(candidate.read_bytes()) != value["raw_sha256"]:
                             raise ValueError("cached_raw_unavailable")
                         value["raw_path"] = str(candidate)
-                    else:
-                        for child in value.values():verify(child)
+                    for child in value.values():verify(child)
                 elif isinstance(value, list):
                     for child in value:verify(child)
             verify(saved["result"])
@@ -591,16 +679,27 @@ class _FullRun:
         try:
             value = fn()
             result = {"status": "ok", "attempts": attempts, "value": value, "received_at": now().isoformat()}
-        except _BudgetEnd:
+        except (_BudgetEnd, _SourceDeferred):
             raise
         except (RuntimeError, ValueError, KeyError, TypeError, OSError) as exc:
-            result = {"status": "error", "attempts": attempts, "reason": str(exc)[:300], "error_type": type(exc).__name__}
+            result = {"status": "error", "attempts": attempts, "reason": str(exc)[:300], "error_type": type(exc).__name__,"received_at":now().isoformat()}
         path = self.root / "tasks" / (_sha(key.encode()) + ".json.gz")
         _save_json(path, {"key": key, "checksum": _sha(_json_bytes(result)), "result": result}, compressed=True)
         return result
 
     def fetch(self, url, *, sina_var=False, phase=""):
-        result = self.work("http:" + phase + ":" + url, lambda: _get(url, sina_var=sina_var))
+        def acquire():
+            _guard_provider(url)
+            if '/fqkline/get?' in url or '/api/qt/stock/kline/get?' in url:
+                with self.rate_lock:
+                    slot=max(time.monotonic(),self.next_history_request)
+                    self.next_history_request=slot+self.history_interval
+                if slot>=self.deadline:raise _BudgetEnd()
+                delay=slot-time.monotonic()
+                if delay>0:time.sleep(delay)
+                self.check()
+            return _get(url, sina_var=sina_var)
+        result = self.work("http:" + phase + ":" + url, acquire)
         if result["status"] != "ok":
             raise RuntimeError(result["reason"])
         value, receipt = result["value"]
@@ -628,8 +727,9 @@ class _FullRun:
         iterator = iter(todo)
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
             pending = {}
+            deferred_stage = [False]
             def submit():
-                if time.monotonic() >= self.deadline:
+                if deferred_stage[0] or time.monotonic() >= self.deadline:
                     return False
                 item = next(iterator, None)
                 if item is None:
@@ -645,10 +745,48 @@ class _FullRun:
                     key = pending.pop(future)
                     try:result[key] = future.result()
                     except _BudgetEnd:result[key] = self.read(key)
+                    except _SourceDeferred as exc:
+                        result[key]=None;deferred_stage[0]=True
+                        self.deferred_sources[exc.host]={"until":exc.until,"reason":str(exc),"stage":stage}
                     report()
                     submit()
         report(True)
         return {key: result.get(key) or self.read(key) for key in jobs}
+
+
+def migrate_full_successes(source_run_id, destination_run_id):
+    """Explicit v2->v3 migration: copy verified successes, never old errors or final results.
+
+    The parent must keep the original started_at/asof and point its run state to
+    destination_run_id; this function never edits the parent's state or account DB.
+    """
+    if any(not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", str(v)) for v in (source_run_id,destination_run_id)):
+        raise ValueError('invalid_migration_run_id')
+    root=Path(DATA)/'decision-public'/'emotion'/'full'
+    source=root/source_run_id;destination=root/destination_run_id
+    if destination.exists():raise ValueError('migration_destination_exists')
+    manifest=json.loads((source/'manifest.json').read_text('utf-8'))
+    if manifest.get('version')!='emotion-full-mainboard-v2':raise ValueError('migration_source_version_not_v2')
+    destination.mkdir(parents=True)
+    reader=object.__new__(_FullRun);reader.root=source
+    copied,skipped=0,0
+    for path in (source/'tasks').glob('*.json.gz'):
+        try:saved=json.loads(gzip.decompress(path.read_bytes()));key=saved['key']
+        except (ValueError,KeyError,OSError):skipped+=1;continue
+        # Seat parser changed for single-sided disclosures. Reparse from valid raw HTTP cache.
+        if key.startswith('lhb:') and key!='lhb:list':skipped+=1;continue
+        result=reader.read(key)
+        if not result or result['status']!='ok':skipped+=1;continue
+        if key.startswith('members:'):
+            value=result['value'];symbols=value.get('source_symbols',[])
+            if len(symbols)!=value.get('source_total') or len(set(symbols))!=len(symbols):skipped+=1;continue
+        _save_json(destination/'tasks'/path.name,{'key':key,'checksum':_sha(_json_bytes(result)),'result':result},compressed=True)
+        copied+=1
+    manifest={**manifest,'version':FULL_VERSION,'migration':{'source_run_id':source_run_id,
+        'source_version':'emotion-full-mainboard-v2','copied_successes':copied,'skipped_errors_or_changed_parsers':skipped,
+        'source_manifest_sha256':_sha((source/'manifest.json').read_bytes())}}
+    _save_json(destination/'manifest.json',manifest)
+    return {'run_id':destination_run_id,'asof':manifest['asof'],'version':FULL_VERSION,**manifest['migration']}
 
 
 def _full_catalog(kind, fetch):
@@ -813,13 +951,13 @@ def _full_context(membership, histories, anchor_day, at):
     return records, proof
 
 
-def collect_full(snapshot, asof=None, *, run_id=None, max_workers=3, budget_seconds=900, progress=None):
+def collect_full(snapshot, asof=None, *, run_id=None, max_workers=3, budget_seconds=900, progress=None, history_requests_per_second=2.0):
     """Account for every supplied mainboard code; source gaps never count as qualified coverage.
 
     Call again with the same run_id (and no new asof) to resume. Persist the whole
     AQ5_DATA/decision-public/emotion tree between jobs. Only one job owns a run_id.
     """
-    run = _FullRun(snapshot, asof, run_id, max_workers, budget_seconds, progress)
+    run = _FullRun(snapshot, asof, run_id, max_workers, budget_seconds, progress, history_requests_per_second)
     at, codes = run.at, set(run.rows)
     initial = run.jobs({"catalog:industry": lambda: _full_catalog("industry", run.fetch),
                         "catalog:concept": lambda: _full_catalog("concept", run.fetch),
@@ -885,7 +1023,7 @@ def collect_full(snapshot, asof=None, *, run_id=None, max_workers=3, budget_seco
         lhb_events[key] = {"code": code, "trade_date": day, "status": result["status"] if result else "pending"}
         if result and result["status"] == "ok":
             proxy = result["value"]; remember(proxy["provenance"])
-            lhb_events[key].update(seat_rows=len(proxy["seats"]), raw_refs=[r["raw_sha256"] for r in proxy["provenance"]])
+            lhb_events[key].update(seat_rows=len(proxy["seats"]),disclosure_complete=proxy.get('disclosure_complete',False),raw_refs=[r["raw_sha256"] for r in proxy["provenance"]])
             if day == latest_dates[code]:proxies.append(proxy)
         elif result:lhb_events[key]["reason"] = result["reason"]
     chosen_by_code = {}
@@ -917,7 +1055,9 @@ def collect_full(snapshot, asof=None, *, run_id=None, max_workers=3, budget_seco
             "is_st_name_marker": row.get("is_st_name_marker", row.get("st_name_marker", "ST" in str(row.get("name", "")).upper())),
             "suspended": row.get("suspended"), "history": history_state, "history_bars": bars, "data_day": data_day,
             "mainline": claim.get("mainline", "UNKNOWN"), "core": claim.get("core", "UNKNOWN"), "cooling": claim.get("cooling", "UNKNOWN"),
-            "lhb": lhb_state, "lhb_event_count": len(events), "hot_money_identity": "UNKNOWN"}
+            "lhb": lhb_state, "lhb_event_count": len(events),
+            "lhb_amounts_complete":all(lhb_events[code+':'+day].get('disclosure_complete') is True for c,day in pairs if c==code) if events else None,
+            "hot_money_identity": "UNKNOWN"}
         if h and h["status"] == "error":outcomes[code]["history_reason"] = h["reason"]
     pending = [key for key, result in all_tasks.items() if result is None]
     failures = [{"task": key, "reason": result["reason"], "attempts": result["attempts"]}
@@ -938,6 +1078,7 @@ def collect_full(snapshot, asof=None, *, run_id=None, max_workers=3, budget_seco
             "lhb_list_complete": lhb_complete, "lhb_list_rows": listing["value"]["row_count"] if lhb_complete else None,
             "lhb_window": listing["value"].get("window") if lhb_complete else None,
             "lhb_pairs": len(pairs), "lhb_details_complete": sum(x["status"] == "ok" for x in lhb_events.values()),
+            "lhb_partial_disclosure_events":sum(x['status']=='ok' and not x.get('disclosure_complete') for x in lhb_events.values()),
             "unresolved_count": len(unresolved), "data_complete": status == "complete",
             "anchor_age_calendar_days": anchor_age, "anchor_qualified": anchor_qualified},
         "code_outcomes": outcomes, "unmapped_codes": [c for c, o in outcomes.items() if not o["membership_covered"]],
@@ -945,6 +1086,7 @@ def collect_full(snapshot, asof=None, *, run_id=None, max_workers=3, budget_seco
         "invalid_input_rows": run.invalid, "contexts": context_proofs, "selected_contexts": alternatives,
         "lhb_listing": lhb_rows, "lhb_events": lhb_events, "sources": list(sources.values()), "failures": failures,
         "pending_tasks": pending, "retryable_tasks": retryable,
+        "deferred_sources":run.deferred_sources,"history_requests_per_second":round(1/run.history_interval,3),
         "resume": {"run_id": run.id, "checkpoint": str(run.root), "same_asof_and_universe_required": True},
         "full_market_screen": False, "all_mainboard_requested": True,
         "note": "全部输入主板代码逐项留状态，ST/停牌不删分母；全部可用新浪行业/概念分类，不代表穷尽市场题材。仅使用同一完成日多日资料；缺口UNKNOWN，不把遍历完成当数据完整。"}
