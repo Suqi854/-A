@@ -806,6 +806,41 @@ def _full_catalog(kind, fetch):
     return {"boards": boards, "receipts": [receipt]}
 
 
+def _full_members_independent(board,fetch,max_pages=150):
+    count_url=_SINA_ROOT+'/quotes_service/api/json_v2.php/Market_Center.getHQNodeStockCount?'+urlencode({'node':board['node']})
+    count,before=fetch(count_url)
+    if not re.fullmatch(r'\d+',str(count)) or int(count)>10000:raise ValueError('invalid_metadata_count')
+    count=int(count);all_receipts=[before];directions={}
+    for ascending in (1,0):
+        symbols=[];receipts=[];seen=set();terminal=False
+        for page in range(1,max_pages+1):
+            url=_SINA_ROOT+'/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?'+urlencode({'page':page,'num':100,'sort':'symbol','asc':ascending,'node':board['node'],'symbol':'','_s_r_a':'init'})
+            rows,receipt=fetch(url);receipts.append(receipt)
+            if rows is None or rows==[]:
+                terminal=True;break
+            if not isinstance(rows,list) or len(rows)>100:raise ValueError('invalid_enumeration_page')
+            for row in rows:
+                symbol=row.get('symbol')
+                if not re.fullmatch(r'(?:(?:sh|sz|bj)\d{6}|hk\d{5})',str(symbol)):raise ValueError('invalid_member_symbol')
+                if symbol in seen:raise ValueError('duplicate_or_repeated_page')
+                if symbols and ((ascending and symbol<=symbols[-1]) or (not ascending and symbol>=symbols[-1])):
+                    raise ValueError('provider_ignored_sort_or_ascending')
+                seen.add(symbol);symbols.append(symbol)
+        if not terminal:raise ValueError('enumeration_page_cap_reached')
+        if count and not symbols:raise ValueError('nonzero_count_empty_enumeration')
+        directions['ascending' if ascending else 'descending']={'symbols':symbols,'pages_including_terminal':len(receipts),'receipts':receipts}
+        all_receipts+=receipts
+    after_count,after=fetch(count_url,phase='independent-enumeration-after');all_receipts.append(after)
+    if str(after_count)!=str(count):raise ValueError('metadata_count_changed_during_enumeration')
+    asc=directions['ascending']['symbols'];desc=directions['descending']['symbols']
+    if asc!=list(reversed(desc)):raise ValueError('independent_enumerations_disagree')
+    return {'board':board,'metadata_count':count,'metadata_count_verified':len(asc)==count,
+            'source_total':len(asc),'source_symbols':asc,'source_membership_complete':True,
+            'enumeration_method':'strict_ascending_descending_to_terminal_and_set_equality',
+            'directions':directions,'receipts':all_receipts,
+            'note':'独立正反序穷尽分页一致；若metadata_count_verified=false，仍明确count元数据不一致，不声称其已核对。'}
+
+
 def _full_members(board, fetch):
     count_url = _SINA_ROOT + "/quotes_service/api/json_v2.php/Market_Center.getHQNodeStockCount?" + urlencode({"node": board["node"]})
     count, before = fetch(count_url)
@@ -822,11 +857,21 @@ def _full_members(board, fetch):
     after_count, after = fetch(count_url, phase="after-pages")
     receipts.append(after)
     symbols = [r.get("symbol") for r in rows]
-    if (str(after_count) != str(count) or len(set(symbols)) != count
+    if (str(after_count) != str(count) or len(set(symbols)) != len(symbols)
             or any(not re.fullmatch(r"(?:(?:sh|sz|bj)\d{6}|hk\d{5})", str(c)) for c in symbols)):
         raise ValueError("sina_constituent_count_drift_or_duplicates")
+    if len(symbols) != count:
+        verified = _full_members_independent(board, fetch)
+        verified['initial_count_validation_receipts'] = receipts
+        verified['receipts'] = receipts + verified['receipts']
+        mainboard = sorted(c for c in verified["source_symbols"] if market.is_main_board(c))
+        verified.update(mainboard_members=mainboard,
+                        non_mainboard_count=verified["source_total"]-len(mainboard),
+                        catalog_count_is_display_only=verified["source_total"]!=board["catalog_display_count"])
+        return verified
     mainboard = sorted(c for c in symbols if market.is_main_board(c))
-    return {"board": board, "source_total": count, "source_symbols": symbols, "mainboard_members": mainboard,
+    return {"board": board, "source_total": count, "metadata_count": count, "metadata_count_verified": True,
+            "source_symbols": symbols, "mainboard_members": mainboard,
             "non_mainboard_count": count - len(mainboard), "source_membership_complete": True,
             "catalog_count_is_display_only": count != board["catalog_display_count"], "receipts": receipts}
 
@@ -894,6 +939,9 @@ def _full_context(membership, histories, anchor_day, at):
     board, members = membership["board"], membership["target_members"]
     proof = {"context_id": board["id"], "name": board["name"], "kind": board["kind"], "scope": board["scope"],
              "source_total": membership["source_total"], "source_membership_complete": True,
+             "metadata_count": membership.get("metadata_count", membership["source_total"]),
+             "metadata_count_verified": membership.get("metadata_count_verified", True),
+             "enumeration_method": membership.get("enumeration_method", "count_and_complete_pages"),
              "target_members": members, "target_member_count": len(members),
              "outside_universe_mainboard": membership["outside_universe_mainboard"],
              "non_mainboard_count": membership["non_mainboard_count"],
@@ -951,6 +999,14 @@ def _full_context(membership, histories, anchor_day, at):
     return records, proof
 
 
+def _full_member_task_key(run, board):
+    legacy = 'members:' + board['id']
+    previous = run.read(legacy)
+    # Count-verified successes retain their raw proof. Old failures are never relabelled;
+    # the independent enumeration has its own bounded task attempts on the same run.
+    return legacy if previous and previous['status'] == 'ok' else 'members:enumerated-v1:' + board['id']
+
+
 def collect_full(snapshot, asof=None, *, run_id=None, max_workers=3, budget_seconds=900, progress=None, history_requests_per_second=2.0):
     """Account for every supplied mainboard code; source gaps never count as qualified coverage.
 
@@ -971,12 +1027,13 @@ def collect_full(snapshot, asof=None, *, run_id=None, max_workers=3, budget_seco
         catalog_status[kind] = result["status"] if result else "pending"
         if result and result["status"] == "ok":
             boards += result["value"]["boards"]; remember(result["value"]["receipts"])
-    members = run.jobs({"members:" + b["id"]: (lambda board=b: _full_members(board, run.fetch)) for b in boards}, stage="memberships")
+    member_keys = {b['id']: _full_member_task_key(run, b) for b in boards}
+    members = run.jobs({member_keys[b["id"]]: (lambda board=b: _full_members(board, run.fetch)) for b in boards}, stage="memberships")
     all_tasks.update(members)
     membership_by_code = {code: {"industry": [], "concept": []} for code in codes}
     qualified_members, source_extras = {}, set()
     for board in boards:
-        result = members.get("members:" + board["id"])
+        result = members.get(member_keys[board["id"]])
         if not result or result["status"] != "ok":continue
         value = dict(result["value"])
         value["target_members"] = sorted(codes.intersection(value["mainboard_members"]))
@@ -1029,7 +1086,7 @@ def collect_full(snapshot, asof=None, *, run_id=None, max_workers=3, budget_seco
     chosen_by_code = {}
     for record in selected:chosen_by_code.setdefault(record["code"], {})[record["kind"]] = record["value"]
     source_kind_complete = {kind: catalog_status[kind] == "ok" and all(
-        members.get("members:" + b["id"]) and members["members:" + b["id"]]["status"] == "ok"
+        members.get(member_keys[b["id"]]) and members[member_keys[b["id"]]]["status"] == "ok"
         for b in boards if b["kind"] == kind) for kind in ("industry", "concept")}
     outcomes = {}
     for code, row in sorted(run.rows.items()):
@@ -1074,6 +1131,9 @@ def collect_full(snapshot, asof=None, *, run_id=None, max_workers=3, budget_seco
             "history_checked": sum(o["history"] != "pending" for o in outcomes.values()),
             "history_qualified": sum(o["history"] == "qualified" for o in outcomes.values()),
             "evidence_evaluated_count": len(chosen_by_code), "source_boards": len(boards), "source_memberships_complete": len(qualified_members),
+            "membership_metadata_count_conflicts": sum(m.get('metadata_count_verified') is False for m in qualified_members.values()),
+            "membership_independently_enumerated": sum(m.get('enumeration_method') == 'strict_ascending_descending_to_terminal_and_set_equality' for m in qualified_members.values()),
+            "membership_unmapped_count": sum(not o['membership_covered'] for o in outcomes.values()),
             "source_kind_complete": source_kind_complete, "catalog_status": catalog_status,
             "lhb_list_complete": lhb_complete, "lhb_list_rows": listing["value"]["row_count"] if lhb_complete else None,
             "lhb_window": listing["value"].get("window") if lhb_complete else None,

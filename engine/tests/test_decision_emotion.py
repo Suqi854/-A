@@ -357,6 +357,21 @@ class FullScopeTests(unittest.TestCase):
             return raw,receipt
         with self.assertRaises(RuntimeError):em._history('sh600001',self.at,fetch=wrong)
 
+    def test_old_membership_failure_rechecked_without_reloading_histories(self):
+        run=em._FullRun(self.snapshot,self.at,self.run_id,1,30)
+        key='members:sina:industry:unit'
+        failed=lambda:(_ for _ in ()).throw(ValueError('sina_constituent_count_drift_or_duplicates'))
+        run.work(key,failed);run.work(key,failed)
+        legacy=run.read(key)
+        self.assertEqual(legacy['attempts'],2)
+        result,_=self.collect()
+        self.assertTrue(result['coverage']['data_complete'])
+        self.assertEqual(run.read(key),legacy)
+        self.assertEqual(run.read('members:enumerated-v1:sina:industry:unit')['status'],'ok')
+        resumed,calls=self.collect(asof=None)
+        self.assertEqual(calls,0)
+        self.assertTrue(resumed['coverage']['data_complete'])
+
     def test_v2_migration_keeps_only_verified_successes_and_original_failures(self):
         self.collect()
         source=Path(em.DATA)/'decision-public'/'emotion'/'full'/self.run_id
@@ -373,5 +388,47 @@ class FullScopeTests(unittest.TestCase):
         self.assertIsNotNone(new.read('history:'+self.codes[0]))
         self.assertIsNone(new.read('history:old-failure'))
         self.assertIsNone(new.read('lhb:sh600001:2026-11-11'))
+
+class IndependentEnumerationTests(unittest.TestCase):
+    board={'node':'new_unit','catalog_display_count':3}
+
+    def fixture(self,*,ignore_asc=False,repeat=False,mismatch=False,drift=False):
+        symbols=['sh600001','sh600002','sz000001','sz000002']
+        def fetch(url,**kwargs):
+            q=parse_qs(urlsplit(url).query)
+            if 'StockCount' in url:
+                return ('5' if drift and kwargs.get('phase')=='independent-enumeration-after' else '3'),{'source_url':url}
+            direction=int(q['asc'][0]);page=int(q['page'][0])
+            values=list(symbols if direction or ignore_asc else reversed(symbols))
+            if mismatch and not direction:values=values[:-1]
+            if page>1 and not repeat:values=[]
+            return [{'symbol':s} for s in values],{'source_url':url}
+        return fetch
+
+    def test_count_conflict_requires_two_complete_enumerations(self):
+        result=em._full_members(self.board,self.fixture())
+        self.assertEqual(result['source_total'],4)
+        self.assertEqual(result['metadata_count'],3)
+        self.assertFalse(result['metadata_count_verified'])
+        self.assertEqual(result['non_mainboard_count'],0)
+        self.assertEqual(result['directions']['ascending']['pages_including_terminal'],2)
+        self.assertEqual(result['directions']['descending']['pages_including_terminal'],2)
+        self.assertTrue(result['initial_count_validation_receipts'])
+
+    def test_ignored_ascending_is_not_complete(self):
+        with self.assertRaises(ValueError):em._full_members(self.board,self.fixture(ignore_asc=True))
+
+    def test_repeated_page_is_not_complete(self):
+        with self.assertRaises(ValueError):em._full_members(self.board,self.fixture(repeat=True))
+
+    def test_disagreeing_sets_are_not_complete(self):
+        with self.assertRaises(ValueError):em._full_members(self.board,self.fixture(mismatch=True))
+
+    def test_changed_metadata_is_not_complete(self):
+        with self.assertRaises(ValueError):em._full_members(self.board,self.fixture(drift=True))
+
+    def test_page_cap_is_not_complete(self):
+        with self.assertRaises(ValueError):em._full_members_independent(self.board,self.fixture(),max_pages=1)
+
 
 if __name__=='__main__':unittest.main()

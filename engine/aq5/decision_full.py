@@ -154,7 +154,9 @@ def make_summary(universe, rows, growth, emotion):
                    and not rejected and not growth.get("failures") and not emotion.get("failures")
                    and emotion.get("coverage",{}).get("data_complete") is True)
     routes["value"].update(covered=gfetched,universe_count=total,note=f"官方全沪深主板{total}股逐项核对；财务取得{gfetched}，可计算{gqualified}，规则非适用{gnonapp}，财务缺口{gmissing}，必要催化缺口{missing_catalyst}。ST/停牌/无合格报价不入候选，但不删覆盖分母。")
-    routes["emotion"].update(covered=eevaluated,universe_count=total,note=f"官方全沪深主板{total}股逐项核对；形成主线/核心/冷却证据{eevaluated}，未知或不足{eunknown}。基于全部可用新浪分类，非穷尽市场题材；龙虎榜只加分。完成日：{emotion.get('data_day') or '未知'}。")
+    industry=emotion.get("financial_industry",{})
+    industry_note=(f"财务接口行业分组映射{industry.get('coverage',{}).get('mapped_count',0)}/{total}；" if industry else "")
+    routes["emotion"].update(covered=eevaluated,universe_count=total,note=f"官方全沪深主板{total}股逐项核对；形成主线/核心/冷却证据{eevaluated}，未知或不足{eunknown}。{industry_note}结合可用新浪分类，非穷尽市场题材；龙虎榜只加分。完成日：{emotion.get('data_day') or '未知'}。")
     for route in routes.values():
         route["note"]+=" 全部遍历不代表数据全部合格。" if not data_complete else " 来源完整性检查通过，候选仍需个股缠论确认。"
     stamp=now().isoformat()
@@ -170,7 +172,8 @@ def make_summary(universe, rows, growth, emotion):
         "collection":{"version":VERSION,"scope":"all_official_mainboard","sources":{
             "universe":{k:universe.get(k) for k in ("verified","directory_date","universe_hash","coverage")},
             "growth":{"coverage":growth.get("coverage"),"failures":growth.get("failures",[])[:30]},
-            "emotion":{"coverage":emotion.get("coverage"),"status":emotion.get("status"),"failures":emotion.get("failures",[])[:30]}}},
+            "emotion":{"coverage":emotion.get("coverage"),"status":emotion.get("status"),"failures":emotion.get("failures",[])[:30]},
+            "financial_industry":{k:industry.get(k) for k in ("schema","label","note","complete","observed_at","coverage")}}},
         "coverage":{"value":{"completed":sum(g.get(c,{}).get("financial",{}).get("attempted") is True for c in codes),"total":total,"eligible":gqualified,"unknown":len(value_unknown),"excluded":gnonapp},
                     "emotion":{"completed":len(m),"total":total,"eligible":eevaluated,"unknown":eunknown,"excluded":excluded}},
         "ingestion_errors":{k:v["rejected"][:20] for k,v in ingestion.items()}}
@@ -178,7 +181,7 @@ def make_summary(universe, rows, growth, emotion):
 
 def build(*,budget_seconds=4500,persist=True):
     _require()
-    from . import db, market, decision, decision_snapshot as store, decision_universe, decision_growth, decision_emotion
+    from . import db, market, decision, decision_snapshot as store, decision_universe, decision_growth, decision_emotion, decision_industry
     from .config import DATA, now
     db.init();root=DATA/"decision-full";root.mkdir(parents=True,exist_ok=True)
     build_id=os.environ.get("AQ5_RESEARCH_BUILD_ID","")
@@ -249,6 +252,7 @@ def build(*,budget_seconds=4500,persist=True):
             s=executor.submit(decision_emotion.collect_full,rows,asof=None if reuse else started_at,run_id=run_id,
                               budget_seconds=budget_seconds,max_workers=3,progress=lambda r:notify("emotion",r))
             growth,emotion=f.result(),s.result()
+        emotion=decision_industry.augment(universe,growth,emotion)
         _save(root/"growth.json.gz",growth);_save(root/"emotion.json.gz",emotion)
         summary=make_summary(universe,rows,growth,emotion);_save(root/"summary.json",summary)
     finally:
