@@ -1,20 +1,35 @@
-name: AQ5 Chrome endpoint comparison
+name: AQ5 analysis speed acceptance
 on:
   push:
     branches: [codex/aq5-release-check-20261112]
 permissions:
   contents: read
 jobs:
-  compare:
+  chrome:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Measure both public URLs in fresh Chrome contexts
+      - name: Measure current Chrome pages and fresh analysis responses
+        working-directory: engine
         env:
           NODE_PATH: ${{ runner.temp }}/aq5-browser/node_modules
+          AQ5_DATA: ${{ runner.temp }}/aq5-speed-check
+          AQ5_KEY: ${{ secrets.AQ5_KEY }}
+          ENCRYPTED_CASES: QVE1dzHjJsQKrQ6ZP6VV/KSWfesWee/kR8VmY8h83/xTkaqgsSUP78vL/ySlUfMgBe0I09M7HbvOAHXaYmmIJQWQNdmnneyHXuDeZ+RAbY6jrHyQVrOUJkw=
+          PYTHONDONTWRITEBYTECODE: '1'
         run: |
           npm install --no-audit --no-fund --prefix "$RUNNER_TEMP/aq5-browser" playwright@1.56.1
-          node .github/aq5-release-check.cjs
+          python -B - <<'PY'
+          import base64,json,os,re,subprocess
+          from aq5 import vault
+          key=os.environ["AQ5_KEY"]
+          try:
+              codes=json.loads(vault.unseal_web(base64.b64decode(os.environ["ENCRYPTED_CASES"]),key))
+              assert len(codes)==2 and all(re.fullmatch(r"6\d{5}",code) for code in codes)
+          except Exception:
+              raise SystemExit("Verification inputs unavailable") from None
+          raise SystemExit(subprocess.call(["node","../.github/aq5-release-check.cjs"],env={**os.environ,"AQ5_VERIFY_CODES":",".join(codes)}))
+          PY
