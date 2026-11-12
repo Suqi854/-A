@@ -73,7 +73,13 @@ def collect(snapshot, codes, *, focus=False):
                       "selection": "沪深主板非ST公开快照，按成交额优先的最多100股财务核对；主线情绪以采集器实际覆盖为准"}}
 
 
-def screen():
+def screen(*,read_only=False):
+    from . import decision_full
+    return decision_full.latest_screen(start_if_needed=not read_only)
+
+
+def bounded_screen():
+    """Historical bounded implementation retained for comparison, never the default full route."""
     db.init()
     try:
         snapshot = market.snapshot()

@@ -504,10 +504,11 @@ POST = {"/api/picks/run": p_pick_run, "/api/sim/order": p_order, "/api/sim/cance
         "/api/sectors/refresh": lambda b: (sectors.refresh_map_async(force=True), {"started": True})[1]}
 
 
-from . import live, research, fundamentals, training, forecast, decision, decision_evidence, decision_collect
+from . import live, research, fundamentals, training, forecast, decision, decision_evidence, decision_collect, decision_full
 GET.update({"/api/decision": lambda q: decision.view(market.norm_code(q["code"][0])),
             "/api/decision/status": lambda q: decision.status(market.norm_code(q["code"][0])),
-            "/api/research/preview": lambda q: decision_collect.screen(),
+            "/api/research/preview": lambda q: decision_collect.screen(read_only=q.get("read_only",["0"])[0] in ("1","true")),
+            "/api/research/status": lambda q: decision_full.relay("status"),
             "/api/t/live": lambda q: live.payload(),
             "/api/research": lambda q: research.shadow_report(),
             "/api/training": lambda q: training.view(),

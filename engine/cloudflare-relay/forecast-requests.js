@@ -90,18 +90,23 @@ export async function forecastFetch(req,ctx,env) {
     if(!['forecast','analysis','screen','confirm'].includes(kind))return failure('请求类别无效');
     if(kind!=='screen'&&!validCode(body?.code))return failure('请选择沪深主板股票');
     if(kind==='screen'&&body.code!==undefined)return failure('全市场研究不接受指定股票范围');
+    if(kind==='screen'&&body.read_only!==undefined&&typeof body.read_only!=='boolean')return failure('摘要读取模式无效');
+    if(kind==='screen'&&body.read_only===true&&!validId(body.cache_key))return failure('只读摘要需要有效构建编号');
+    if(kind==='screen'&&body.read_only!==true&&body.cache_key!==undefined)return failure('摘要缓存编号仅用于只读刷新');
     if(kind==='confirm'&&(!validRoute(body.route)||!validHash(body.proposal_id)||!validId(body.source_request_id)
         ||!(body.previous_id===null||validHash(body.previous_id))))return failure('确认请求缺少有效原提案或版本');
     let row,needsDispatch=false,limited=false;
     await ctx.storage.transaction(async tx=>{
       const rows=await cleanup(tx,now);
       const same=[...rows.values()].filter(x=>x.code===(body.code||null)&&kindOf(x)===kind&&!x.invalidated
+        &&(kind!=='screen'||(Boolean(x.read_only)===(body.read_only===true)&&x.cache_key===body.cache_key))
         &&(kind!=='confirm'||(x.proposal_id===body.proposal_id&&x.previous_id===body.previous_id)))
         .sort((a,b)=>b.created-a.created)[0];
       if(same&&((same.status==='ready'&&now-same.updated<5*60*1000)||(['queued','processing'].includes(same.status)&&now-same.created<8*60*1000))) {row=same;return;}
       // Bound both retained requests and dispatch cost, including failed attempts.
       if(rows.size>=20||[...rows.values()].filter(x=>now-x.created<60000).length>=3){limited=true;return;}
       row={id:uuid(),code:body.code||null,status:'queued',created:now,updated:now,
+        ...(kind==='screen'&&body.read_only===true?{read_only:true,cache_key:body.cache_key}:{}),
         ...(kind==='forecast'?{}:{kind}),...(kind==='confirm'?{route:body.route,proposal_id:body.proposal_id,
           source_request_id:body.source_request_id,previous_id:body.previous_id}:{})};
       await tx.put('request:'+row.id,row);needsDispatch=true;
@@ -127,6 +132,7 @@ export async function forecastFetch(req,ctx,env) {
         if((row.attempts||0)>=3){await tx.put('request:'+row.id,{...row,status:'error',message:'云端分析多次超时，请稍后重新提交',updated:now});continue;}
         const claim=uuid();await tx.put('request:'+row.id,{...row,status:'processing',claim,attempts:(row.attempts||0)+1,updated:now});
         requests.push({id:row.id,code:row.code,claim,...(kindOf(row)==='forecast'?{}:{kind:row.kind}),
+          ...(row.kind==='screen'&&row.read_only?{read_only:true,cache_key:row.cache_key}:{}),
           ...(row.kind==='confirm'?{route:row.route,proposal_id:row.proposal_id,source_request_id:row.source_request_id,previous_id:row.previous_id}:{})});
       }
     });

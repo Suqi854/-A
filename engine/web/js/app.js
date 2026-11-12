@@ -48,7 +48,8 @@
       case 'picks/runs': return sj('runs.json');
       case 'picks/candidates': { const r = (await sj('runs.json')).find(x => String(x.id) === q.get('run')); return r ? r.cand_list || [] : []; }
       case 'picks/state': return { running: false };
-      case 'research/preview': return S.priv && S.privateSession?.key ? requestDecision('screen') : sj('research.json');
+      case 'research/preview': return S.priv && S.privateSession?.key ? requestDecision('screen', null,
+        q.get('read_only') === '1' ? {read_only:true,cache_key:q.get('cache_key')} : {}) : sj('research.json');
       case 'analyze': if (S.priv && S.privateSession?.key) return requestDecision('analysis', code);
         if (S.priv?.analysis?.[code]?.kline?.length) return S.priv.analysis[code];
         try { return await sj('analysis/' + code + '.json'); } catch {
@@ -186,7 +187,7 @@
     check();
     const token = Array.from(bits,b=>b.toString(16).padStart(2,'0')).join('');
     const headers = {'x-aq5-forecast-token':token}, endpoint=origin+'/__aq5/forecast/request';
-    const payload = kind === 'screen' ? {kind} : kind === 'analysis' ? {kind,code} :
+    const payload = kind === 'screen' ? {kind,...(body.read_only===true?{read_only:true,cache_key:body.cache_key}:{})} : kind === 'analysis' ? {kind,code} :
       {kind,code,route:body.route,proposal_id:body.proposal_id,source_request_id:body.source_request_id,previous_id:body.previous_id || null};
     const read = async response => { const result=await response.json().catch(()=>null);check();
       if(!response.ok || result?.error || !['queued','processing','ready'].includes(result?.status))
@@ -425,6 +426,7 @@
     else show(p);
   }
   function show(p, arg) {
+    stopResearchProgress(); S.researchPreviewRequest = null;
     if (p !== 'forecast') { S.forecastRequest = null; S.forecastSelection = null; }
     else if (arg) {
       const selected = normCode(arg);
@@ -988,25 +990,87 @@
     el.querySelectorAll('[data-id]').forEach(tr => tr.onclick = () => { S.run = +tr.dataset.id; loadRuns(S.run); });
     showRun(runs.find(r => r.id === S.run));
   }
+  function researchProgressText(status) {
+    const b=status?.build;
+    if(!b)return status?.ok===false ? '研究进度暂不可用，保留现有快照' : '';
+    const label={queued:'排队等待',running:'采集中',checkpoint:'采集中，已保存进度',complete:'采集完成',partial:'部分完成，仍有缺口',error:'采集中断',unavailable:'进度暂不可用'}[b.phase] || '等待进度';
+    const parts=['全主板研究：'+label];
+    if(Number.isFinite(b.completed)&&Number.isFinite(b.total)&&b.total>0)parts.push(`${b.completed}/${b.total}`);
+    for(const [key,name] of [['value','价值'],['emotion','情绪']]){const c=b.coverage?.[key];if(c&&Number.isFinite(c.total)&&c.total>0)parts.push(`${name} ${Number.isFinite(c.completed)?c.completed:'--'}/${c.total}，缺口 ${Number.isFinite(c.unknown)?c.unknown:'--'}`);}
+    if(b.updated_at)parts.push('进度更新 '+sourceTime(b.updated_at));
+    return parts.join(' · ');
+  }
+  function renderResearchPreview(el, report) {
+    const stamp = report.quote_time_status === 'known' ? '行情时点 ' + sourceTime(report.asof)
+      : report.quote_time_status === 'partial' ? '行情时点部分可核对 · 最早 ' + sourceTime(report.quote_time_min)
+      : '行情时点未提供';
+    const note=[stamp,'快照生成 '+sourceTime(report.generated_at),report.routes ? '双路线观察候选；点个股进入结构确认' : '等待下一交易日真实选股样本',researchProgressText(report.full_research)].filter(Boolean).join(' · ');
+    el.innerHTML=panel('RESEARCH PREVIEW <small>研究预览</small>',`<div data-nc data-research-progress class="hint">${esc(note)}</div>`+researchRun(report),{});
+    el.researchBaseNote=[stamp,'快照生成 '+sourceTime(report.generated_at),report.routes ? '双路线观察候选；点个股进入结构确认' : '等待下一交易日真实选股样本'].join(' · ');
+  }
+  function stopResearchProgress() {
+    if(S.timers?.researchProgress!==undefined){clearTimeout(S.timers.researchProgress);delete S.timers.researchProgress;}
+    S.researchMonitor?.request?.statusAbort?.abort();
+    S.researchMonitor=null;
+  }
+  async function readResearchStatus(request) {
+    const current=()=>S.researchPreviewRequest===request&&S.page==='pick'&&STATIC===request.staticMode&&
+      (!request.staticMode||(!!S.priv&&S.privateSession===request.session));
+    if(!current())throw new Error('研究页面已变化');
+    if(!request.staticMode)return api('research/status');
+    const base=relayBase();if(!base||!request.session?.key)throw new Error('请先解锁云端研究');
+    if(!request.statusToken){const bits=new Uint8Array(await crypto.subtle.deriveBits({name:'PBKDF2',salt:new TextEncoder().encode('aq5-forecast-request-v1'),iterations:200000,hash:'SHA-256'},request.session.key,256));
+      if(!current())throw new Error('研究页面已变化');request.statusToken=Array.from(bits,b=>b.toString(16).padStart(2,'0')).join('');}
+    const ctl=new AbortController();request.statusAbort=ctl;const timeout=setTimeout(()=>ctl.abort(),10000);
+    try{const response=await fetch(base+'/__aq5/research/status',{headers:{'x-aq5-forecast-token':request.statusToken},cache:'no-store',signal:ctl.signal});
+      const result=await response.json();if(!current())throw new Error('研究页面已变化');
+      if(!response.ok||result?.ok!==true)throw new Error('研究进度暂不可用');return result;
+    }finally{clearTimeout(timeout);if(request.statusAbort===ctl)request.statusAbort=null;}
+  }
+  function watchResearchProgress(el, report, request) {
+    if(!report.full_research?.build)return;
+    stopResearchProgress();
+    const monitor={request,el,seen:new Set(),failures:0};S.researchMonitor=monitor;S.timers ||= {};
+    const current=()=>S.researchMonitor===monitor&&S.researchPreviewRequest===request&&S.page==='pick'&&
+      el===$('#researchPreview')&&!el.hidden&&STATIC===request.staticMode&&(!request.staticMode||(!!S.priv&&S.privateSession===request.session));
+    const note=text=>{const node=el.querySelector('[data-research-progress]');if(node)node.textContent=el.researchBaseNote+' · '+text;};
+    const schedule=()=>{if(current())S.timers.researchProgress=setTimeout(()=>tick(),20000);};
+    const tick=async supplied=>{
+      if(!current())return;
+      if(document.hidden&&!supplied){schedule();return;}
+      let status;
+      try{status=supplied||await readResearchStatus(request);if(!current())return;monitor.failures=0;report.full_research=status;note(researchProgressText(status));}
+      catch{if(!current())return;note('研究进度暂不可用，保留现有快照');if(++monitor.failures<3)schedule();return;}
+      const b=status.build;if(!b)return;
+      if(['queued','running','checkpoint'].includes(b.phase)){schedule();return;}
+      if(!['complete','partial','error'].includes(b.phase)||!/^[a-f0-9]{32}$/.test(b.build_id||'')||monitor.seen.has(b.build_id))return;
+      monitor.seen.add(b.build_id);
+      if(b.snapshot_commit&&b.snapshot_commit===report.snapshot_commit)return;
+      try{const fresh=await api('research/preview?read_only=1&cache_key='+encodeURIComponent(b.build_id));
+        if(!current())return;if(!fresh||fresh.kind!=='research_preview')throw new Error('invalid summary');
+        report={...fresh,full_research:status};renderResearchPreview(el,report);
+      }catch{if(current())note(researchProgressText(status)+' · 摘要刷新失败，保留原快照，可重新进入查看');}
+    };
+    tick(report.full_research);
+  }
   async function loadResearchPreview(needed) {
     const el = $('#researchPreview');
     if (!el) return;
     el.hidden = !needed;
-    if (!needed || el.dataset.requested) return;
+    if(!needed){stopResearchProgress();S.researchPreviewRequest=null;return;}
+    if(el.dataset.requested)return;
+    stopResearchProgress();
+    const request={el,session:S.privateSession,staticMode:STATIC};S.researchPreviewRequest=request;
     el.dataset.requested = '1';
-    el.innerHTML = panel('RESEARCH PREVIEW <small>研究预览</small>', '<div class="loading">正在采集真实数据并核对两条路线，云端首次请求可能需要数分钟…</div>', {});
+    el.innerHTML = panel('RESEARCH PREVIEW <small>研究预览</small>', '<div class="loading">正在读取最近研究快照与全主板采集进度…</div>', {});
     let requestError = '';
     const r = await api('research/preview').catch(e => { requestError = e.message; return null; });
-    if (S.page !== 'pick' || el !== $('#researchPreview') || el.hidden) return;
+    if (S.page !== 'pick' || el !== $('#researchPreview') || el.hidden || S.researchPreviewRequest!==request || STATIC!==request.staticMode || (request.staticMode&&S.privateSession!==request.session)) return;
     if (!r || r.kind !== 'research_preview') {
       el.innerHTML = panel('RESEARCH PREVIEW <small>研究预览</small>', `<div data-nc class="hint">${requestError ? esc(requestError) + '；稍后重新进入选股页重试。' : '等待下一交易日的真实研究样本'}</div>`, {});
       return;
     }
-    const stamp = r.quote_time_status === 'known' ? '行情时点 ' + sourceTime(r.asof)
-      : r.quote_time_status === 'partial' ? '行情时点部分可核对 · 最早 ' + sourceTime(r.quote_time_min)
-      : '行情时点未提供';
-    const note = `<div data-nc class="hint">${esc(stamp)} · 生成 ${esc(sourceTime(r.generated_at))} · ${r.routes ? '双路线观察候选；点个股进入结构确认' : '等待下一交易日真实选股样本'}</div>`;
-    el.innerHTML = panel('RESEARCH PREVIEW <small>研究预览</small>', note + researchRun(r), {});
+    renderResearchPreview(el,r);watchResearchProgress(el,r,request);
   }
   function researchRun(r) {
     if (!r) return '';

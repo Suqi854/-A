@@ -1,5 +1,6 @@
 import { liveRoute } from './live.js';
 import { forecastRoute } from './forecast-requests.js';
+import { fullResearchRoute } from './full-research.js';
 export { LiveSnapshot } from './live.js';
 // A量化 固定地址中转：https://aq5-relay.<你的子域>.workers.dev
 // 默认网页始终由云端 Pages 提供，不因电脑在线而切回旧的本机页面。
@@ -80,6 +81,8 @@ export default {
     ctx.waitUntil(kickCloud(env));
   },
   async fetch(req, env) {
+    const research = await fullResearchRoute(req, env);
+    if (research) return research;
     const forecast = await forecastRoute(req, env);
     if (forecast) return forecast;
     const live = await liveRoute(req, env);

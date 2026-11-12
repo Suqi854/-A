@@ -129,7 +129,7 @@ def fulfill(item, password, analyze, *, context=None, handlers=None):
             if result.get('code') != item['code'] or result.get('fusion', {}).get('code') != item['code']:
                 raise ValueError('analysis result identity mismatch')
         elif kind == 'screen':
-            result = handlers['screen']()
+            result = handlers['screen'](read_only=True) if item.get('read_only') is True else handlers['screen']()
             if result.get('kind') not in ('research_preview','screen') or not isinstance(result.get('routes'), dict):
                 raise ValueError('screen result contract mismatch')
             result = {**result, 'kind':'screen'}
@@ -178,7 +178,7 @@ def complete(relay, key, payload, transport, wait):
         wait(2 ** attempt)
 
 
-def run(*, budget=900, transport=exchange, analyze=None, clock=time.monotonic, wait=time.sleep, research=False):
+def run(*, budget=900, transport=exchange, analyze=None, clock=time.monotonic, wait=time.sleep, research=False, model_loader=None):
     require_isolated_mode()
     password = os.environ.get('AQ5_KEY', '')
     relay = os.environ.get('AQ5_RELAY', '')
@@ -189,12 +189,17 @@ def run(*, budget=900, transport=exchange, analyze=None, clock=time.monotonic, w
         from .service import analyze
     key = hmac.new(password.encode(), b'aq5-live-publish-v1', hashlib.sha256).hexdigest()
     deadline, count, delivery_failures = clock() + budget, 0, 0
+    models_loaded=False
     while clock() < deadline and count < 20:
         jobs = transport(relay, key, 'poll?protocol=research-v1' if research else 'poll').get('requests', [])
         if not jobs:
             break
         for item in jobs:
             try:
+                if item.get('kind','forecast')!='screen' and model_loader is not None and not models_loaded:
+                    try:model_loader()
+                    except Exception:print('Model snapshot unavailable; probabilities remain unverified.',flush=True)
+                    models_loaded=True
                 context = transport(relay, key, 'context?id='+item['id']) if item.get('kind','forecast')!='forecast' else None
                 payload = fulfill(item, password, analyze, context=context)
             except Exception:
@@ -216,12 +221,9 @@ def main():
     require_isolated_mode()
     from .. import db
     db.init()
-    try:
-        load_models(os.environ.get('AQ5_KEY', ''))
-    except Exception:
-        # Structural analysis is useful without a trained probability bundle.
-        print('Model snapshot unavailable; probabilities remain unverified.', flush=True)
-    run(research=True)
+    # A full-market screen reads only its independent compact snapshot. It must
+    # not download the account-state bundle merely to access optional models.
+    run(research=True, model_loader=lambda:load_models(os.environ.get('AQ5_KEY','')))
 
 
 if __name__ == '__main__':

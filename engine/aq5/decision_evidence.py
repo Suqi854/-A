@@ -205,6 +205,9 @@ def screen(snapshot, asof):
             item = {**result, "name": quote.get("name") or code, "mcap": cap,
                     "price": quote.get("price"), "growth_metrics": claims.get("growth", {}).get("metrics", {}),
                     "stage": "观察候选；需缠论结构确认"}
+            if quote.get("research_exclusion"):
+                out[route]["excluded_count"] = out[route].get("excluded_count",0)+1
+                continue
             if result["invalid"]:
                 continue
             out[route]["candidates" if result["eligible"] else "watch"].append(item)

@@ -2,10 +2,15 @@
 from __future__ import annotations
 
 import hashlib
+import gzip
 import json
 import math
+import os
 import re
 import statistics
+import threading
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
@@ -101,33 +106,35 @@ def _members(board, max_pages=6):
     return list(unique.values()), receipts, total, len(unique) == total
 
 
-def _history(code, at):
+def _history(code, at, *, fetch=None, minimum_bars=21, max_stale_days=5):
+    fetch = fetch or _get
     if not code.startswith('BK'):
         url='https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?'+urlencode({'param':code+',day,,,80,qfq'})
-        raw,receipt=_get(url)
+        raw,receipt=fetch(url)
         node=(raw.get('data') or {}).get(code) or {}
         bars=node.get('qfqday') or (node.get('day') if code=='sh000300' else None)
         if not isinstance(bars,list):raise ValueError('tencent_qfq_history_missing')
         klines=[','.join([str(p[0]),str(p[1]),str(p[2]),str(p[3]),str(p[4]),str(p[5]),'0']) for p in bars if len(p)>=6]
         raw={'rc':0,'data':{'klines':klines}}
     else:
-        return _board_history(code,at)
-    return _normalize_history(raw,receipt,at)
+        return _board_history(code,at,fetch=fetch)
+    return _normalize_history(raw,receipt,at,minimum_bars=minimum_bars,max_stale_days=max_stale_days)
 
 
-def _board_history(code, at):
+def _board_history(code, at, *, fetch=None):
+    fetch = fetch or _get
     secid = "90." + code if code.startswith("BK") else ("1." if code.startswith("sh") else "0.") + code[2:]
     url = "https://push2his.eastmoney.com/api/qt/stock/kline/get?" + urlencode({"secid": secid,
         "fields1": "f1,f2,f3,f4,f5,f6", "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
         "klt": 101, "fqt": 0 if code.startswith("BK") else 1,
         "beg": (at - timedelta(days=100)).strftime("%Y%m%d"), "end": at.strftime("%Y%m%d"), "lmt": 65})
-    try:raw, receipt = _get(url)
+    try:raw, receipt = fetch(url)
     except (RuntimeError,ValueError,OSError):
-        raw,receipt=_get(url.replace('https://push2his.eastmoney.com','https://91.push2his.eastmoney.com'))
+        raw,receipt=fetch(url.replace('https://push2his.eastmoney.com','https://91.push2his.eastmoney.com'))
     return _normalize_history(raw,receipt,at)
 
 
-def _normalize_history(raw, receipt, at):
+def _normalize_history(raw, receipt, at, *, minimum_bars=21, max_stale_days=5):
     if raw.get("rc") != 0 or not isinstance(raw.get("data"), dict):
         raise ValueError("history_unavailable")
     rows = []
@@ -143,7 +150,7 @@ def _normalize_history(raw, receipt, at):
             rows.append(row)
     if len({r["date"] for r in rows}) != len(rows) or rows != sorted(rows, key=lambda r: r["date"]):
         raise ValueError("history_dates_not_unique_ordered")
-    if len(rows) < 21 or (at.date() - datetime.fromisoformat(rows[-1]["date"]).date()).days > 5:
+    if len(rows) < minimum_bars or rows and max_stale_days is not None and (at.date() - datetime.fromisoformat(rows[-1]["date"]).date()).days > max_stale_days:
         raise ValueError("insufficient_or_stale_history")
     return rows, receipt
 
@@ -484,3 +491,462 @@ def collect(snapshot, asof=None, *, max_boards=5, max_history=30, max_seats=12, 
             "selected_contexts":alternatives,
             "failures": failures, "assessments": assessments, "proxy_metrics": proxies, "sources": receipts,
             "full_market_screen": False, "note": "部分强势概念扫描；主线/核心/冷却是可解释规则推断。龙虎榜仅加分参考，未识别游资身份保持UNKNOWN。"}
+
+
+FULL_VERSION = "emotion-full-mainboard-v2"
+_SINA_ROOT = "https://vip.stock.finance.sina.com.cn"
+
+
+class _BudgetEnd(Exception):
+    pass
+
+
+def _json_bytes(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+
+
+def _save_json(path, value, *, compressed=False):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = _json_bytes(value)
+    tmp = path.with_name(path.name + f".{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_bytes(gzip.compress(raw) if compressed else raw)
+    tmp.replace(path)
+
+
+class _FullRun:
+    """One frozen universe/data cutoff, resumable task and byte-source checkpoints."""
+    def __init__(self, snapshot, asof, run_id, max_workers, budget_seconds, progress=None):
+        self.at = _at(asof)
+        if self.at > now() + timedelta(seconds=5):
+            raise ValueError("future_asof")
+        self.deadline = time.monotonic() + max(1, min(float(budget_seconds), 7200))
+        self.workers = max(1, min(int(max_workers), 4))
+        self.progress, self.last_progress = progress, 0.0
+        self.rows, self.invalid = {}, []
+        for index, row in enumerate(snapshot):
+            code = market.norm_code(str(row.get("code", "")))
+            if not re.fullmatch(r"(?:sh|sz)\d{6}", code) or not market.is_main_board(code):
+                self.invalid.append({"index": index, "code": str(row.get("code", "")), "reason": "outside_mainboard_or_invalid"})
+            else:
+                self.rows.setdefault(code, dict(row, code=code))
+        if not self.rows:
+            raise ValueError("empty_mainboard_universe")
+        scope_hash = _sha(_json_bytes(sorted(self.rows)))
+        run_id = run_id or f"{self.at.date()}-{scope_hash[:12]}"
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", run_id):
+            raise ValueError("invalid_emotion_run_id")
+        self.id = run_id
+        self.root = Path(DATA) / "decision-public" / "emotion" / "full" / run_id
+        manifest_path = self.root / "manifest.json"
+        if manifest_path.exists():
+            manifest = json.loads(manifest_path.read_text("utf-8"))
+            if manifest.get("scope_hash") != scope_hash or manifest.get("version") != FULL_VERSION:
+                raise ValueError("emotion_resume_scope_or_version_mismatch")
+            if asof is not None and _at(manifest["asof"]) != self.at:
+                raise ValueError("emotion_resume_cutoff_mismatch")
+            self.at = _at(manifest["asof"])
+            self.rows = manifest["universe"]
+            self.invalid = manifest["invalid_input_rows"]
+        else:
+            manifest = {"version": FULL_VERSION, "asof": self.at.isoformat(), "scope_hash": scope_hash,
+                        "universe": self.rows, "invalid_input_rows": self.invalid, "input_rows": len(snapshot),
+                        "scope_note": "固定沪深主板目录；ST/停牌保留分母。只比较完整源成分的主板投影。"}
+            _save_json(manifest_path, manifest)
+        self.manifest = manifest
+
+    def check(self):
+        if time.monotonic() >= self.deadline:
+            raise _BudgetEnd()
+
+    def read(self, key):
+        path = self.root / "tasks" / (_sha(key.encode()) + ".json.gz")
+        if not path.exists():
+            return None
+        try:
+            saved = json.loads(gzip.decompress(path.read_bytes()))
+            if saved["key"] != key or saved["checksum"] != _sha(_json_bytes(saved["result"])):
+                return None
+            def verify(value):
+                if isinstance(value, dict):
+                    if "raw_path" in value and "raw_sha256" in value:
+                        candidate = Path(DATA) / "decision-public" / "emotion" / (value["raw_sha256"] + ".json")
+                        if not candidate.exists() or _sha(candidate.read_bytes()) != value["raw_sha256"]:
+                            raise ValueError("cached_raw_unavailable")
+                        value["raw_path"] = str(candidate)
+                    else:
+                        for child in value.values():verify(child)
+                elif isinstance(value, list):
+                    for child in value:verify(child)
+            verify(saved["result"])
+            return saved["result"]
+        except (ValueError, KeyError, OSError):
+            return None
+
+    def work(self, key, fn):
+        previous = self.read(key)
+        if previous and (previous["status"] == "ok" or previous["attempts"] >= 2):
+            return previous
+        self.check()
+        attempts = (previous or {}).get("attempts", 0) + 1
+        try:
+            value = fn()
+            result = {"status": "ok", "attempts": attempts, "value": value, "received_at": now().isoformat()}
+        except _BudgetEnd:
+            raise
+        except (RuntimeError, ValueError, KeyError, TypeError, OSError) as exc:
+            result = {"status": "error", "attempts": attempts, "reason": str(exc)[:300], "error_type": type(exc).__name__}
+        path = self.root / "tasks" / (_sha(key.encode()) + ".json.gz")
+        _save_json(path, {"key": key, "checksum": _sha(_json_bytes(result)), "result": result}, compressed=True)
+        return result
+
+    def fetch(self, url, *, sina_var=False, phase=""):
+        result = self.work("http:" + phase + ":" + url, lambda: _get(url, sina_var=sina_var))
+        if result["status"] != "ok":
+            raise RuntimeError(result["reason"])
+        value, receipt = result["value"]
+        raw_path = Path(receipt["raw_path"])
+        if not raw_path.exists() or _sha(raw_path.read_bytes()) != receipt["raw_sha256"]:
+            raise ValueError("emotion_cached_raw_missing_or_corrupt")
+        return value, receipt
+
+    def jobs(self, jobs, stage="sources"):
+        """Never enqueue the whole universe: at most workers live requests past cutoff."""
+        result, todo = {}, []
+        for key, fn in jobs.items():
+            saved = self.read(key)
+            if saved and (saved["status"] == "ok" or saved["attempts"] >= 2):
+                result[key] = saved
+            else:
+                todo.append((key, fn))
+        def report(force=False):
+            current = time.monotonic()
+            if self.progress and (force or current - self.last_progress >= 10):
+                self.progress({"stage": stage, "completed": sum(v is not None for v in result.values()),
+                               "requested": len(jobs), "updated_at": now().isoformat()})
+                self.last_progress = current
+        report(True)
+        iterator = iter(todo)
+        with ThreadPoolExecutor(max_workers=self.workers) as pool:
+            pending = {}
+            def submit():
+                if time.monotonic() >= self.deadline:
+                    return False
+                item = next(iterator, None)
+                if item is None:
+                    return False
+                key, fn = item
+                pending[pool.submit(self.work, key, fn)] = key
+                return True
+            for _ in range(self.workers):
+                if not submit():break
+            while pending:
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    key = pending.pop(future)
+                    try:result[key] = future.result()
+                    except _BudgetEnd:result[key] = self.read(key)
+                    report()
+                    submit()
+        report(True)
+        return {key: result.get(key) or self.read(key) for key in jobs}
+
+
+def _full_catalog(kind, fetch):
+    url = _SINA_ROOT + "/q/view/newSinaHy.php" if kind == "industry" else "https://money.finance.sina.com.cn/q/view/newFLJK.php?param=class"
+    raw, receipt = fetch(url, sina_var=True)
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("empty_sina_catalog")
+    boards = []
+    for value in raw.values():
+        p = str(value).split(",")
+        if len(p) < 13 or not re.fullmatch(r"(?:new|gn)_[A-Za-z0-9_]+", p[0]) or not p[2].isdigit():
+            raise ValueError("unparsed_sina_catalog_entry")
+        boards.append({"id": "sina:" + kind + ":" + p[0], "node": p[0], "name": p[1], "kind": kind,
+                       "catalog_display_count": int(p[2]), "scope": "新浪行业代理" if kind == "industry" else "新浪概念分类"})
+    if len({b["id"] for b in boards}) != len(boards):
+        raise ValueError("duplicate_sina_catalog_node")
+    return {"boards": boards, "receipts": [receipt]}
+
+
+def _full_members(board, fetch):
+    count_url = _SINA_ROOT + "/quotes_service/api/json_v2.php/Market_Center.getHQNodeStockCount?" + urlencode({"node": board["node"]})
+    count, before = fetch(count_url)
+    if not re.fullmatch(r"\d+", str(count)) or not 0 <= int(count) <= 10000:
+        raise ValueError("invalid_sina_constituent_count")
+    count = int(count)
+    rows, receipts = [], [before]
+    for page in range(1, math.ceil(count / 100) + 1):
+        url = _SINA_ROOT + "/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?" + urlencode({"page": page, "num": 100, "sort": "symbol", "asc": 1, "node": board["node"], "symbol": "", "_s_r_a": "init"})
+        part, receipt = fetch(url)
+        if not isinstance(part, list) or not part or len(part) > 100:
+            raise ValueError("sina_constituent_page_incomplete")
+        rows.extend(part); receipts.append(receipt)
+    after_count, after = fetch(count_url, phase="after-pages")
+    receipts.append(after)
+    symbols = [r.get("symbol") for r in rows]
+    if (str(after_count) != str(count) or len(set(symbols)) != count
+            or any(not re.fullmatch(r"(?:(?:sh|sz|bj)\d{6}|hk\d{5})", str(c)) for c in symbols)):
+        raise ValueError("sina_constituent_count_drift_or_duplicates")
+    mainboard = sorted(c for c in symbols if market.is_main_board(c))
+    return {"board": board, "source_total": count, "source_symbols": symbols, "mainboard_members": mainboard,
+            "non_mainboard_count": count - len(mainboard), "source_membership_complete": True,
+            "catalog_count_is_display_only": count != board["catalog_display_count"], "receipts": receipts}
+
+
+def _full_lhb_pages(params, fetch):
+    rows, receipts, expected_pages, expected_count, seen = [], [], None, None, set()
+    page = 1
+    while expected_pages is None or page <= expected_pages:
+        raw, receipt = fetch(ENDPOINT + "?" + urlencode({**params, "pageNumber": page, "pageSize": 500}))
+        receipts.append(receipt)
+        result = raw.get("result")
+        if raw.get("success") is not True or not isinstance(result, dict) or not isinstance(result.get("data"), list):
+            raise ValueError("lhb_all_pages_unavailable")
+        pages, count = int(result.get("pages", -1)), int(result.get("count", -1))
+        if pages < 0 or count < 0 or pages != math.ceil(count / 500):
+            raise ValueError("lhb_pagination_metadata_invalid")
+        if expected_pages is not None and (pages != expected_pages or count != expected_count):
+            raise ValueError("lhb_pagination_metadata_changed")
+        expected_pages, expected_count = pages, count
+        for row in result["data"]:
+            identity = _sha(_json_bytes(row))
+            if identity in seen:raise ValueError("lhb_duplicate_page_row")
+            seen.add(identity); rows.append(row)
+        page += 1
+    if len(rows) != expected_count:
+        raise ValueError("lhb_all_pages_row_count_mismatch")
+    return {"rows": rows, "receipts": receipts, "complete": True, "row_count": expected_count}
+
+
+def _full_lhb_listing(at, fetch):
+    end = at.date() if at.hour >= 15 else (at-timedelta(days=1)).date()
+    start = end-timedelta(days=10)
+    result = _full_lhb_pages({"reportName": "RPT_DAILYBILLBOARD_DETAILSNEW", "columns": "ALL", "sortTypes": "-1",
+        "sortColumns": "TRADE_DATE", "source": "WEB", "client": "WEB",
+        "filter": f"(TRADE_DATE>='{start}')(TRADE_DATE<='{end}')"}, fetch)
+    for row in result["rows"]:
+        if not re.fullmatch(r"\d{6}", str(row.get("SECURITY_CODE", ""))):
+            raise ValueError("lhb_listing_security_code_invalid")
+        try:day = datetime.fromisoformat(str(row.get("TRADE_DATE", ""))[:10]).date()
+        except ValueError:raise ValueError("lhb_listing_date_invalid") from None
+        if not start <= day <= end:
+            raise ValueError("lhb_listing_date_outside_frozen_window")
+    result["window"] = {"start": start.isoformat(), "end": end.isoformat()}
+    return result
+
+
+def _full_lhb_seats(code, day, fetch):
+    rows, receipts = [], []
+    for side in ("BUY", "SELL"):
+        result = _full_lhb_pages({"reportName": "RPT_BILLBOARD_DAILYDETAILS" + side, "columns": "ALL",
+            "sortTypes": "-1", "sortColumns": side, "source": "WEB", "client": "WEB",
+            "filter": f'(TRADE_DATE=\'{day}\')(SECURITY_CODE="{code[2:]}")'}, fetch)
+        if any(r.get("SECURITY_CODE") != code[2:] or str(r.get("TRADE_DATE", ""))[:10] != day for r in result["rows"]):
+            raise ValueError("lhb_detail_filter_not_respected")
+        rows += result["rows"]; receipts += result["receipts"]
+    result = seat_proxy(rows, code, day)
+    if not result["seats"]:
+        raise ValueError("lhb_listed_but_no_usable_seats")
+    result.update(provenance=receipts, available_at=max(r["retrieved_at"] for r in receipts), published_at=None)
+    return result
+
+
+def _full_context(membership, histories, anchor_day, at):
+    """Source membership is complete; ranking denominator is its frozen-mainboard projection."""
+    board, members = membership["board"], membership["target_members"]
+    proof = {"context_id": board["id"], "name": board["name"], "kind": board["kind"], "scope": board["scope"],
+             "source_total": membership["source_total"], "source_membership_complete": True,
+             "target_members": members, "target_member_count": len(members),
+             "outside_universe_mainboard": membership["outside_universe_mainboard"],
+             "non_mainboard_count": membership["non_mainboard_count"],
+             "membership_refs": [r["raw_sha256"] for r in membership["receipts"]],
+             "data_day": anchor_day, "history_refs": {}, "missing_history": [], "insufficient_60d": []}
+    eligible_history = {}
+    for code in members:
+        result = histories.get("history:" + code)
+        if not result or result["status"] != "ok":
+            proof["missing_history"].append(code); continue
+        rows, receipt = result["value"]
+        proof["history_refs"][code] = receipt["raw_sha256"]
+        if not rows or rows[-1]["date"] != anchor_day or len(rows) < 6:
+            proof["missing_history"].append(code); continue
+        eligible_history[code] = (rows, receipt)
+        if len(rows) < 61:proof["insufficient_60d"].append(code)
+    proof["mainline_input_complete"] = bool(anchor_day and len(members) >= 5 and not proof["missing_history"])
+    proof["core_input_complete"] = proof["mainline_input_complete"] and not proof["insufficient_60d"]
+    proof["proof_sha256"] = _sha(_json_bytes(proof))
+    if not proof["mainline_input_complete"]:
+        return [], proof
+    histories_only = [rows for rows, _ in eligible_history.values()]
+    r1 = [rows[-1]["close"] / rows[-2]["close"] - 1 for rows in histories_only]
+    r5 = statistics.median(rows[-1]["close"] / rows[-6]["close"] - 1 for rows in histories_only)
+    breadth = sum(x > 0 for x in r1) / len(r1)
+    mainline = statistics.median(r1) >= .01 and r5 > 0 and breadth >= .6
+    r20 = statistics.median(rows[-1]["close"] / rows[-21]["close"] - 1 for rows in histories_only) if proof["core_input_complete"] else None
+    comparison = [{"code": code, "f24": (rows[-1]["close"] / rows[-61]["close"] - 1) * 100}
+                  for code, (rows, _) in eligible_history.items()] if proof["core_input_complete"] else []
+    records = []
+    source_at = datetime.fromisoformat(anchor_day).replace(hour=15, tzinfo=CN_TZ)
+    for code, (rows, receipt) in eligible_history.items():
+        common = membership["receipts"][:2] + [receipt]
+        message = (f"{board['scope']} {board['name']}：完整源成分{membership['source_total']}，固定主板投影{len(members)}；"
+                   f"完成日{anchor_day}涨幅中位{statistics.median(r1):.2%}、5日中位{r5:.2%}、上涨比{breadth:.1%}。"
+                   f"{'满足' if mainline else '不满足'}主线规则；不是官方主线认定。")
+        record = _record(code, "mainline", message, source_at, common, at, value=mainline, context=board["id"])
+        candidates = [record] if record else []
+        if proof["core_input_complete"]:
+            member = next(r for r in comparison if r["code"] == code)
+            signal = core_signal(member, comparison, rows, {"return20": r20})
+            message = (f"{board['name']}完整主板投影{len(members)}：60日排名{signal['rank60']}/{signal['rank_denominator']}，"
+                       f"本股20日{signal['return20']:.2%}/成分中位{r20:.2%}；{'满足' if signal['eligible'] else '不满足'}核心规则。")
+            record = _record(code, "core", message, source_at, common, at, value=signal["eligible"], context=board["id"])
+            if record:candidates.append(record)
+            if signal["cooling_evaluated"]:
+                message = (f"{board['name']}同一主板核心规则；较10日收盘高点{signal['drawdown_from10close']:.2%}，"
+                           f"3日/前10日均量{signal['volume3_prior10']:.2f}；{'满足' if signal['cooling'] else '不满足'}核心缩量回调/MA20条件。")
+                record = _record(code, "cooling", message, source_at, common, at, value=signal["cooling"], context=board["id"])
+                if record:candidates.append(record)
+        for record in candidates:
+            record["provenance"].update(rule_version=FULL_VERSION, context_evidence_sha256=proof["proof_sha256"],
+                                        method="完整新浪分类成分的固定沪深主板投影；共享同一已完成日线时点；规则推断")
+        records += candidates
+    return records, proof
+
+
+def collect_full(snapshot, asof=None, *, run_id=None, max_workers=3, budget_seconds=900, progress=None):
+    """Account for every supplied mainboard code; source gaps never count as qualified coverage.
+
+    Call again with the same run_id (and no new asof) to resume. Persist the whole
+    AQ5_DATA/decision-public/emotion tree between jobs. Only one job owns a run_id.
+    """
+    run = _FullRun(snapshot, asof, run_id, max_workers, budget_seconds, progress)
+    at, codes = run.at, set(run.rows)
+    initial = run.jobs({"catalog:industry": lambda: _full_catalog("industry", run.fetch),
+                        "catalog:concept": lambda: _full_catalog("concept", run.fetch),
+                        "lhb:list": lambda: _full_lhb_listing(at, run.fetch)})
+    sources, all_tasks, boards = {}, dict(initial), []
+    def remember(receipts):
+        for receipt in receipts:sources[receipt["raw_sha256"]] = receipt
+    catalog_status = {}
+    for kind in ("industry", "concept"):
+        result = initial.get("catalog:" + kind)
+        catalog_status[kind] = result["status"] if result else "pending"
+        if result and result["status"] == "ok":
+            boards += result["value"]["boards"]; remember(result["value"]["receipts"])
+    members = run.jobs({"members:" + b["id"]: (lambda board=b: _full_members(board, run.fetch)) for b in boards}, stage="memberships")
+    all_tasks.update(members)
+    membership_by_code = {code: {"industry": [], "concept": []} for code in codes}
+    qualified_members, source_extras = {}, set()
+    for board in boards:
+        result = members.get("members:" + board["id"])
+        if not result or result["status"] != "ok":continue
+        value = dict(result["value"])
+        value["target_members"] = sorted(codes.intersection(value["mainboard_members"]))
+        value["outside_universe_mainboard"] = sorted(set(value["mainboard_members"]) - codes)
+        source_extras.update(value["outside_universe_mainboard"])
+        qualified_members[board["id"]] = value; remember(value["receipts"])
+        for code in value["target_members"]:membership_by_code[code][board["kind"]].append(board["id"])
+    # Every target gets a history check, including new listings, ST, halted and unmapped names.
+    histories = run.jobs({"history:" + code: (lambda c=code: _history(c, at, fetch=run.fetch, minimum_bars=0, max_stale_days=None))
+                          for code in ["sh000300", *sorted(codes)]}, stage="daily_histories")
+    all_tasks.update(histories)
+    anchor = histories.get("history:sh000300")
+    anchor_day = anchor["value"][0][-1]["date"] if anchor and anchor["status"] == "ok" and anchor["value"][0] else None
+    anchor_age = (at.date()-datetime.fromisoformat(anchor_day).date()).days if anchor_day else None
+    anchor_qualified = anchor_age is not None and 0 <= anchor_age <= 5
+    for result in histories.values():
+        if result and result["status"] == "ok":remember([result["value"][1]])
+    context_proofs, records = {}, []
+    for key, membership in qualified_members.items():
+        candidates, proof = _full_context(membership, histories, anchor_day if anchor_qualified else None, at)
+        context_proofs[key] = proof; records += candidates
+    selected, alternatives = select_context(records)
+    listing = initial.get("lhb:list")
+    lhb_complete = bool(listing and listing["status"] == "ok")
+    pairs, lhb_rows = set(), []
+    if lhb_complete:
+        remember(listing["value"]["receipts"])
+        for row in listing["value"]["rows"]:
+            code = ("sh" if str(row.get("SECURITY_CODE", "")).startswith("6") else "sz") + str(row.get("SECURITY_CODE", ""))
+            day = str(row.get("TRADE_DATE", ""))[:10]
+            try:visible = datetime.fromisoformat(day).replace(hour=15, tzinfo=CN_TZ) <= at
+            except ValueError:visible = False
+            if code in codes and visible:
+                pairs.add((code, day))
+                lhb_rows.append({"code": code, "trade_date": day, "trade_id": row.get("TRADE_ID"), "reason": row.get("EXPLANATION")})
+    seats = run.jobs({"lhb:" + code + ":" + day: (lambda c=code, d=day: _full_lhb_seats(c, d, run.fetch)) for code, day in sorted(pairs)}, stage="lhb_details")
+    all_tasks.update(seats)
+    latest_dates = {}
+    for code, day in pairs:latest_dates[code] = max(latest_dates.get(code, day), day)
+    proxies, lhb_events = [], {}
+    for (code, day) in sorted(pairs):
+        result = seats.get("lhb:" + code + ":" + day)
+        key = code + ":" + day
+        lhb_events[key] = {"code": code, "trade_date": day, "status": result["status"] if result else "pending"}
+        if result and result["status"] == "ok":
+            proxy = result["value"]; remember(proxy["provenance"])
+            lhb_events[key].update(seat_rows=len(proxy["seats"]), raw_refs=[r["raw_sha256"] for r in proxy["provenance"]])
+            if day == latest_dates[code]:proxies.append(proxy)
+        elif result:lhb_events[key]["reason"] = result["reason"]
+    chosen_by_code = {}
+    for record in selected:chosen_by_code.setdefault(record["code"], {})[record["kind"]] = record["value"]
+    source_kind_complete = {kind: catalog_status[kind] == "ok" and all(
+        members.get("members:" + b["id"]) and members["members:" + b["id"]]["status"] == "ok"
+        for b in boards if b["kind"] == kind) for kind in ("industry", "concept")}
+    outcomes = {}
+    for code, row in sorted(run.rows.items()):
+        h = histories.get("history:" + code)
+        history_state, bars, data_day = "pending", None, None
+        if h and h["status"] == "error":history_state = "fetch_or_parse_failed"
+        elif h and h["status"] == "ok":
+            rows = h["value"][0]; bars = len(rows); data_day = rows[-1]["date"] if rows else None
+            history_state = ("insufficient_history" if bars < 61 else "benchmark_stale_or_unavailable" if not anchor_qualified
+                             else "data_day_mismatch" if data_day != anchor_day else "qualified")
+        mapping = membership_by_code[code]
+        claim = chosen_by_code.get(code, {})
+        events = [lhb_events[code + ":" + day]["status"] for c, day in pairs if c == code]
+        lhb_state = ("not_listed_in_complete_window" if lhb_complete and not events else
+                     "listed_details_complete" if events and all(x == "ok" for x in events) else
+                     "listed_details_pending" if "pending" in events else
+                     "listed_details_failed" if events else "listing_pending_or_failed")
+        outcomes[code] = {"name": row.get("name"), "membership_covered": bool(mapping["industry"] or mapping["concept"]),
+            "industry_contexts": mapping["industry"], "concept_contexts": mapping["concept"],
+            "industry_mapping": "mapped" if mapping["industry"] else "unmapped" if source_kind_complete["industry"] else "source_incomplete",
+            "concept_mapping": "mapped" if mapping["concept"] else "unmapped" if source_kind_complete["concept"] else "source_incomplete",
+            "official_industry": {k: row.get(k) for k in ("industry", "industry_code", "industry_scheme", "industry_source", "directory_date")},
+            "is_st_name_marker": row.get("is_st_name_marker", row.get("st_name_marker", "ST" in str(row.get("name", "")).upper())),
+            "suspended": row.get("suspended"), "history": history_state, "history_bars": bars, "data_day": data_day,
+            "mainline": claim.get("mainline", "UNKNOWN"), "core": claim.get("core", "UNKNOWN"), "cooling": claim.get("cooling", "UNKNOWN"),
+            "lhb": lhb_state, "lhb_event_count": len(events), "hot_money_identity": "UNKNOWN"}
+        if h and h["status"] == "error":outcomes[code]["history_reason"] = h["reason"]
+    pending = [key for key, result in all_tasks.items() if result is None]
+    failures = [{"task": key, "reason": result["reason"], "attempts": result["attempts"]}
+                for key, result in all_tasks.items() if result and result["status"] == "error"]
+    retryable = [f["task"] for f in failures if f["attempts"] < 2]
+    unresolved = [code for code, o in outcomes.items() if o["history"] != "qualified" or not o["membership_covered"]
+                  or any(o[k] == "UNKNOWN" for k in ("mainline", "core", "cooling"))
+                  or o["lhb"] not in ("listed_details_complete", "not_listed_in_complete_window")]
+    status = "incomplete" if pending or retryable else "complete_with_gaps" if failures or unresolved or run.invalid or not all(source_kind_complete.values()) else "complete"
+    result = {"version": FULL_VERSION, "run_id": run.id, "asof": at.isoformat(), "data_day": anchor_day,
+        "completed_at": now().isoformat(), "status": status, "records": selected, "proxy_metrics": proxies,
+        "coverage": {"scope": "all_supplied_mainboard_codes", "input_rows": run.manifest["input_rows"], "universe_count": len(codes),
+            "accounted_count": len(outcomes), "membership_covered": sum(o["membership_covered"] for o in outcomes.values()),
+            "history_checked": sum(o["history"] != "pending" for o in outcomes.values()),
+            "history_qualified": sum(o["history"] == "qualified" for o in outcomes.values()),
+            "evidence_evaluated_count": len(chosen_by_code), "source_boards": len(boards), "source_memberships_complete": len(qualified_members),
+            "source_kind_complete": source_kind_complete, "catalog_status": catalog_status,
+            "lhb_list_complete": lhb_complete, "lhb_list_rows": listing["value"]["row_count"] if lhb_complete else None,
+            "lhb_window": listing["value"].get("window") if lhb_complete else None,
+            "lhb_pairs": len(pairs), "lhb_details_complete": sum(x["status"] == "ok" for x in lhb_events.values()),
+            "unresolved_count": len(unresolved), "data_complete": status == "complete",
+            "anchor_age_calendar_days": anchor_age, "anchor_qualified": anchor_qualified},
+        "code_outcomes": outcomes, "unmapped_codes": [c for c, o in outcomes.items() if not o["membership_covered"]],
+        "unresolved_codes": unresolved, "source_mainboard_outside_universe": sorted(source_extras),
+        "invalid_input_rows": run.invalid, "contexts": context_proofs, "selected_contexts": alternatives,
+        "lhb_listing": lhb_rows, "lhb_events": lhb_events, "sources": list(sources.values()), "failures": failures,
+        "pending_tasks": pending, "retryable_tasks": retryable,
+        "resume": {"run_id": run.id, "checkpoint": str(run.root), "same_asof_and_universe_required": True},
+        "full_market_screen": False, "all_mainboard_requested": True,
+        "note": "全部输入主板代码逐项留状态，ST/停牌不删分母；全部可用新浪行业/概念分类，不代表穷尽市场题材。仅使用同一完成日多日资料；缺口UNKNOWN，不把遍历完成当数据完整。"}
+    _save_json(run.root / "result.json.gz", result, compressed=True)
+    return result

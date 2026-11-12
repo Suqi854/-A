@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const { gzipSync } = require('node:zlib');
 
 const source = readFileSync(path.join(__dirname, '../web/js/app.js'), 'utf8');
-const functions = ['sj', 'staticApi', 'updateMon', 'poll', 'privateStatus', 'refreshPrivate', 'unlockPrivate', 'autoUnlock', 'loadResearchPreview', 'researchRun', 'staticQuotes', 'quoteValues'];
+const functions = ['sj', 'staticApi', 'updateMon', 'poll', 'privateStatus', 'refreshPrivate', 'unlockPrivate', 'autoUnlock', 'loadResearchPreview', 'researchRun', 'staticQuotes', 'quoteValues', 'researchProgressText', 'renderResearchPreview', 'stopResearchProgress', 'readResearchStatus', 'watchResearchProgress'];
 const app = functions.map(name => source.match(new RegExp(`^  (?:async )?function ${name}\\(.*?^  }`, 'ms'))?.[0] || '').join('\n');
 const live = source.slice(source.indexOf('  const LIVE_AGE ='), source.indexOf('  // ================================================================== F1 监控'));
 const formatters = source.slice(source.indexOf('  const esc ='), source.indexOf('  const S ='));
@@ -401,7 +401,7 @@ test('forecast route passes the selected stock and existing app services to its 
   let options;
   const noOp=()=>{},node={classList:{toggle(){}},dataset:{},id:'p-forecast'};
   const context=vm.createContext({S:{},STATIC:true,$:()=>({}),$$:()=>[node],normCode:x=>'sh'+x,
-    window:{ForecastUI:{render:o=>{options=o;}}},api:noOp,showUnlock:noOp,go:noOp,requestForecast:noOp,
+    window:{ForecastUI:{render:o=>{options=o;}}},api:noOp,showUnlock:noOp,go:noOp,requestForecast:noOp,stopResearchProgress:noOp,
     renderMon:noOp,renderPick:noOp,renderAnly:noOp,renderSim:noOp,renderLearn:noOp,renderBt:noOp,renderLog:noOp,renderSet:noOp});
   vm.runInContext(functionSource('show'),context);context.show('forecast','600000');
   assert.equal(options.code,'sh600000');

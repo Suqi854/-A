@@ -1,0 +1,42 @@
+name: 全沪深主板研究
+run-name: 全沪深主板研究 ${{ inputs.build_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: 独立研究状态通道提供的32位任务编号
+        required: true
+        type: string
+permissions:
+  contents: write
+concurrency:
+  group: aq5-full-research
+  cancel-in-progress: false
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 完整目录与两路线采集（独立研究快照，不启动交易）
+        working-directory: engine
+        env:
+          AQ5_DATA: ${{ runner.temp }}/aq5-full-research
+          AQ5_FULL_RESEARCH: '1'
+          AQ5_RESEARCH_BUILD_ID: ${{ inputs.build_id }}
+          AQ5_RESEARCH_BRANCH: research-cache
+          AQ5_CLOUD: '1'
+          AQ5_MOCK: '0'
+          AQ5_KEY: ${{ secrets.AQ5_KEY }}
+          AQ5_RELAY: ${{ vars.AQ5_RELAY || 'https://aq5-relay.phehwm62784.workers.dev' }}
+          GITHUB_TOKEN: ${{ github.token }}
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONUNBUFFERED: '1'
+        run: python -B -m aq5.decision_full

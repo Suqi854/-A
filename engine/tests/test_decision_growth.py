@@ -119,7 +119,7 @@ class GrowthTests(unittest.TestCase):
         def fetch(url):
             if url.startswith(g.FIN_BASE):
                 return json.dumps({'success':True,'result':{'data':rows(),'count':len(rows()),'pages':1}}).encode()
-            return json.dumps({'data':{'list':announcements()}}).encode()
+            return json.dumps({'success':1,'data':{'list':announcements(),'total_hits':1,'page_index':1}}).encode()
         with tempfile.TemporaryDirectory(dir=os.environ['AQ5_TEST_DATA']) as folder, patch.object(g,'now',return_value=AT):
             result=g.collect(['sh600000','sz000001'],fetcher=fetch,storage_dir=folder)
             self.assertEqual(result['coverage']['growth'],1)
@@ -142,6 +142,101 @@ class GrowthTests(unittest.TestCase):
             result=g.collect(['sh600000'],fetcher=lambda _:payload,storage_dir=folder)
             self.assertEqual(result['records'],[])
             self.assertEqual(result['failures'][0]['reason'],'financial_batch_incomplete')
+
+    def test_financial_sector_same_basis_fallback(self):
+        data=rows()
+        for row in data:
+            row.update(INDUSTRY_NAME='银行Ⅱ',OPERATE_INCOME=row['TOTAL_OPERATE_INCOME'])
+        data[0]['TOTAL_OPERATE_INCOME']=None
+        result=self.growth(data)
+        self.assertEqual(result['provenance']['revenue_field'],'OPERATE_INCOME')
+        self.assertAlmostEqual(result['metrics']['revenue_yoy'],50)
+        data[1]['OPERATE_INCOME']+=10
+        with self.assertRaisesRegex(ValueError,'inconsistent_revenue_basis'):self.growth(data)
+
+    def test_nonfinancial_revenue_subcomponent_not_fallback(self):
+        data=rows()
+        for row in data:row.update(INDUSTRY_NAME='白酒Ⅱ',OPERATE_INCOME=row['TOTAL_OPERATE_INCOME'])
+        data[0]['TOTAL_OPERATE_INCOME']=None
+        with self.assertRaisesRegex(ValueError,'inconsistent_revenue_basis'):self.growth(data)
+
+    def test_all_status_denominators_and_nonpositive_base_nonapplicable(self):
+        bad=rows()
+        for row in bad:row['SECURITY_CODE']='000001'
+        bad[-1]['PARENT_NETPROFIT']=20
+        negative=rows()
+        for row in negative:row['SECURITY_CODE']='000002'
+        negative[0]['PARENT_NETPROFIT']=35
+        data=rows()+bad+negative
+        def fetch(url):
+            if url.startswith(g.FIN_BASE):return json.dumps({'success':True,'result':{'data':data,'count':len(data),'pages':1}}).encode()
+            return json.dumps({'success':1,'data':{'list':[],'total_hits':0,'page_index':1}}).encode()
+        with tempfile.TemporaryDirectory(dir=os.environ['AQ5_TEST_DATA']) as folder,patch.object(g,'now',return_value=AT):
+            result=g.collect(['sh600000','sz000001','sz000002','sh600999'],fetcher=fetch,storage_dir=folder)
+        coverage=result['coverage'];self.assertEqual(coverage['attempted'],4)
+        self.assertEqual(coverage['financial_fetched'],3)
+        self.assertEqual((coverage['qualified'],coverage['nonapplicable'],coverage['missing']),(2,1,1))
+        self.assertEqual(coverage['catalyst_missing'],1)
+        self.assertEqual(result['status_by_code']['sz000002']['catalyst']['status'],'not_required')
+        self.assertFalse(any(f['reason']=='nonpositive_yoy_base' for f in result['failures']))
+
+    def test_full_scope_above_100_has_one_status_per_code(self):
+        codes=['sh'+str(600000+i) for i in range(121)]
+        payload=json.dumps({'success':False,'message':'NO_DATA','result':None}).encode()
+        progress=[]
+        with tempfile.TemporaryDirectory(dir=os.environ['AQ5_TEST_DATA']) as folder,patch.object(g,'now',return_value=AT):
+            result=g.collect(codes,fetcher=lambda _:payload,storage_dir=folder,progress=progress.append)
+        self.assertEqual(set(result['status_by_code']),set(codes))
+        self.assertEqual(result['coverage']['missing'],121)
+        self.assertEqual(result['coverage']['qualified'],0)
+        self.assertEqual(progress[-1]['completed'],121)
+
+    def test_resume_preserves_original_observation_and_avoids_network(self):
+        def fetch(url):
+            if url.startswith(g.FIN_BASE):return json.dumps({'success':True,'result':{'data':rows(),'count':6,'pages':1}}).encode()
+            return json.dumps({'success':1,'data':{'list':announcements(),'total_hits':1,'page_index':1}}).encode()
+        with tempfile.TemporaryDirectory(dir=os.environ['AQ5_TEST_DATA']) as folder:
+            with patch.object(g,'now',return_value=AT):first=g.collect(['sh600000'],fetcher=fetch,storage_dir=folder)
+            with patch.object(g,'now',return_value=AT+timedelta(hours=1)):
+                second=g.collect(['sh600000'],fetcher=lambda _:self.fail('unexpected refetch'),storage_dir=folder)
+            self.assertEqual(second['coverage']['cache_hits'],2)
+            self.assertEqual(second['records'][0]['available_at'],first['records'][0]['available_at'])
+            raw=Path(second['sources'][0]['raw_path']);raw.write_bytes(b'corrupt')
+            calls=[]
+            with patch.object(g,'now',return_value=AT+timedelta(hours=2)):
+                third=g.collect(['sh600000'],fetcher=lambda url:(calls.append(url),fetch(url))[1],storage_dir=folder)
+            self.assertTrue(calls);self.assertEqual(third['coverage']['qualified'],1)
+
+    def test_financial_and_announcement_pagination_complete(self):
+        from urllib.parse import parse_qs,urlsplit
+        data=rows()
+        def fetch(url):
+            query=parse_qs(urlsplit(url).query)
+            if url.startswith(g.FIN_BASE):
+                page=int(query['pageNumber'][0]);part=data[:3] if page==1 else data[3:]
+                return json.dumps({'success':True,'result':{'data':part,'count':6,'pages':2}}).encode()
+            page=int(query['page_index'][0]);part=announcements()
+            if page==1:part=[{**part[0],'title':'样例董事会决议','art_code':'AN20261030999'}]
+            return json.dumps({'success':1,'data':{'list':part,'total_hits':2,'page_index':page}}).encode()
+        with tempfile.TemporaryDirectory(dir=os.environ['AQ5_TEST_DATA']) as folder,patch.object(g,'now',return_value=AT):
+            result=g.collect(['sh600000'],fetcher=fetch,storage_dir=folder)
+        self.assertEqual(result['coverage']['qualified'],1);self.assertEqual(result['coverage']['catalyst'],1)
+        self.assertEqual(len(result['records'][0]['provenance']['raw_sha256s']),2)
+
+    def test_no_data_not_cached_as_success(self):
+        calls=[];payload=json.dumps({'success':True,'result':{'data':[],'count':0,'pages':0}}).encode()
+        with tempfile.TemporaryDirectory(dir=os.environ['AQ5_TEST_DATA']) as folder,patch.object(g,'now',return_value=AT):
+            for _ in range(2):
+                result=g.collect(['sh600000'],fetcher=lambda url:(calls.append(url),payload)[1],storage_dir=folder)
+                self.assertEqual(result['coverage']['missing'],1)
+        self.assertEqual(len(calls),2)
+
+    def test_malformed_provider_schema_is_per_code_missing(self):
+        for payload in ([], {'success':True,'result':[]}, {'success':True,'result':{'data':['bad'],'count':1,'pages':1}}):
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory(dir=os.environ['AQ5_TEST_DATA']) as folder:
+                result=g.collect(['sh600000'],fetcher=lambda _:json.dumps(payload).encode(),storage_dir=folder)
+                self.assertEqual(result['coverage']['missing'],1)
+                self.assertEqual(len(result['status_by_code']),1)
 
 
 if __name__=='__main__':unittest.main()

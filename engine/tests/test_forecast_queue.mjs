@@ -166,5 +166,18 @@ try{
   assert.equal(mem.get('target-head:sh600000:emotion').id,proposal);
   assert.equal([...mem.keys()].filter(x=>x.startsWith('target-history:')).length,1);
   assert.equal([...mem.keys()].filter(x=>x.startsWith('request:')).length,0);
-  console.log('forecast/research queue: auth, kind isolation, CAS target history, encryption, leases, chunks, expiry and limits passed');
+  ({request,mem}=setup());
+  const ordinary=await(await request('request','POST',{kind:'screen'})).json();
+  const readonly=await(await request('request','POST',{kind:'screen',read_only:true,cache_key:'a'.repeat(32)})).json();
+  assert.notEqual(ordinary.id,readonly.id);
+  const sameRead=await(await request('request','POST',{kind:'screen',read_only:true,cache_key:'a'.repeat(32)})).json();
+  assert.equal(sameRead.id,readonly.id);
+  const nextBuild=await(await request('request','POST',{kind:'screen',read_only:true,cache_key:'b'.repeat(32)})).json();
+  assert.notEqual(nextBuild.id,readonly.id);
+  const readWork=(await(await request('poll?protocol=research-v1','GET',undefined,'publisher')).json()).requests;
+  assert.equal(readWork.find(x=>x.id===readonly.id).read_only,true);
+  assert.equal(readWork.find(x=>x.id===readonly.id).cache_key,'a'.repeat(32));
+  assert.equal((await request('request','POST',{kind:'screen',read_only:true})).status,400);
+  assert.equal((await request('request','POST',{kind:'screen',read_only:'true',cache_key:'a'.repeat(32)})).status,400);
+  console.log('forecast/research queue: auth, kind isolation, CAS target history, read-only summary refresh, encryption, leases, chunks, expiry and limits passed');
 }finally{globalThis.fetch=originalFetch;Date.now=originalNow;}

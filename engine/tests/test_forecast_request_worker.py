@@ -56,6 +56,16 @@ class WorkerTest(unittest.TestCase):
         self.assertNotIn('target_update',result)
 
     @patch.dict(os.environ, {'AQ5_FORECAST_REQUEST':'1'})
+    def test_read_only_screen_passes_no_start_contract_to_handler(self):
+        calls=[]
+        def screen(*,read_only=False):
+            calls.append(read_only)
+            return {'kind':'research_preview','routes':{'value':{},'emotion':{}}}
+        item={'id':'a'*32,'claim':'b'*32,'kind':'screen','code':None,'read_only':True,'cache_key':'c'*32}
+        result=worker.fulfill(item,'password',None,context={'targets':[]},handlers={'screen':screen})
+        self.assertEqual(calls,[True]);self.assertEqual(worker._decrypt(result,'password')['kind'],'screen')
+
+    @patch.dict(os.environ, {'AQ5_FORECAST_REQUEST':'1'})
     def test_confirmation_uses_original_ciphertext_and_refreshes_before_confirm(self):
         from aq5 import db, decision
         db.init()

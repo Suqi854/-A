@@ -1,4 +1,5 @@
 import { forecastFetch } from './forecast-requests.js';
+import { fullResearchFetch } from './full-research.js';
 // A bounded, encrypted live channel. No personal plaintext is accepted in public data.
 const HEADERS = { 'cache-control': 'no-store', 'access-control-allow-origin': '*', 'x-content-type-options': 'nosniff' };
 const reply = (body, status = 200) => Response.json(body, { status, headers: HEADERS });
@@ -40,6 +41,7 @@ export class LiveSnapshot {
   async fetch(req) {
     const url = new URL(req.url);
     if (url.pathname.startsWith('/__aq5/forecast/')) return forecastFetch(req, this.ctx, this.env);
+    if (url.pathname.startsWith('/__aq5/research/')) return fullResearchFetch(req, this.ctx, this.env);
     if (req.method === 'DELETE') { await this.ctx.storage.delete('snapshot'); return reply({ ok: true }); }
     if (req.method === 'POST') {
       if (url.pathname !== '/__aq5/live') return reply({ error: 'path' }, 404);

@@ -28,6 +28,11 @@ test('screen requests no dummy symbol and keeps both route contracts',async()=>{
  assert.equal((await h.run()).kind,'research_preview');
  assert.deepEqual(JSON.parse(h.calls[0].opt.body),{kind:'screen'});assert.equal(h.calls.length,2);
 });
+test('terminal screen refresh is read-only and scoped to the completed build cache key',async()=>{
+ const h=harness({kind:'screen',data:{kind:'screen',routes:{value:{},emotion:{}}}});
+ await h.run({read_only:true,cache_key:id});
+ assert.deepEqual(JSON.parse(h.calls[0].opt.body),{kind:'screen',read_only:true,cache_key:id});
+});
 test('confirmation only sends identifiers, includes source request and clears old analysis cache',async()=>{
  const h=harness({kind:'confirm',data:{kind:'confirm',code,route:'emotion',confirmed_target:{id:proposal}}});
  h.S.decisionResults={[code]:{old:true}};
