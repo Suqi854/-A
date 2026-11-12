@@ -25,6 +25,23 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(worker.run(transport=transport,analyze=lambda code:{},research=True),0)
         self.assertEqual(calls,['poll?protocol=research-v1'])
 
+    @patch.dict(os.environ, {'AQ5_KEY':'test-password','AQ5_RELAY':'https://example.test','AQ5_FORECAST_REQUEST':'1'})
+    def test_worker_only_drains_its_dispatched_request_and_skips_unneeded_models(self):
+        request_id = 'a' * 32
+        item = {'id': request_id, 'claim': 'b' * 32, 'kind': 'analysis', 'code': 'sh600000'}
+        calls = []
+        def transport(relay, key, action, body=None):
+            calls.append(action)
+            if action.startswith('poll'):
+                return {'requests': [item]}
+            return {}
+        with patch.object(worker, 'fulfill', return_value={}) as fulfill:
+            count = worker.run(transport=transport, analyze=lambda code: {}, research=True,
+                               request_id=request_id, model_loader=lambda: calls.append('models'))
+        self.assertEqual(count, 1)
+        self.assertEqual(calls, ['poll?protocol=research-v1&id='+request_id, 'context?id='+request_id, 'complete'])
+        fulfill.assert_called_once()
+
     @patch.dict(os.environ, {'AQ5_FORECAST_REQUEST':'1'})
     def test_research_analysis_restores_only_encrypted_target_heads(self):
         from aq5 import db, decision

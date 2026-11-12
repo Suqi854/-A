@@ -254,7 +254,8 @@ def export(full: bool = True) -> dict:
     _site(root)
     files = []
     ov = public_overview()
-    files += ["latest.json", "runs.json", "quotes.json"]
+    files += ["latest.json", "runs.json", "quotes.json", "ai.json"]
+    _w(d / "ai.json", _ai_view())
     runs = _run_assets(d, ov.get("last_run"), full)
     _quote_assets(d, runs, ov)
     try:
@@ -270,7 +271,6 @@ def export(full: bool = True) -> dict:
     if full:
         from . import research
         _w(d / "research.json", research.preview())
-        _w(d / "ai.json", _ai_view())
         _w(d / "learn.json", api_learn({}))
         _w(d / "strategies.json", api_strategies({}))
         try:
@@ -292,7 +292,7 @@ def export(full: bool = True) -> dict:
                                  "risk": s["risk"], "emotions": sim.EMOTIONS, "static": True,
                                  "ai": {"provider": s.get("ai", {}).get("provider"), "model": s.get("ai", {}).get("model")},
                                  "look": s.get("look") or {}})  # 外观（皮肤等）各端同步，不含个人数据
-        files += ["ai.json", "learn.json"]
+        files.append("learn.json")
     generated = _analysis_assets(d, ov.get("last_run"), full, runs)
     if generated:
         files.append(f"analysis/*.json({generated})")

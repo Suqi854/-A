@@ -73,6 +73,33 @@ test('locked overview omits plan, unlocked overview and monitor show its private
   assert.equal((await h.context.staticApi('overview')).accounts.plan, undefined);
 });
 
+test('forecast route opens before the overview returns', async () => {
+  const boot = source.match(/^  async function boot\(.*?^  }/ms)[0];
+  const h = harness();
+  const shows = [];
+  Object.assign(h.context, {
+    initAssistant() {},
+    location: { hash: '#forecast/sh600522' },
+    api: async () => ({}),
+    syncLook() {},
+    show(...args) { shows.push(args); },
+    poll: () => new Promise(() => {}),
+  });
+  vm.runInContext(boot, h.context);
+  await h.context.boot();
+  assert.deepEqual(shows, [['forecast', 'sh600522']]);
+});
+
+test('open cloud AI simulation refreshes when its public snapshot advances', async () => {
+  const h = harness({ snapshot: overview(newTime) });
+  h.S.acct = 'ai';
+  h.S.ov = overview(oldTime);
+  await h.context.poll();
+  assert.equal(h.renders(), 1);
+  await h.context.poll();
+  assert.equal(h.renders(), 1);
+});
+
 test('published trading-session snapshot does not claim the market is currently trading', () => {
   const body = source.match(/^  function header\(.*?^  }/ms)[0];
   for (const isStatic of [true, false]) {

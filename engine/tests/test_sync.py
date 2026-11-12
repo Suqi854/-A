@@ -48,8 +48,13 @@ quote_snap = [
     {"code": "sh605998", "price": None, "pct": None},
     {"code": "sh605999", "price": 30, "pct": 1},
 ]
+sim.place("ai", codes[0], "buy", 100, qd=market.quotes([codes[0]])[codes[0]])
 with patch.object(market, "snapshot", return_value=quote_snap), patch.object(market, "quotes_recent", return_value={}):
-    publisher.export(full=False)
+    delta = publisher.export(full=False)
+assert "ai.json" in delta["files"]
+ai_snapshot = json.loads((d / "ai.json").read_text("utf-8"))
+assert ai_snapshot["trades"][0]["code"] == codes[0]
+assert "order_id" not in ai_snapshot["trades"][0]
 
 latest = json.loads((d / "latest.json").read_text("utf-8"))
 assert latest["last_run"]["id"] == run_id

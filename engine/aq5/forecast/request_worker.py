@@ -8,6 +8,7 @@ import hmac
 import io
 import json
 import os
+import re
 import sqlite3
 import time
 import urllib.error
@@ -178,7 +179,8 @@ def complete(relay, key, payload, transport, wait):
         wait(2 ** attempt)
 
 
-def run(*, budget=900, transport=exchange, analyze=None, clock=time.monotonic, wait=time.sleep, research=False, model_loader=None):
+def run(*, budget=900, transport=exchange, analyze=None, clock=time.monotonic, wait=time.sleep, research=False,
+        model_loader=None, request_id=''):
     require_isolated_mode()
     password = os.environ.get('AQ5_KEY', '')
     relay = os.environ.get('AQ5_RELAY', '')
@@ -188,15 +190,23 @@ def run(*, budget=900, transport=exchange, analyze=None, clock=time.monotonic, w
     if analyze is None:
         from .service import analyze
     key = hmac.new(password.encode(), b'aq5-live-publish-v1', hashlib.sha256).hexdigest()
+    poll_action = 'poll?protocol=research-v1' if research else 'poll'
+    if request_id:
+        if not re.fullmatch(r'[a-f0-9]{32}', request_id):
+            raise ValueError('invalid cloud request ID')
+        poll_action += ('&' if research else '?') + 'id=' + request_id
+    max_requests = 1 if request_id else 20
     deadline, count, delivery_failures = clock() + budget, 0, 0
     models_loaded=False
-    while clock() < deadline and count < 20:
-        jobs = transport(relay, key, 'poll?protocol=research-v1' if research else 'poll').get('requests', [])
+    while clock() < deadline and count < max_requests:
+        jobs = transport(relay, key, poll_action).get('requests', [])
         if not jobs:
             break
+        if request_id and (len(jobs) != 1 or jobs[0].get('id') != request_id):
+            raise RuntimeError('cloud relay did not honor the requested job ID')
         for item in jobs:
             try:
-                if item.get('kind','forecast')!='screen' and model_loader is not None and not models_loaded:
+                if item.get('kind','forecast')=='forecast' and model_loader is not None and not models_loaded:
                     try:model_loader()
                     except Exception:print('Model snapshot unavailable; probabilities remain unverified.',flush=True)
                     models_loaded=True
@@ -221,9 +231,8 @@ def main():
     require_isolated_mode()
     from .. import db
     db.init()
-    # A full-market screen reads only its independent compact snapshot. It must
-    # not download the account-state bundle merely to access optional models.
-    run(research=True, model_loader=lambda:load_models(os.environ.get('AQ5_KEY','')))
+    run(research=True, model_loader=lambda:load_models(os.environ.get('AQ5_KEY','')),
+        request_id=os.environ.get('AQ5_FORECAST_REQUEST_ID',''))
 
 
 if __name__ == '__main__':

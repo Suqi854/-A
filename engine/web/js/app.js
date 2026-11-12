@@ -21,7 +21,7 @@
   if (STATIC) document.body.classList.add('static');
   const normCode = c => { c = String(c || '').trim().toLowerCase(); return /^\d{6}$/.test(c) ? (/^[65]/.test(c) ? 'sh' : 'sz') + c : c; };
   async function sj(file) {
-    const r = await fetch('data/' + file + '?t=' + Math.floor(Date.now() / 60000));
+    const r = await fetch('data/' + file + '?t=' + Math.floor(Date.now() / 60000), { signal: AbortSignal.timeout(10000) });
     if (!r.ok) throw new Error('公开数据里没有这项内容');
     return r.json();
   }
@@ -567,6 +567,9 @@
       const shown = displayOverview(ov); header(shown);
       if (S.page === 'mon') { updateMon(shown); drawLive(); }
       if (STATIC && !S.priv && !S.unlocking) autoUnlock(ov);
+      if (STATIC && S.page === 'sim' && S.acct === 'ai' && old?.time !== ov.time) {
+        await renderSim({ refresh: true });
+      }
       if (STATIC && S.page === 'sim' && S.acct === 'plan' && S.priv &&
           (old?.private_time !== ov.private_time || old?.private_refresh_failed !== ov.private_refresh_failed ||
             old?.private_pack_sha256 !== ov.private_pack_sha256)) {
@@ -1516,8 +1519,9 @@
 
   // ================================================================== F4 模拟盘
   const acctSeg = () => `<div class="seg rw pv" id="acctSeg"><button data-a="me" class="${S.acct === 'me' ? 'on' : ''}">我的模拟盘</button><button data-a="ai" class="${S.acct === 'ai' ? 'on' : ''}">AI自动盘</button>${STATIC && !S.priv ? '' : `<button data-a="plan" class="${S.acct === 'plan' ? 'on' : ''}">计划模拟</button>`}</div>`;
-  async function renderSim() {
+  async function renderSim({ refresh = false } = {}) {
     if (STATIC && !S.priv) S.acct = 'ai';
+    const acct = S.acct;
     let P = null;
     if (S.acct === 'plan') {
       P = await api('plan').catch(e => ({ error: e.message }));
@@ -1526,8 +1530,12 @@
       if (STATIC) S.planEdit = false;
       if (!P.exists || S.planEdit) return planSetup(P);
     }
-    const a = P ? P.account : await api('sim?acct=' + S.acct).catch(e => ({ error: e.message }));
-    if (a.error) { $('#p-sim').innerHTML = `<div class="empty">${esc(a.error)}</div>`; return; }
+    const a = P ? P.account : await api('sim?acct=' + acct).catch(e => ({ error: e.message }));
+    if (S.page !== 'sim' || S.acct !== acct) return;
+    if (a.error) {
+      if (!refresh) $('#p-sim').innerHTML = `<div class="empty">${esc(a.error)}</div>`;
+      return;
+    }
     const st = a.stats;
     $('#p-sim').innerHTML = `<div class="grid">
       <div class="panel c12"><div class="ph"><h3>SIM <small>模拟盘</small></h3><div class="r">${acctSeg()}
@@ -2281,6 +2289,12 @@
       if (!me.authorized) { showLogin(me); return; }
     }
     api('settings').then(s => { S.settings = s; syncLook(s.look); }).catch(() => { });
+    const [page, arg] = location.hash.slice(1).split('/');
+    if (STATIC && page === 'forecast') {
+      show(page, arg);
+      poll();
+      return;
+    }
     poll().then(() => { const [p, a] = location.hash.slice(1).split('/'); show(PAGES.includes(p) ? p : 'mon', a); });
   }
   boot();

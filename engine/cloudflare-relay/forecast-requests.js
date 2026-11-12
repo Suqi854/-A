@@ -60,12 +60,12 @@ async function cleanup(tx,now) {
   }
   return rows;
 }
-async function dispatch(env) {
+async function dispatch(env,id) {
   if(!env.GH_TOKEN)return false;
   try {
     const response=await fetch('https://api.github.com/repos/Suqi854/-A/actions/workflows/aq5-forecast-request.yml/dispatches',{
       method:'POST',headers:{'User-Agent':'aq5-relay','Accept':'application/vnd.github+json','Content-Type':'application/json',
-        'Authorization':'Bearer '+String(env.GH_TOKEN).trim()},body:JSON.stringify({ref:'main'}),signal:AbortSignal.timeout(10000)});
+        'Authorization':'Bearer '+String(env.GH_TOKEN).trim()},body:JSON.stringify({ref:'main',inputs:{request_id:id}}),signal:AbortSignal.timeout(10000)});
     return response.status===204;
   } catch {return false;}
 }
@@ -112,7 +112,7 @@ export async function forecastFetch(req,ctx,env) {
       await tx.put('request:'+row.id,row);needsDispatch=true;
     });
     if(limited)return failure('云端分析任务较多，请稍后再试',429);
-    if(needsDispatch&&!await dispatch(env)) {
+    if(needsDispatch&&!await dispatch(env,row.id)) {
       await ctx.storage.transaction(async tx=>{
         const current=await tx.get('request:'+row.id);
         if(current?.status==='queued'){row={...current,status:'error',message:'云端分析启动失败，请稍后重新提交',updated:Date.now()};await tx.put('request:'+row.id,row);}
@@ -122,11 +122,14 @@ export async function forecastFetch(req,ctx,env) {
     return reply(await status(row,ctx.storage,now),row.status==='error'?503:200);
   }
   if(action==='poll'&&req.method==='GET') {
+    const id=url.searchParams.get('id');
+    if(id!==null&&!validId(id))return failure('任务编号无效');
     const requests=[];
     await ctx.storage.transaction(async tx=>{
       const rows=await cleanup(tx,now);
       for(const row of [...rows.values()].sort((a,b)=>a.created-b.created)) {
         if(requests.length>=3)break;
+        if(id!==null&&row.id!==id)continue;
         if(kindOf(row)!=='forecast'&&url.searchParams.get('protocol')!=='research-v1')continue;
         if(row.status!=='queued'&&!(row.status==='processing'&&now-row.updated>=LEASE))continue;
         if((row.attempts||0)>=3){await tx.put('request:'+row.id,{...row,status:'error',message:'云端分析多次超时，请稍后重新提交',updated:now});continue;}

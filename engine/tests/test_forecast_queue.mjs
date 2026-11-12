@@ -3,12 +3,14 @@ import {forecastRoute} from '../cloudflare-relay/forecast-requests.js';
 import {LiveSnapshot} from '../cloudflare-relay/live.js';
 
 const originalFetch=globalThis.fetch, originalNow=Date.now;
-let now=originalNow(), dispatches=0, dispatchOkay=true;
+let now=originalNow(), dispatches=0, dispatchOkay=true, lastDispatch;
 Date.now=()=>now;
 globalThis.fetch=async(url,options)=>{
   assert.match(url,/actions\/workflows\/aq5-forecast-request\.yml\/dispatches$/);
   assert.equal(options.headers.Authorization,'Bearer dispatch-test');
-  assert.deepEqual(JSON.parse(options.body),{ref:'main'});
+  lastDispatch=JSON.parse(options.body);
+  assert.equal(lastDispatch.ref,'main');
+  assert.match(lastDispatch.inputs.request_id,/^[a-f0-9]{32}$/);
   dispatches++;return new Response(null,{status:dispatchOkay?204:403});
 };
 function setup(){
@@ -122,15 +124,20 @@ try{
   const analysisTask=await(await request('request','POST',{kind:'analysis',code:'sh600000'})).json();
   const forecastTask=await(await request('request','POST',{code:'sh600000'})).json();
   const screenTask=await(await request('request','POST',{kind:'screen'})).json();
+  assert.equal(lastDispatch.inputs.request_id,screenTask.id);
   assert.equal(new Set([analysisTask.id,forecastTask.id,screenTask.id]).size,3);
   assert.equal((await request('request','POST',{kind:'screen',code:'sh600000'})).status,400);
   assert.equal((await request('context?id='+analysisTask.id)).status,403);
   const legacyWork=(await(await request('poll','GET',undefined,'publisher')).json()).requests;
   assert.equal(legacyWork.length,1);assert.equal(legacyWork[0].id,forecastTask.id);
-  const work=(await(await request('poll?protocol=research-v1','GET',undefined,'publisher')).json()).requests;
-  assert.equal(work.find(x=>x.id===screenTask.id).kind,'screen');
-  assert.equal(work.find(x=>x.id===screenTask.id).code,null);
-  const ar=work.find(x=>x.id===analysisTask.id);
+  assert.equal((await request('poll?protocol=research-v1&id=bad','GET',undefined,'publisher')).status,400);
+  const targeted=(await(await request('poll?protocol=research-v1&id='+screenTask.id,'GET',undefined,'publisher')).json()).requests;
+  assert.equal(targeted.length,1);
+  assert.equal(targeted[0].id,screenTask.id);
+  assert.equal(targeted[0].kind,'screen');
+  assert.equal(targeted[0].code,null);
+  const [ar]=(await(await request('poll?protocol=research-v1&id='+analysisTask.id,'GET',undefined,'publisher')).json()).requests;
+  assert.equal(ar.id,analysisTask.id);
   assert.equal((await request('complete','POST',{...completion,id:ar.id,claim:ar.claim},'publisher')).status,200);
   now+=61000;
   const proposal='f'.repeat(64);

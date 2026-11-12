@@ -1,10 +1,15 @@
 name: 云端个股分析
 on:
   workflow_dispatch:
+    inputs:
+      request_id:
+        description: 'Relay request ID (blank drains the legacy queue)'
+        type: string
+        required: false
 permissions:
   contents: read
 concurrency:
-  group: aq5-forecast-requests
+  group: ${{ inputs.request_id && format('aq5-forecast-{0}', inputs.request_id) || 'aq5-forecast-requests' }}
   cancel-in-progress: false
 jobs:
   analyze:
@@ -22,6 +27,7 @@ jobs:
         env:
           AQ5_DATA: ${{ runner.temp }}/aq5-forecast-request
           AQ5_FORECAST_REQUEST: '1'
+          AQ5_FORECAST_REQUEST_ID: ${{ inputs.request_id }}
           AQ5_CLOUD: '1'
           AQ5_MOCK: '0'
           AQ5_KEY: ${{ secrets.AQ5_KEY }}
