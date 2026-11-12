@@ -34,6 +34,7 @@ async function measure(browser,kind,code){
     assert.equal(accepted.status(),200);
     const body=await accepted.json();
     console.log(JSON.stringify({kind,accepted:true,cached:body.status==='ready'}));
+    assert.notEqual(body.status,'ready');
     step='result';
     const selector=kind==='analysis'?'#p-anly .qhead':'.fc-summary';
     await page.locator(selector).waitFor({state:'visible',timeout:8*60*1000});
@@ -96,7 +97,10 @@ async function pick(browser){
     }
     const updated=newFlags.every(Boolean);
     if(updated) assert.equal(hashes[0],hashes[1]);
-    const results=await Promise.all([measure(browser,'analysis',codes[0]),measure(browser,'forecast',codes[1]),...(updated?[pick(browser)]:[])]);
+    assert.ok(updated, 'both entries must serve the new build');
+    const pickCheck=pick(browser);
+    await pause(Math.max(0,Date.parse('2026-11-12T15:55:05Z')-Date.now()));
+    const results=await Promise.all([measure(browser,'analysis',codes[0]),measure(browser,'forecast',codes[1]),pickCheck]);
     if(results.some(x=>!x))process.exitCode=1;
   }finally{await browser.close();}
 })().catch(e=>{console.log(JSON.stringify({speed_check_failed:e.name,cause:e.cause?.code}));process.exitCode=1;});
