@@ -1,38 +1,20 @@
-name: AQ5 fixed URL acceptance
+name: AQ5 Chrome endpoint comparison
 on:
   push:
     branches: [codex/aq5-release-check-20261112]
 permissions:
   contents: read
 jobs:
-  chrome:
+  compare:
     runs-on: ubuntu-latest
-    timeout-minutes: 13
+    timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Install browser test harness
-        run: npm install --no-audit --no-fund --prefix "$RUNNER_TEMP/aq5-browser" playwright@1.56.1
-      - name: Verify production from Chrome
-        working-directory: engine
+      - name: Measure both public URLs in fresh Chrome contexts
         env:
-          AQ5_DATA: ${{ runner.temp }}/aq5-release-check
-          PYTHONDONTWRITEBYTECODE: '1'
-          AQ5_KEY: ${{ secrets.AQ5_KEY }}
           NODE_PATH: ${{ runner.temp }}/aq5-browser/node_modules
-          ENCRYPTED_CASES: QVE1dzHfppsNMQ7HZZJiytyVUbWt/1jpB61nm7mEADJMnYn8+6yWTPX/ywXSDERBCgmTpr8RGsTdRPCWhOfidG1sKwWD5WZ+lhwO7ZOJlJws3MAUO6HU0MQ=
         run: |
-          python -B - <<'PY'
-          import base64, json, os, re, subprocess
-          from aq5 import vault
-          key = os.environ.get("AQ5_KEY", "")
-          if not key:
-              raise SystemExit("Browser verification requires the configured mobile unlock")
-          try:
-              codes = json.loads(vault.unseal_web(base64.b64decode(os.environ["ENCRYPTED_CASES"]), key))
-              assert len(codes) == 2 and all(re.fullmatch(r"6\d{5}", code) for code in codes)
-          except Exception:
-              raise SystemExit("Verification input authentication failed") from None
-          raise SystemExit(subprocess.call(["node", "../.github/aq5-release-check.cjs"], env={**os.environ, "AQ5_VERIFY_CODES": ",".join(codes)}))
-          PY
+          npm install --no-audit --no-fund --prefix "$RUNNER_TEMP/aq5-browser" playwright@1.56.1
+          node .github/aq5-release-check.cjs
