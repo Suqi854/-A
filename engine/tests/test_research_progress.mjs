@@ -15,11 +15,11 @@ function harness({initial=report(),statuses=[build('running',50)],final,fetcher,
  const S={page:'pick',priv:{},privateSession:{key:{}},timers:{}},timers=new Map(),paths=[],network=[];let seq=0,derives=0;
  const el={hidden:false,dataset:{},_html:'',note:null,querySelector(){return this.note;},
    set innerHTML(value){this._html=value;const match=value.match(/data-research-progress[^>]*>(.*?)<\/div>/s);this.note=match?{textContent:match[1]}:null;},get innerHTML(){return this._html;}};
- const api=async path=>{paths.push(path);if(path==='research/preview')return structuredClone(initial);
+ const api=async path=>{paths.push(path);if(path==='research/preview'||local&&path==='research/preview?read_only=1')return structuredClone(initial);
    if(path.startsWith('research/preview?read_only=1'))return structuredClone(final||{...initial,snapshot_commit:COMMIT,generated_at:'2026-11-12T11:30:00+08:00'});
    if(path==='research/status')return structuredClone(statuses.shift());throw Error('unexpected API '+path);};
  const context=vm.createContext({S,STATIC:!local,document:{hidden:false},$:()=>el,api,
-  esc:value=>String(value??'').replaceAll('&','&amp;').replaceAll('<','&lt;'),sourceTime:x=>x||'--',researchRun:r=>'<div class="existing-content">'+r.generated_at+'</div>',panel:(_title,html)=>html,
+  esc:value=>String(value??'').replaceAll('&','&amp;').replaceAll('<','&lt;'),sourceTime:x=>x||'--',sourceStamp:Date.parse,researchRun:r=>'<div class="existing-content">'+r.generated_at+'</div>',panel:(_title,html)=>html,
   relayBase:()=> 'https://relay.example',TextEncoder,Uint8Array,AbortController,
   crypto:{subtle:{deriveBits:async()=>{derives++;return derive?derive():new Uint8Array(32).buffer;}}},
   setTimeout:(fn,delay)=>{const id=++seq;timers.set(id,{fn,delay});return id;},clearTimeout:id=>timers.delete(id),
@@ -41,7 +41,7 @@ test('polling updates only the existing hint and never queues repeated screens',
 test('completion refreshes compact summary once in read-only mode and stops',async()=>{
  const completed=build('complete',3195);completed.build.snapshot_commit=COMMIT;
  const h=harness({statuses:[completed]});await h.start();await h.fire();await flush();
- assert.deepEqual(h.paths,['research/preview','research/preview?read_only=1&cache_key='+BUILD]);
+ assert.deepEqual(h.paths,['research/preview','research/preview?read_only=1&cache_key='+COMMIT.slice(0,32)]);
  assert.equal(h.fire(),null);assert.equal(h.timers.size,0);assert.match(h.el.innerHTML,/11:30:00/);
  await h.context.loadResearchPreview(true);assert.equal(h.paths.length,2);
 });
@@ -79,7 +79,7 @@ test('hidden document pauses network reads and resumes on visibility',async()=>{
  h.context.document.hidden=false;await h.fire();assert.equal(h.network.length,1);
 });
 test('local mode reads authenticated local status without browser secret derivation',async()=>{
- const h=harness({local:true});await h.start();await h.fire();assert.deepEqual(h.paths,['research/preview','research/status']);assert.equal(h.derives(),0);assert.equal(h.network.length,0);
+ const h=harness({local:true});await h.start();await h.fire();assert.deepEqual(h.paths,['research/preview?read_only=1','research/status']);assert.equal(h.derives(),0);assert.equal(h.network.length,0);
 });
 test('CI triggers and runs full research and progress tests without adding schedule',()=>{
  const ci=readFileSync(new URL('../../.github/workflows/aq5-forecast-checks.yml',import.meta.url),'utf8');

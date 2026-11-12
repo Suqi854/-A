@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import math
 import re
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
+from functools import partial
 
 from .. import db, market
 from ..config import now
@@ -126,7 +129,7 @@ def _summary(frames, structures, values, at):
 
 
 def analyze(code, asof=None, *, feed=None, quote_loader=None, context_loader=None,
-            disclosure_loader=None, clock=None):
+            disclosure_loader=None, clock=None, model_loader=None):
     """Return a fresh view without persisting predictions or modifying any ledger.
 
     Explicit asof is for replay/testing only. Production observes each network
@@ -140,27 +143,32 @@ def analyze(code, asof=None, *, feed=None, quote_loader=None, context_loader=Non
         raise ValueError("main_board_stock_required")
     clock = clock or now
     requested = calendar.stamp(asof) if asof is not None else None
-    feed = feed or data.fetch
+    parallel = feed is None
+    if parallel:
+        adjustment = None if data.MOCK else data.adjustment_input(code)
+        feed = partial(data.fetch, adjustment=adjustment)
     quote_loader = quote_loader or market.quotes
     context_loader = context_loader or data.context
     disclosure_loader = disclosure_loader or data.disclosure
     frames, structures, failures = {}, {}, {}
-    for tf in LEVELS:
-        try:
-            frames[tf] = feed(code, tf, requested)
-            observed = requested or clock()
-            structures[tf] = chan.analyze(code, tf, frames[tf].get("rows", []), calendar.iso(observed))
-        except (RuntimeError, ValueError, TypeError, KeyError, OSError) as exc:
-            failures[tf] = type(exc).__name__
-            frames[tf] = {"rows": [], "quality": {"eligible": False, "reason": "source_unavailable"}}
-    try:
-        quote = dict(quote_loader([code]).get(code) or {})
-    except (RuntimeError, ValueError, TypeError, KeyError, OSError):
-        quote = {}
+    with (ThreadPoolExecutor(max_workers=len(LEVELS)) if parallel else nullcontext()) as pool:
+        pending = {tf: pool.submit(feed, code, tf, requested) for tf in LEVELS} if pool else {}
+        for tf in LEVELS:
+            try:
+                frames[tf] = pending[tf].result() if pool else feed(code, tf, requested)
+                observed = requested or clock()
+                structures[tf] = chan.analyze(code, tf, frames[tf].get("rows", []), calendar.iso(observed))
+            except (RuntimeError, ValueError, TypeError, KeyError, OSError) as exc:
+                failures[tf] = type(exc).__name__
+                frames[tf] = {"rows": [], "quality": {"eligible": False, "reason": "source_unavailable"}}
     try:
         context = context_loader(requested or clock(), code=code)
     except (RuntimeError, ValueError, TypeError, KeyError, OSError):
         context = {}
+    try:
+        quote = dict(quote_loader([code]).get(code) or {})
+    except (RuntimeError, ValueError, TypeError, KeyError, OSError):
+        quote = {}
     at = requested or clock()
     try:
         disclosure = disclosure_loader(code, at)
@@ -187,6 +195,9 @@ def analyze(code, asof=None, *, feed=None, quote_loader=None, context_loader=Non
             eligible = eligible and alignment.get("eligible", False)
             if not due or not eligible:
                 continue
+            if model_loader is not None and not predictions:
+                model_loader()
+                row = _model()
             predictions.append({"code": code, "name": quote.get("name", ""), "variant": "fusion", "horizon": horizon,
                                 "asof": calendar.iso(at), "due_at": due, "reference_price": quote["price"],
                                 "source_time": calendar.iso(qt), "origin": "on_demand_readonly",

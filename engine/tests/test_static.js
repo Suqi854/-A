@@ -73,6 +73,24 @@ test('locked overview omits plan, unlocked overview and monitor show its private
   assert.equal((await h.context.staticApi('overview')).accounts.plan, undefined);
 });
 
+test('concurrent overview reads share a network response and keep separate views', async () => {
+  const h = harness();
+  const [first, second] = await Promise.all([h.context.staticApi('overview'), h.context.staticApi('overview')]);
+  first.accounts.ai.name = 'local edit';
+  assert.notEqual(first.accounts.ai.name, second.accounts.ai.name);
+  assert.equal(h.requests.filter(url => url.startsWith('data/latest.json')).length, 1);
+});
+
+test('default cloud research preview reads an existing publication even when unlocked', async () => {
+  const h = harness({ preview: { kind:'research_preview', generated_at:newTime } });
+  h.S.priv = {};
+  h.S.privateSession = {key:{}};
+  const snapshot = await h.context.staticApi('research/preview');
+  assert.equal(snapshot.generated_at, newTime);
+  assert.equal(h.requests.length, 1);
+  assert.match(h.requests[0], /^data\/research\.json\?/);
+});
+
 test('forecast route opens before the overview returns', async () => {
   const boot = source.match(/^  async function boot\(.*?^  }/ms)[0];
   const h = harness();

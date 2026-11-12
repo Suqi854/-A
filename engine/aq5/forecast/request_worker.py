@@ -130,7 +130,7 @@ def fulfill(item, password, analyze, *, context=None, handlers=None):
             if result.get('code') != item['code'] or result.get('fusion', {}).get('code') != item['code']:
                 raise ValueError('analysis result identity mismatch')
         elif kind == 'screen':
-            result = handlers['screen'](read_only=True) if item.get('read_only') is True else handlers['screen']()
+            result = handlers['screen'](read_only=True)
             if result.get('kind') not in ('research_preview','screen') or not isinstance(result.get('routes'), dict):
                 raise ValueError('screen result contract mismatch')
             result = {**result, 'kind':'screen'}
@@ -187,8 +187,21 @@ def run(*, budget=900, transport=exchange, analyze=None, clock=time.monotonic, w
     if not password or not relay:
         raise RuntimeError('cloud analysis credentials unavailable')
     # The caller MUST set AQ5_DATA to a dedicated, temporary job directory.
+    models_loaded = False
+
+    def load_models_once():
+        nonlocal models_loaded
+        if model_loader is None or models_loaded:
+            return
+        models_loaded = True
+        try:
+            model_loader()
+        except Exception:
+            print('Model snapshot unavailable; probabilities remain unverified.', flush=True)
+
     if analyze is None:
-        from .service import analyze
+        from . import service
+        analyze = lambda code: service.analyze(code, model_loader=load_models_once)
     key = hmac.new(password.encode(), b'aq5-live-publish-v1', hashlib.sha256).hexdigest()
     poll_action = 'poll?protocol=research-v1' if research else 'poll'
     if request_id:
@@ -197,7 +210,6 @@ def run(*, budget=900, transport=exchange, analyze=None, clock=time.monotonic, w
         poll_action += ('&' if research else '?') + 'id=' + request_id
     max_requests = 1 if request_id else 20
     deadline, count, delivery_failures = clock() + budget, 0, 0
-    models_loaded=False
     while clock() < deadline and count < max_requests:
         jobs = transport(relay, key, poll_action).get('requests', [])
         if not jobs:
@@ -205,16 +217,15 @@ def run(*, budget=900, transport=exchange, analyze=None, clock=time.monotonic, w
         if request_id and (len(jobs) != 1 or jobs[0].get('id') != request_id):
             raise RuntimeError('cloud relay did not honor the requested job ID')
         for item in jobs:
+            started = time.monotonic()
             try:
-                if item.get('kind','forecast')=='forecast' and model_loader is not None and not models_loaded:
-                    try:model_loader()
-                    except Exception:print('Model snapshot unavailable; probabilities remain unverified.',flush=True)
-                    models_loaded=True
                 context = transport(relay, key, 'context?id='+item['id']) if item.get('kind','forecast')!='forecast' else None
                 payload = fulfill(item, password, analyze, context=context)
             except Exception:
                 # Logs and the queue never contain credentials, holdings, or provider bodies.
                 payload = {'id': item['id'], 'claim': item['claim'], 'error': True}
+            print(f"Cloud request kind={item.get('kind', 'forecast')} processing_ms={round((time.monotonic()-started)*1000)}",
+                  flush=True)
             try:
                 complete(relay, key, payload, transport, wait)
             except (OSError, ValueError):

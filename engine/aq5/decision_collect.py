@@ -73,7 +73,7 @@ def collect(snapshot, codes, *, focus=False):
                       "selection": "沪深主板非ST公开快照，按成交额优先的最多100股财务核对；主线情绪以采集器实际覆盖为准"}}
 
 
-def screen(*,read_only=False):
+def screen(*,read_only=True):
     from . import decision_full
     return decision_full.latest_screen(start_if_needed=not read_only)
 
@@ -130,9 +130,11 @@ def analysis(code):
         snapshot = market.snapshot()
     except (RuntimeError, OSError):
         snapshot = []
-    # Emotion needs the common market context; the financial query is this stock only.
-    collection = collect(_pool(snapshot), [code], focus=True)
-    raw = base.analyze(code)
+    # Fetch the technical view while the independent evidence sources are read.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        technical = pool.submit(base.analyze, code)
+        collection = collect(_pool(snapshot), [code], focus=True)
+        raw = technical.result()
     fusion = decision.view(code)
     result = decision.merge(raw, fusion)
     result["kline"] = market.kline_with_live(code, 250)

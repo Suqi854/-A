@@ -102,7 +102,8 @@ export async function forecastFetch(req,ctx,env) {
         &&(kind!=='screen'||(Boolean(x.read_only)===(body.read_only===true)&&x.cache_key===body.cache_key))
         &&(kind!=='confirm'||(x.proposal_id===body.proposal_id&&x.previous_id===body.previous_id)))
         .sort((a,b)=>b.created-a.created)[0];
-      if(same&&((same.status==='ready'&&now-same.updated<5*60*1000)||(['queued','processing'].includes(same.status)&&now-same.created<8*60*1000))) {row=same;return;}
+      const readyWindow = kind==='screen' && body.read_only===true ? TTL : 5*60*1000;
+      if(same&&((same.status==='ready'&&now-same.updated<readyWindow)||(['queued','processing'].includes(same.status)&&now-same.created<8*60*1000))) {row=same;return;}
       // Bound both retained requests and dispatch cost, including failed attempts.
       if(rows.size>=20||[...rows.values()].filter(x=>now-x.created<60000).length>=3){limited=true;return;}
       row={id:uuid(),code:body.code||null,status:'queued',created:now,updated:now,

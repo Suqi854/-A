@@ -291,7 +291,16 @@ def adjustment_factors(code, t=None):
     return copy.deepcopy(cached)
 
 
-def fetch(code, timeframe, asof=None):
+def adjustment_input(code):
+    try:
+        return adjustment_factors(code), None, []
+    except AdjustmentError as exc:
+        return None, str(exc), exc.attempts
+    except (RuntimeError, ValueError, KeyError, TypeError, OSError) as exc:
+        return None, 'adjustment_' + _source_reason(exc), []
+
+
+def fetch(code, timeframe, asof=None, *, adjustment=None):
     """Live calls omit asof; explicit cutoffs never backdate later acquisition."""
     if timeframe not in PERIODS:
         raise ValueError("unsupported timeframe")
@@ -312,13 +321,7 @@ def fetch(code, timeframe, asof=None):
         raw = {**market.kline_period(code, period, 320), "adjustment": "unknown", "adjustment_verified": False,
                "bar_time": "end", "observed_at": now().isoformat()}
     else:
-        bundle, adjustment_failure, attempts = None, None, []
-        try:
-            bundle = adjustment_factors(code)
-        except AdjustmentError as exc:
-            adjustment_failure, attempts = str(exc), exc.attempts
-        except (RuntimeError, ValueError, KeyError, TypeError) as exc:
-            adjustment_failure = 'adjustment_' + _source_reason(exc)
+        bundle, adjustment_failure, attempts = adjustment if adjustment is not None else adjustment_input(code)
         if not minutes:
             if bundle:
                 pair = bundle['pair']

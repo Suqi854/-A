@@ -445,6 +445,8 @@ def collect(snapshot, asof=None, *, max_boards=5, max_history=30, max_seats=12, 
     if at > now() + timedelta(seconds=5):
         raise ValueError("future_asof")
     codes = {r["code"] for r in snapshot if market.is_main_board(str(r.get("code", ""))) and "ST" not in str(r.get("name", "")).upper()}
+    focuses = [code for code in (focus_codes or []) if code in codes]
+    target_codes = codes if focus_codes is None else set(focuses)
     records, failures, assessments, proxies, receipts = [], [], [], [], []
     coverage = {"input_count": len(snapshot), "mainboard_count": len(codes), "board_total": 0,
                 "board_received": 0, "board_list_complete": False, "boards_examined": 0, "history_count": 0,
@@ -469,7 +471,7 @@ def collect(snapshot, asof=None, *, max_boards=5, max_history=30, max_seats=12, 
                 matched = [("sh" if r.get("f13") == 1 else "sz") + str(r.get("f12")) for r in members]
                 known_members.update(c for c in matched if c in codes)
                 for member, code in zip(members, matched):
-                    if code not in codes:
+                    if code not in target_codes:
                         continue
                     rec = _record(code, "mainline", f"规则主线候选：{board['f14']}；当天{board['f3']}%，板块5日{signal['return5']:.2%}，上涨占比{signal['breadth']:.1%}。仅已检查的强势概念；非官方主线认定。", source_at, [br[0], hr, *mr], at,context=board["f12"])
                     if rec: records.append(rec)
@@ -490,15 +492,14 @@ def collect(snapshot, asof=None, *, max_boards=5, max_history=30, max_seats=12, 
     except (RuntimeError, ValueError, KeyError, TypeError, OSError) as exc:
         failures.append({"stage": "board_list", "reason": str(exc)[:180]})
     coverage["membership_codes"] = len(known_members)
-    if not coverage["board_received"]:
+    if not coverage["board_received"] and target_codes:
         try:
-            sr,ss,sa,sf,sc=_sina_fallback(codes,at,max_boards,max_history)
+            sr,ss,sa,sf,sc=_sina_fallback(target_codes,at,max_boards,max_history)
             records+=sr;receipts+=ss;assessments+=sa;failures+=sf;coverage['sina_fallback']=sc
         except (RuntimeError,ValueError,KeyError,TypeError,OSError) as exc:
             failures.append({'stage':'sina_fallback','reason':str(exc)[:180]})
-    focuses = [c for c in (focus_codes or []) if c in codes]
     if not coverage["board_received"] or focuses:
-        selected_focus = focuses or [r["code"] for r in sorted(snapshot,key=lambda r:-(r.get("pct") if _finite(r.get("pct")) else -999)) if r.get("code") in codes][:max_boards]
+        selected_focus = focuses if focus_codes is not None else [r["code"] for r in sorted(snapshot,key=lambda r:-(r.get("pct") if _finite(r.get("pct")) else -999)) if r.get("code") in codes][:max_boards]
         coverage["focus_codes"] = selected_focus
         try:
             fr,fs,fa,ff = _focus_fallback(selected_focus,at)

@@ -56,7 +56,7 @@ class AnalysisTests(unittest.TestCase):
         db.conn().execute('PRAGMA query_only=ON')
         try:
             with patch.object(db, 'tx', side_effect=AssertionError('analysis must not write')):
-                result = self.call()
+                result = self.call(model_loader=lambda: self.fail('after-hours structure does not need model state'))
         finally:
             db.conn().execute('PRAGMA query_only=OFF')
         self.assertEqual(before, '\n'.join(db.conn().iterdump()))
@@ -102,8 +102,10 @@ class AnalysisTests(unittest.TestCase):
         at = datetime(2026, 11, 13, 14, 45, tzinfo=CN_TZ)
         quote = {'code': 'sz002911', 'name': '佛燃能源', 'price': 50,
                  'source_time': at.isoformat(), 'known_at': at.isoformat(), 'source': 'test'}
-        result = self.call(at=at, quote=quote)
+        loads = []
+        result = self.call(at=at, quote=quote, model_loader=lambda: loads.append(True))
         self.assertTrue(result['predictions'])
+        self.assertEqual(loads, [True])
         self.assertEqual({r['horizon'] for r in result['predictions']}, {'1d', '3d', '5d', '20d'})
         self.assertTrue(all(p['probability'] is None and not p['validated'] for p in result['predictions']))
         self.assertFalse(service._table('forecast_predictions'))

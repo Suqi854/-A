@@ -21,9 +21,16 @@
   if (STATIC) document.body.classList.add('static');
   const normCode = c => { c = String(c || '').trim().toLowerCase(); return /^\d{6}$/.test(c) ? (/^[65]/.test(c) ? 'sh' : 'sz') + c : c; };
   async function sj(file) {
-    const r = await fetch('data/' + file + '?t=' + Math.floor(Date.now() / 60000), { signal: AbortSignal.timeout(10000) });
-    if (!r.ok) throw new Error('公开数据里没有这项内容');
-    return r.json();
+    const url = 'data/' + file + '?t=' + Math.floor(Date.now() / 60000);
+    const pending = S.staticReads ||= new Map();
+    if (!pending.has(url)) {
+      const read = fetch(url, { signal: AbortSignal.timeout(10000) }).then(r => {
+        if (!r.ok) throw new Error('公开数据里没有这项内容');
+        return r.text();
+      }).finally(() => pending.delete(url));
+      pending.set(url, read);
+    }
+    return JSON.parse(await pending.get(url));
   }
   async function staticApi(path, body) {
     if (path === 'decision/confirm' && body !== undefined) return requestDecision('confirm', body.code, body);
@@ -48,8 +55,14 @@
       case 'picks/runs': return sj('runs.json');
       case 'picks/candidates': { const r = (await sj('runs.json')).find(x => String(x.id) === q.get('run')); return r ? r.cand_list || [] : []; }
       case 'picks/state': return { running: false };
-      case 'research/preview': return S.priv && S.privateSession?.key ? requestDecision('screen', null,
-        q.get('read_only') === '1' ? {read_only:true,cache_key:q.get('cache_key')} : {}) : sj('research.json');
+      case 'research/preview': {
+        const session = S.privateSession, key = q.get('cache_key');
+        if (!S.priv || !session?.key || q.get('read_only') !== '1' || !/^[a-f0-9]{32}$/.test(key || '')) return sj('research.json');
+        if (session.researchSnapshot?.key === key) return session.researchSnapshot.data;
+        const data = await requestDecision('screen', null, {read_only:true, cache_key:key});
+        session.researchSnapshot = {key,data};
+        return data;
+      }
       case 'analyze': if (S.priv && S.privateSession?.key) return requestDecision('analysis', code);
         if (S.priv?.analysis?.[code]?.kline?.length) return S.priv.analysis[code];
         try { return await sj('analysis/' + code + '.json'); } catch {
@@ -987,7 +1000,7 @@
     const el = $('#runList'); if (!el) return;
     loadResearchPreview(!STATIC || !!S.priv || !runs[0]?.research);
     if (!runs.length) { el.innerHTML = '<div class="empty">暂无记录</div>'; $('#runDetail').innerHTML = panel('RESULT', '<div class="empty">点「立即选股」先跑一次看看<br><small>收盘后跑会用当天收盘数据</small></div>'); return; }
-    S.runs = runs; S.run = sel || (S.run && runs.find(r => r.id === S.run) ? S.run : runs[0].id);
+    S.runs = runs; S.run = sel || runs[0].id;
     el.innerHTML = `<table class="t">${runs.map(r => `<tr class="click ${r.id === S.run ? 'bgup' : ''}" data-id="${r.id}"><td><div class="mono">${r.date.slice(5)} ${(r.started || '').slice(0, 5)}</div><div class="muted" style="font-size:11px">${SESSION[r.session] || r.session}</div></td>
       <td>${r.picks ? `<span class="chip a">${r.picks} 只</span>` : '<span class="chip">观望</span>'}</td></tr>`).join('')}</table>`;
     el.querySelectorAll('[data-id]').forEach(tr => tr.onclick = () => { S.run = +tr.dataset.id; loadRuns(S.run); });
@@ -1031,7 +1044,7 @@
     }finally{clearTimeout(timeout);if(request.statusAbort===ctl)request.statusAbort=null;}
   }
   function watchResearchProgress(el, report, request) {
-    if(!report.full_research?.build)return;
+    if (!report.full_research?.build && !(request.staticMode && request.session?.key)) return;
     stopResearchProgress();
     const monitor={request,el,seen:new Set(),failures:0};S.researchMonitor=monitor;S.timers ||= {};
     const current=()=>S.researchMonitor===monitor&&S.researchPreviewRequest===request&&S.page==='pick'&&
@@ -1045,13 +1058,17 @@
       try{status=supplied||await readResearchStatus(request);if(!current())return;monitor.failures=0;report.full_research=status;note(researchProgressText(status));}
       catch{if(!current())return;note('研究进度暂不可用，保留现有快照');if(++monitor.failures<3)schedule();return;}
       const b=status.build;if(!b)return;
-      if(['queued','running','checkpoint'].includes(b.phase)){schedule();return;}
-      if(!['complete','partial','error'].includes(b.phase)||!/^[a-f0-9]{32}$/.test(b.build_id||'')||monitor.seen.has(b.build_id))return;
-      monitor.seen.add(b.build_id);
+      if(['queued','running','checkpoint'].includes(b.phase))schedule();
+      const key = /^[a-f0-9]{40}$/.test(b.snapshot_commit||'') ? b.snapshot_commit.slice(0,32)
+        : ['complete','partial','error'].includes(b.phase) && /^[a-f0-9]{32}$/.test(b.build_id||'') ? b.build_id : null;
+      if (!key || monitor.seen.has(key)) return;
+      monitor.seen.add(key);
       if(b.snapshot_commit&&b.snapshot_commit===report.snapshot_commit)return;
-      try{const fresh=await api('research/preview?read_only=1&cache_key='+encodeURIComponent(b.build_id));
+      try{const fresh=await api('research/preview?read_only=1&cache_key='+key);
         if(!current())return;if(!fresh||fresh.kind!=='research_preview')throw new Error('invalid summary');
-        report={...fresh,full_research:status};renderResearchPreview(el,report);
+        if (!report.generated_at || sourceStamp(fresh.generated_at) >= sourceStamp(report.generated_at)) {
+          report={...fresh,full_research:status};renderResearchPreview(el,report);
+        }
       }catch{if(current())note(researchProgressText(status)+' · 摘要刷新失败，保留原快照，可重新进入查看');}
     };
     tick(report.full_research);
@@ -1067,13 +1084,16 @@
     el.dataset.requested = '1';
     el.innerHTML = panel('RESEARCH PREVIEW <small>研究预览</small>', '<div class="loading">正在读取最近研究快照与全主板采集进度…</div>', {});
     let requestError = '';
-    const r = await api('research/preview').catch(e => { requestError = e.message; return null; });
-    if (S.page !== 'pick' || el !== $('#researchPreview') || el.hidden || S.researchPreviewRequest!==request || STATIC!==request.staticMode || (request.staticMode&&S.privateSession!==request.session)) return;
+    const current = () => S.page === 'pick' && el === $('#researchPreview') && !el.hidden &&
+      S.researchPreviewRequest === request && STATIC === request.staticMode && (!STATIC || S.privateSession === request.session);
+    const r = await api(STATIC ? 'research/preview' : 'research/preview?read_only=1').catch(e => { requestError = e.message; return null; });
+    if (!current()) return;
     if (!r || r.kind !== 'research_preview') {
       el.innerHTML = panel('RESEARCH PREVIEW <small>研究预览</small>', `<div data-nc class="hint">${requestError ? esc(requestError) + '；稍后重新进入选股页重试。' : '等待下一交易日的真实研究样本'}</div>`, {});
-      return;
+    } else {
+      renderResearchPreview(el,r);
     }
-    renderResearchPreview(el,r);watchResearchProgress(el,r,request);
+    watchResearchProgress(el, r || {}, request);
   }
   function researchRun(r) {
     if (!r) return '';

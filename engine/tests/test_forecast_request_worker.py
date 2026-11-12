@@ -68,7 +68,8 @@ class WorkerTest(unittest.TestCase):
     def test_screen_kind_has_no_stock_binding(self):
         item = {'id':'a'*32,'claim':'b'*32,'kind':'screen','code':None}
         result = worker.fulfill(item,'password',None,context={'targets':[]},
-                               handlers={'screen':lambda:{'kind':'research_preview','routes':{'value':{},'emotion':{}}}})
+                               handlers={'screen':lambda *, read_only: {'kind':'research_preview','routes':{'value':{},'emotion':{}}}
+                                         if read_only else self.fail('legacy screen must also be read only')})
         self.assertEqual(worker._decrypt(result,'password')['kind'],'screen')
         self.assertNotIn('target_update',result)
 

@@ -507,7 +507,7 @@ POST = {"/api/picks/run": p_pick_run, "/api/sim/order": p_order, "/api/sim/cance
 from . import live, research, fundamentals, training, forecast, decision, decision_evidence, decision_collect, decision_full
 GET.update({"/api/decision": lambda q: decision.view(market.norm_code(q["code"][0])),
             "/api/decision/status": lambda q: decision.status(market.norm_code(q["code"][0])),
-            "/api/research/preview": lambda q: decision_collect.screen(read_only=q.get("read_only",["0"])[0] in ("1","true")),
+            "/api/research/preview": lambda q: decision_collect.screen(read_only=True),
             "/api/research/status": lambda q: decision_full.relay("status"),
             "/api/t/live": lambda q: live.payload(),
             "/api/research": lambda q: research.shadow_report(),
