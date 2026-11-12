@@ -1,6 +1,6 @@
 // Pin the reviewed application script independently of the active data publisher.
 // An older long-running trading job may still publish its bundled static files.
-export const RESEARCH_UI_COMMIT='243aa536765d4fff5fb83d33f585202dcae92d57';
+export const RESEARCH_UI_COMMIT='fbe9b65646bd422e8ef5b898ba220c20477152c6';
 export async function researchUiRoute(req){
   if(new URL(req.url).pathname!=='/js/app.js'||!['GET','HEAD'].includes(req.method))return null;
   const source='https://raw.githubusercontent.com/Suqi854/-A/'+RESEARCH_UI_COMMIT+'/engine/web/js/app.js';
@@ -10,3 +10,4 @@ export async function researchUiRoute(req){
     'content-type':'application/javascript; charset=utf-8','cache-control':'no-cache',
     'x-content-type-options':'nosniff','x-aq5-mode':'static','x-aq5-release':RESEARCH_UI_COMMIT}});
 }
+
