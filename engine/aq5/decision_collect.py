@@ -103,6 +103,23 @@ def bounded_screen():
     return report
 
 
+def _lhb_details(items):
+    def money(value,scale,unit,signed=False):
+        if not evidence.finite(value):return "未披露"
+        return (format(value/scale,"+.2f" if signed else ".2f"))+unit
+    details=[]
+    if not items:
+        return ["龙虎榜：本次未取得该股可核对的席位详情；不据此否定主线与结构，也不推断没有游资参与。"]
+    for item in items:
+        details.append(f"龙虎榜 {item['trade_date']}：非机构营业部席位净额 {money(item.get('non_institution_net'),1e8,'亿元',True)}；"
+                       "仅为席位参与代理，实际游资身份未核实，作为加分参考。")
+        for seat in item.get("seats",[]):
+            label={"brokerage_seat_proxy":"营业部","institution_or_connect":"机构/股通"}.get(seat.get("category"),"类别未知")
+            details.append(f"龙虎榜席位（{label}）{seat['name']}：买入{money(seat.get('buy'),1e4,'万')}，卖出{money(seat.get('sell'),1e4,'万')}，净额{money(seat.get('net'),1e4,'万',True)}。")
+        details.append("龙虎榜来源：东方财富公开披露转载；"+item.get("note",""))
+    return details
+
+
 def analysis(code):
     from . import analysis as base
     code = evidence.code_of(market.norm_code(code))
@@ -123,15 +140,7 @@ def analysis(code):
     result["source_evidence"] = evidence.latest(now()).get(code, {})
     lhb = [x for x in collection["sources"].get("emotion", {}).get("proxy_metrics", []) if x.get("code") == code]
     details = result.setdefault("main_force", {}).setdefault("evidence", [])
-    if not lhb:
-        details.append("龙虎榜：本次未取得该股可核对的席位详情；不据此否定主线与结构，也不推断没有游资参与。")
-    for item in lhb:
-        details.append(f"龙虎榜 {item['trade_date']}：非机构营业部席位净额 {item['non_institution_net']/1e8:+.2f}亿元；"
-                       "仅为席位参与代理，实际游资身份未核实，作为加分参考。")
-        for seat in item.get("seats", []):
-            label = {"brokerage_seat_proxy":"营业部", "institution_or_connect":"机构/股通", "unknown":"类别未知"}[seat["category"]]
-            details.append(f"龙虎榜席位（{label}）{seat['name']}：买入{seat['buy']/1e4:.1f}万，卖出{seat['sell']/1e4:.1f}万，净额{seat['net']/1e4:+.1f}万。")
-        details.append("龙虎榜来源：东方财富公开披露转载；" + item.get("note", ""))
+    details.extend(_lhb_details(lhb))
     result["collection"] = _public({**collection, "sources": {k: {x: y for x, y in v.items() if x != "records"}
                                                                 for k, v in collection["sources"].items()}})
     return result

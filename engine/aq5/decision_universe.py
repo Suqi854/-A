@@ -6,6 +6,10 @@ import io
 import json
 import math
 import re
+import socket
+import ssl
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
@@ -33,24 +37,78 @@ def _stamp(value):
 
 
 def _fetch(url):
-    request = urllib.request.Request(url, headers={"User-Agent":"Mozilla/5.0",
-        "Referer":"https://www.szse.cn/" if "szse.cn" in url else "https://www.sse.com.cn/"})
+    szse = "szse.cn" in url
+    request = urllib.request.Request(url, headers={
+        "User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Referer":"https://www.szse.cn/market/product/stock/list/index.html" if szse else "https://www.sse.com.cn/assortment/stock/list/share/",
+        "Accept":"application/json, text/plain, */*","Accept-Language":"zh-CN,zh;q=0.9,en;q=0.5",
+        "Cache-Control":"no-cache","Pragma":"no-cache","Connection":"close"})
     with urllib.request.urlopen(request, timeout=25) as response:
         raw = response.read(MAX_BYTES+1)
+        metadata = {"http_status":response.status,"content_type":response.headers.get("Content-Type"),"final_url":response.url}
     if len(raw) > MAX_BYTES:
         raise ValueError("official_directory_response_too_large")
-    return raw
+    return raw, metadata
 
 
-def _capture(label, url, folder):
-    raw = _fetch(url)
+def _persist_raw(raw, folder):
     digest = _hash(raw)
     path = folder / "raw" / (digest + ".bin")
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         path.write_bytes(raw)
-    return {"id":label,"source_url":url,"retrieved_at":now().isoformat(timespec="seconds"),
-            "raw_sha256":digest,"bytes":len(raw),"raw_path":str(path)}
+    return {"raw_sha256":digest,"bytes":len(raw),"raw_path":str(path)}
+
+
+def _reason(exc):
+    if isinstance(exc,urllib.error.HTTPError):return "http_"+str(exc.code)
+    reason = getattr(exc,"reason",exc)
+    if isinstance(reason,ssl.SSLError):return "tls_error"
+    if isinstance(reason,(TimeoutError,socket.timeout)):return "timeout"
+    if isinstance(reason,socket.gaierror):return "dns_error"
+    if isinstance(reason,ConnectionError):return "connection_error"
+    if isinstance(exc,ValueError):
+        message = str(exc)
+        return message if re.fullmatch(r"[a-z_]{1,100}",message) else "invalid_payload"
+    return type(exc).__name__
+
+
+def _capture(label, url, folder, diagnostics=None):
+    diagnostics = diagnostics if diagnostics is not None else []
+    last = None
+    for attempt in range(2):
+        # Official page transports use cache-busting query parameters. A retry
+        # changes caching only; board, status and complete-count requirements stay fixed.
+        actual = url if attempt == 0 else url+"&"+urllib.parse.urlencode({"random" if "szse.cn" in url else "_":time.time_ns()})
+        record = {"stage":label,"attempt":attempt+1,"host":urllib.parse.urlsplit(url).hostname,
+                  "source_url":actual,"retrieved_at":now().isoformat(timespec="seconds")}
+        started = time.monotonic()
+        try:
+            response = _fetch(actual)
+            raw, metadata = response if isinstance(response,tuple) else (response,{"http_status":200})
+            record.update(metadata);record.update(_persist_raw(raw,folder))
+            if label.startswith("sse_"):
+                rows, total, page = _sse_json(raw)
+                record.update(declared_total=total,page_rows=len(rows),page_no=page.get("pageNo"),page_size=page.get("pageSize"))
+            elif label == "szse_metadata":
+                value = json.loads(raw)
+                if not isinstance(value,list) or not value or not isinstance(value[0].get("metadata"),dict):
+                    raise ValueError("szse_metadata_invalid")
+                meta=value[0]["metadata"]
+                record.update(declared_total=meta.get("recordcount"),source_date=meta.get("subname"),page_no=meta.get("pageno"))
+            elif not zipfile.is_zipfile(io.BytesIO(raw)):
+                raise ValueError("szse_export_not_xlsx")
+            record.update(ok=True,seconds=round(time.monotonic()-started,3));diagnostics.append(record)
+            return {"id":label,**record}
+        except (OSError,ValueError,KeyError,TypeError,AttributeError) as exc:
+            last = exc
+            if isinstance(exc,urllib.error.HTTPError):
+                record.update(http_status=exc.code,content_type=exc.headers.get("Content-Type") if exc.headers else None)
+                try:record.update(_persist_raw(exc.read(MAX_BYTES),folder))
+                except OSError:pass
+            record.update(ok=False,reason=_reason(exc),seconds=round(time.monotonic()-started,3));diagnostics.append(record)
+            if attempt == 0:time.sleep(.35)
+    raise OSError(label+":"+_reason(last))
 
 
 def _read(source, folder):
@@ -117,13 +175,21 @@ def _xlsx(raw):
 def _sse_json(raw):
     value = json.loads(raw)
     rows, page = value.get("result"), value.get("pageHelp",{})
-    total = page.get("total")
-    if not isinstance(rows,list) or type(total) is not int or not 1 <= total <= 10000:
+    total = _integer(page.get("total"))
+    if not isinstance(rows,list) or total is None or not 1 <= total <= 10000:
         raise ValueError("sse_empty_or_invalid_directory")
-    if any(r.get("STOCK_TYPE") != "1" or r.get("LIST_BOARD") != "1"
-           or r.get("DELIST_DATE") not in (None,"","-") or not re.fullmatch(r"\d{6}",str(r.get("A_STOCK_CODE",""))) for r in rows):
+    if any(str(r.get("STOCK_TYPE")).strip() != "1" or str(r.get("LIST_BOARD")).strip() != "1"
+           or (r.get("DELIST_DATE") is not None and str(r.get("DELIST_DATE")).strip() not in ("","-"))
+           or not re.fullmatch(r"\d{6}",str(r.get("A_STOCK_CODE",""))) for r in rows):
         raise ValueError("sse_board_listing_contract_changed")
+    page = {**page,"total":total,"pageNo":_integer(page.get("pageNo"))}
     return rows, total, page
+
+
+def _integer(value):
+    if type(value) is int:return value
+    if isinstance(value,str) and re.fullmatch(r"\d{1,6}",value.strip()):return int(value.strip())
+    return None
 
 
 def _parse(sources, folder):
@@ -150,7 +216,7 @@ def _parse(sources, folder):
     main = _xlsx(_read(by_id["szse_main"],folder))
     all_rows = _xlsx(_read(by_id["szse_all"],folder))
     szcodes = {r["A股代码"] for r in main}
-    if (metadata.get("recordcount") != len(main) or len(szcodes) != len(main)
+    if (_integer(metadata.get("recordcount")) != len(main) or len(szcodes) != len(main)
             or any(r["板块"] != "主板" or not re.fullmatch(r"\d{6}",r["A股代码"]) for r in main)
             or szcodes != {r["A股代码"] for r in all_rows if r["板块"] == "主板"}
             or not {r.get("agdm") for r in sz[0].get("data",[])} <= szcodes):
@@ -173,7 +239,7 @@ def _parse(sources, folder):
         raise ValueError("universe_duplicates")
     return {"rows":rows,"verified":True,"directory_date":day,"universe_hash":universe_hash,
             "coverage":{"status":"official_complete","universe_count":len(rows),"sse":len(sse),"szse":len(main),
-                        "sse_declared_total":total,"sse_page_totals":totals,"szse_declared_total":metadata["recordcount"],
+                        "sse_declared_total":total,"sse_page_totals":totals,"szse_declared_total":_integer(metadata["recordcount"]),
                         "szse_export_crosscheck":True,"st_name_markers":sum(r["is_st_name_marker"] for r in rows),
                         "quote_independent":True,"tradeability_verified":False},"sources":sources,"failures":[]}
 
@@ -183,23 +249,36 @@ def collect(asof=None, cache_hours=24, storage_dir=None):
     folder.mkdir(parents=True,exist_ok=True)
     current = _stamp(now()); requested = _stamp(asof) if asof is not None else current
     manifest = folder / "latest.json"
-    previous = None
+    previous, diagnostics, stage = None, [], "cache_lookup"
+    def finish(result):
+        result["diagnostics"] = diagnostics
+        try:
+            (folder/"last-attempt.json").write_text(json.dumps({k:result.get(k) for k in
+                ("version","verified","asof","coverage","failures","diagnostics")},ensure_ascii=False,indent=2),"utf-8")
+        except OSError:
+            pass
+        return result
     try:
         if manifest.exists():
+            stage = "cache_validation"
             previous = json.loads(manifest.read_text("utf-8"))
             age = current - _stamp(previous["asof"])
             if (previous.get("version") == VERSION and previous.get("directory_date") == requested.date().isoformat()
                     and timedelta(0) <= age <= timedelta(hours=cache_hours)):
                 parsed = _parse(previous["sources"],folder)
-                return {**parsed,"version":VERSION,"asof":previous["asof"],"cached":True}
+                return finish({**parsed,"version":VERSION,"asof":previous["asof"],"cached":True})
         if requested.date() != current.date():
             raise ValueError("historical_directory_not_available_from_current_endpoint")
-        sources = [_capture("sse_first",_sse_url(size=25),folder)]
+        stage = "sse_first"
+        sources = [_capture("sse_first",_sse_url(size=25),folder,diagnostics)]
         _, total, _ = _sse_json(_read(sources[0],folder))
         for page in range(1,math.ceil(total/2000)+1):
-            sources.append(_capture(f"sse_page_{page}",_sse_url(page),folder))
+            stage = f"sse_page_{page}"
+            sources.append(_capture(stage,_sse_url(page),folder,diagnostics))
         for label,kind,main in (("szse_metadata","JSON",True),("szse_main","xlsx",True),("szse_all","xlsx",False)):
-            sources.append(_capture(label,_szse_url(kind,main),folder))
+            stage = label
+            sources.append(_capture(label,_szse_url(kind,main),folder,diagnostics))
+        stage = "directory_validation"
         result = _parse(sources,folder)
         if result["directory_date"] != requested.date().isoformat():
             raise ValueError("official_directory_date_mismatch")
@@ -207,9 +286,9 @@ def collect(asof=None, cache_hours=24, storage_dir=None):
         temporary = manifest.with_suffix(".tmp")
         temporary.write_text(json.dumps(result,ensure_ascii=False,separators=(",",":")),"utf-8")
         temporary.replace(manifest)
-        return result
+        return finish(result)
     except (OSError,ValueError,KeyError,TypeError,IndexError,AttributeError,zipfile.BadZipFile,ET.ParseError) as exc:
-        return {"version":VERSION,"rows":[],"verified":False,"asof":now().isoformat(timespec="seconds"),
+        return finish({"version":VERSION,"rows":[],"verified":False,"asof":now().isoformat(timespec="seconds"),
                 "coverage":{"status":"unavailable","universe_count":None,"quote_independent":True,
                             "previous_verified_count":(previous or {}).get("coverage",{}).get("universe_count")},
-                "sources":locals().get("sources",[]),"failures":[{"reason":type(exc).__name__+":"+str(exc)[:180]}]}
+                "sources":locals().get("sources",[]),"failures":[{"stage":stage,"reason":type(exc).__name__+":"+str(exc)[:180]}]})

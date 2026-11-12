@@ -1,16 +1,17 @@
 import assert from 'node:assert/strict';
 import worker from '../cloudflare-relay/worker.js';
+import {RESEARCH_UI_COMMIT} from '../cloudflare-relay/research-ui.js';
 const originalFetch=globalThis.fetch, calls=[];
 let kvReads=0, target='https://test-pc.trycloudflare.com';
-globalThis.fetch=async(url)=>{calls.push(String(url));return new Response(String(url).includes('github.io')?'cloud-page':'pc-api',{status:200});};
+globalThis.fetch=async(url)=>{calls.push(String(url));return new Response(String(url).includes('raw.githubusercontent.com')?'reviewed-app':String(url).includes('github.io')?'cloud-page':'pc-api',{status:200});};
 const env={SECRET:'management-test',FORECAST_KEY:'reader-test',LIVE_KEY:'publisher-test',
   KV:{get:async key=>{kvReads++;return key==='target'?target:null;},put:async(key,value)=>{if(key==='target')target=value;}},
   LIVE:{idFromName:name=>name,get:name=>({fetch:async()=>Response.json({channel:name})})}};
 const request=(path,method='GET',headers={},body)=>worker.fetch(new Request('https://relay.test'+path,{method,headers,...(body?{body:JSON.stringify(body)}:{})}),env);
 try{
   assert.equal(await(await request('/')).text(),'cloud-page');
-  assert.equal(await(await request('/js/app.js?v=fix')).text(),'cloud-page');
-  assert.equal(kvReads,0);assert.deepEqual(calls,['https://suqi854.github.io/-A/','https://suqi854.github.io/-A/js/app.js?v=fix']);
+  assert.equal(await(await request('/js/app.js?v=fix')).text(),'reviewed-app');
+  assert.equal(kvReads,0);assert.deepEqual(calls,['https://suqi854.github.io/-A/','https://raw.githubusercontent.com/Suqi854/-A/'+RESEARCH_UI_COMMIT+'/engine/web/js/app.js']);
   assert.equal((await request('/','POST')).status,405);
   assert.equal((await request('/__aq5/unknown')).status,404);
   assert.equal(await(await request('/api/auth/me')).text(),'pc-api');

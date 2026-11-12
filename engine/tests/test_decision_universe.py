@@ -1,5 +1,5 @@
 """Official-directory contract counterexamples; no mock quotes define the denominator."""
-import io, json, os, sys, tempfile, unittest, zipfile, shutil
+import io, json, os, sys, tempfile, unittest, zipfile, shutil, ssl, urllib.error
 from pathlib import Path
 from datetime import datetime, timedelta
 from unittest.mock import patch
@@ -95,5 +95,43 @@ class UniverseTests(unittest.TestCase):
         self.assertEqual((self.folder/'latest.json').read_bytes(),saved)
     def test_historical_date_never_uses_current_directory(self):
         result=self.collect(asof=AT-timedelta(days=1));self.assertFalse(result['verified']);self.assertEqual(self.calls,[])
+    def test_official_numeric_string_metadata_keeps_same_board_scope(self):
+        self.input['sse']['pageHelp'].update(total='1',pageNo='1')
+        self.input['sse']['result'][0].update(STOCK_TYPE=1,LIST_BOARD=1)
+        self.input['metadata'][0]['metadata']['recordcount']='1'
+        result=self.collect();self.assertTrue(result['verified'],result)
+        self.assertEqual(result['coverage']['sse_declared_total'],1)
+        self.assertEqual(result['coverage']['szse_declared_total'],1)
+    def test_http_failure_retries_once_and_retains_original_failure_body(self):
+        calls=[]
+        def fetch(url):
+            calls.append(url)
+            if len(calls)==1:
+                raise urllib.error.HTTPError(url,503,'unavailable',{'Content-Type':'text/html'},io.BytesIO(b'<html>temporary failure</html>'))
+            return self.fetch(url)
+        with patch.object(u,'now',return_value=AT),patch.object(u,'_fetch',side_effect=fetch),patch.object(u.time,'sleep'):
+            result=u.collect(storage_dir=self.folder)
+        self.assertTrue(result['verified'],result)
+        failed=result['diagnostics'][0]
+        self.assertEqual(failed['http_status'],503);self.assertEqual(failed['reason'],'http_503')
+        self.assertFalse(failed['ok']);self.assertEqual(Path(failed['raw_path']).read_bytes(),b'<html>temporary failure</html>')
+        self.assertIn('&_=',calls[1]);self.assertEqual(len(result['diagnostics']),6)
+    def test_html_200_is_not_a_successful_directory_and_is_preserved(self):
+        with patch.object(u,'now',return_value=AT),patch.object(u,'_fetch',return_value=b'<html>access denied</html>'),patch.object(u.time,'sleep'):
+            result=u.collect(storage_dir=self.folder)
+        self.assertFalse(result['verified']);self.assertEqual(result['rows'],[])
+        self.assertEqual(len(result['diagnostics']),2)
+        self.assertTrue(all(x['http_status']==200 and x['ok'] is False for x in result['diagnostics']))
+        self.assertTrue((self.folder/'last-attempt.json').exists())
+    def test_tls_failure_is_safely_classified_at_the_correct_source(self):
+        def fetch(url):
+            if 'szse.cn' in url:raise urllib.error.URLError(ssl.SSLError('test-secret-never-print'))
+            return self.fetch(url)
+        with patch.object(u,'now',return_value=AT),patch.object(u,'_fetch',side_effect=fetch),patch.object(u.time,'sleep'):
+            result=u.collect(storage_dir=self.folder)
+        self.assertFalse(result['verified']);self.assertEqual(result['failures'][0]['stage'],'szse_metadata')
+        self.assertEqual(result['diagnostics'][-1]['reason'],'tls_error');self.assertEqual(len(result['sources']),2)
+        self.assertNotIn('test-secret-never-print',json.dumps(result))
+        self.assertIsNone(result['coverage']['universe_count'])
 
 if __name__=='__main__':unittest.main()
