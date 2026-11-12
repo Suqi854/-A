@@ -200,7 +200,10 @@ def build(*,budget_seconds=4500,persist=True):
         try:print(json.dumps(store.restore()),flush=True)
         except (OSError,ValueError,RuntimeError) as exc:print("Research checkpoint unavailable: "+type(exc).__name__,flush=True)
     universe=decision_universe.collect(storage_dir=DATA/"decision-universe")
-    if not universe.get("verified"):raise RuntimeError("official_mainboard_directory_unavailable")
+    _save(root/"universe-report.json",universe)
+    if not universe.get("verified"):
+        print(json.dumps({"stage":"official_universe","failures":universe.get("failures",[])},ensure_ascii=False),flush=True)
+        raise RuntimeError("official_mainboard_directory_unavailable")
     codes=[r["code"] for r in universe["rows"]]
     if len(codes)!=len(set(codes)) or not codes:raise ValueError("official_universe_invalid")
     state_path=root/"state.json";previous=_read(state_path) if state_path.exists() else {}
