@@ -1,0 +1,52 @@
+name: AQ5 public AI fill refresh check
+on:
+  push:
+    branches: [codex/aq5-afterclose-check-20261112]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/aq5-afterclose-data-20261112
+          path: pages-data
+      - name: Prepare only the existing public AI ledger and overview
+        working-directory: engine
+        env:
+          AQ5_DATA: ${{ runner.temp }}/aq5-afterclose
+          AQ5_CLOUD: '1'
+          AQ5_MOCK: '0'
+          AQ5_KEY: ${{ secrets.AQ5_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python -B ../.github/aq5-public-export.py
+          cd ../pages-data
+          git config user.name 'aq5-publisher'
+          git config user.email 'aq5-cloud@users.noreply.github.com'
+          git add -- data/latest.json data/ai.json
+          test "$(git diff --cached --name-only | sort | paste -sd ',')" = 'data/ai.json,data/latest.json'
+          git commit -m 'Refresh public AI simulation fills after session close' --quiet
+          git push origin HEAD:codex/aq5-afterclose-data-20261112 --quiet
+          git rev-parse HEAD
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Watch the production simulation table from Chrome
+        env:
+          NODE_PATH: ${{ runner.temp }}/aq5-browser/node_modules
+        run: |
+          npm install --no-audit --no-fund --prefix "$RUNNER_TEMP/aq5-browser" playwright@1.56.1
+          node .github/aq5-public-watch.cjs
