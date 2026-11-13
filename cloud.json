@@ -1,0 +1,9 @@
+{
+ "owner": "cloud",
+ "active": false,
+ "heartbeat": "2026-11-13 16:00:12",
+ "updated": "2026-11-13 16:00:12",
+ "state_format": "AQ5v1-chunks",
+ "state_manifest": "state.manifest.json",
+ "note": "A量化云端交接状态（完整加密状态按块保存）。请勿手工修改。"
+}
