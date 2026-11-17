@@ -415,6 +415,11 @@ html .fc-shell > .panel:first-child > .pb { overflow:visible; }
 .fc-evidence > div { border-top:1px solid var(--line); padding:7px 0; min-width:0; }
 .fc-evidence dt { color:var(--muted); margin-bottom:3px; }
 .fc-evidence dd { margin:0; overflow-wrap:anywhere; }
+.fc-outlook { border-left:3px solid var(--fc-outlook-color,var(--muted)); padding:8px 10px; background:var(--panel2); }
+.fc-outlook b { color:var(--fc-outlook-color,var(--muted)); }
+.fc-outlook[data-position="above"] { --fc-outlook-color:var(--up); }
+.fc-outlook[data-position="inside"] { --fc-outlook-color:var(--warn); }
+.fc-outlook[data-position="below"] { --fc-outlook-color:var(--down); }
 .fc-timeframe-label { font-size:12px; color:var(--muted); }
 .fc-notice { margin:0; padding:9px 10px; border-left:2px solid var(--amber); background:var(--panel2); color:var(--text); font-size:12px; line-height:1.6; overflow-wrap:anywhere; }
 .fc-shell .scroll { max-width:100%; overflow:auto; }

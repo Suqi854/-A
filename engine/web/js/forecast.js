@@ -132,7 +132,9 @@
       ['最近确认买卖点',point?`${pointLabel(point)} · ${layers[point.level]} · ${priceArea(point.price)} · 发生于 ${displayTime(point.at)} · 确认于 ${displayTime(point.confirmed_at)}`:'尚无记录'],
       ['最近可核对背驰',div?`${pointLabel(div)} · ${layers[div.level]} · ${displayTime(div.at)} · MACD面积比 ${num(div.ratio)}，阈值 ${num(div.threshold)}`:'暂无符合校验条件的记录'],
     ];
-    const observation=historical?'':`<p class="fc-summary"><b>后续观察</b> · ${esc(review.observation)} <span class="hint">结构以图中同口径的已完成K线价格为准。</span></p>`;
+    const position=review.centers?.[review.reference_layer]?.position;
+    const outlook=Object.hasOwn(positions,position)?position:'unknown';
+    const observation=historical?'':`<p class="fc-summary fc-outlook" data-position="${outlook}"><b>后续观察 · ${positions[outlook]||'方向待确认'}</b><br>${esc(review.observation)} <span class="hint">结构以图中同口径的已完成K线价格为准。</span></p>`;
     return `<dl class="fc-evidence">${entries.map(([label,value])=>`<div><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`).join('')}</dl>${observation}`;
   }
   const qualityNotes=f=>(f.summary?.warnings||[]).map(w=>`<p class="hint">${esc(explain(typeof w==='object'?w.reason:w))}</p>`).join('');
@@ -207,7 +209,7 @@
   async function search(query,options){
     const serial=++searchSequence;let found=[];
     try{const result=await options.api('search?q='+encodeURIComponent(query));found=Array.isArray(result)?[...result]:[...(result.items||result.results||[])];}catch{}
-    if(serial!==searchSequence||!visible(options))return [];
+    if(serial!==searchSequence||!visible(options))return null;
     for(const [code,name] of names)if(name.includes(query)||short(code).includes(query)||code.includes(query.toLowerCase()))found.push({code,name});
     const seen=new Set();suggestions=found.map(r=>({code:normalize(r.code),name:r.name||''})).filter(r=>r.code&&!seen.has(r.code)&&seen.add(r.code)).slice(0,12);
     for(const r of suggestions)if(r.name)names.set(r.code,r.name);
@@ -246,10 +248,13 @@
   }
   async function analyze(options,quick=false){
     const input=document.getElementById('fc-query'),value=(input?.value||'').trim();searchText=value;
+    clearTimeout(searchTimer);
     if(value===symbolText(currentCode)&&currentCode)return choose({code:currentCode,name:names.get(currentCode)},options,quick);
     const code=normalize(value);if(code)return choose({code,name:names.get(code)||''},options,quick);
     if(!value){message('请输入股票名称或六位代码。');input?.focus();return;}
-    const found=await search(value,options);if(found.length===1)return choose(found[0],options,quick);
+    const found=await search(value,options);
+    if(!found)return;
+    if(found.length===1)return choose(found[0],options,quick);
     if(found.length){message('请选择下方匹配的股票。');input?.focus();return;}
     message('未找到匹配股票，请检查名称或六位代码。');
   }
@@ -260,7 +265,7 @@
     const report=root.querySelector('#fc-report');if(report)report.onclick=()=>document.getElementById('stock-report')?.scrollIntoView({block:'start'});
     if(input){
       input.oncompositionstart=()=>{composing=true;};input.oncompositionend=()=>{composing=false;input.oninput();};
-      input.oninput=()=>{searchText=input.value;clearTimeout(searchTimer);++searchSequence;suggestions=[];drawSuggestions();if(composing)return;const value=input.value.trim();if(!value)return;searchTimer=setTimeout(()=>search(value,options),150);};
+      input.oninput=()=>{searchText=input.value;clearTimeout(searchTimer);++searchSequence;suggestions=[];drawSuggestions();message('');if(composing)return;const value=input.value.trim();if(!value)return;searchTimer=setTimeout(()=>search(value,options),150);};
       input.onkeydown=event=>{
         if(event.isComposing||composing)return;
         if(event.key==='ArrowDown'||event.key==='ArrowUp'){suggestionIndex=Math.max(0,Math.min(suggestions.length-1,suggestionIndex+(event.key==='ArrowDown'?1:-1)));drawSuggestions();event.preventDefault();}

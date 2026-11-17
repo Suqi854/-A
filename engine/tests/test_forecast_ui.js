@@ -82,6 +82,18 @@ test('click selection supports touch click and preserves unknown-stock queue sta
   assert.match(h.root.innerHTML,/平安银行 <small>000001/);assert.match(h.root.innerHTML,/等待分析结果|等待这只股票/);
   assert.equal(h.calls[h.calls.length-1],'forecast?code=sz000001');
 });
+test('submitting an uncached stock name cancels the pending autocomplete search',async()=>{
+  const result=deferred(),h=harness({search:()=>result.promise}),calls=[];
+  h.options.requestAnalysis=async code=>calls.push(code);
+  await h.render();
+  const input=h.nodes.get('fc-query');input.value='通鼎互联';input.oninput();
+  const submit=h.nodes.get('fc-analyze').onclick(),autocomplete=h.timersAt(150);
+  result.resolve([{code:'sz002491',name:'通鼎互联'}]);
+  await Promise.all([submit,autocomplete]);
+  assert.deepEqual(calls,['sz002491']);
+  assert.equal(h.calls.filter(route=>route.startsWith('search?')).length,1);
+  assert.match(h.root.innerHTML,/通鼎互联 <small>002491/);
+});
 test('six digit analysis button requests the entered stock without a cached symbol',async()=>{
   const h=harness();await h.render();h.nodes.get('fc-query').value='600036';await h.nodes.get('fc-analyze').onclick();
   assert.deepEqual(h.requests,['sh600036']);assert.match(h.root.innerHTML,/<small>600036<\/small>/);
@@ -110,6 +122,16 @@ test('chart never places offscreen or ineligible buy markers at the chart edges'
   assert.match(h.ui.chart(frame),/<circle[^>]*><title>一买/);
   frame.quality.eligible=false;
   assert.doesNotMatch(h.ui.chart(frame),/<circle/);
+});
+test('Chan outlook carries a labeled color state for each center position',async()=>{
+  for(const [position,label] of [['above','上沿上方'],['inside','区间内'],['below','下沿下方'],['unknown','方向待确认']]){
+    const data=fixture();
+    data.structures['sh600000:day'].review={state:'neutral',close:10.4,observation:'观察回试',reference_layer:'stroke',
+      centers:position==='unknown'?{}:{stroke:{low:10,high:10.8,position,movement:'single'}}};
+    const h=harness({initial:data});await h.render();
+    assert.match(h.root.innerHTML,new RegExp(`fc-outlook" data-position="${position}"><b>后续观察 · ${label}</b>`));
+    if(position!=='unknown')assert.match(css,new RegExp(`\\.fc-outlook\\[data-position="${position}"\\]`));
+  }
 });
 test('ambiguous name requires selecting a result, does not analyze an arbitrary first result',async()=>{
   const h=harness({search:async()=>[{code:'sh600000',name:'浦发银行'},{code:'sz000001',name:'平安银行'}]});await h.render();
