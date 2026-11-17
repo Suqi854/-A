@@ -1,64 +1,28 @@
-name: 预测闭环工程验收
+name: 云端个股分析原版分段计时
 on:
-  workflow_dispatch:
   push:
-    branches: [main, 'feat/forecast-*', 'fix/forecast-*']
-    paths: ['engine/aq5/forecast/**', 'engine/aq5/decision*', 'engine/tests/test_decision*', 'engine/tests/test_forecast*', 'engine/tests/test_full_research.mjs', 'engine/tests/test_research_progress.mjs', 'engine/web/**', 'engine/cloudflare-relay/**', 'engine/requirements-forecast.txt', '.github/workflows/aq5-forecast*.yml', '.github/workflows/aq5-full-research.yml']
+    branches: ['fix/forecast-perf-profile-20261117']
+    paths: ['.github/workflows/aq5-forecast-checks.yml', 'engine/profile_original.py']
 permissions:
   contents: read
 jobs:
-  checks:
+  profile:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      PYTHONDONTWRITEBYTECODE: '1'
-      PYTHONUNBUFFERED: '1'
-      AQ5_MOCK: '1'
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: 隔离测试目录
-        run: |
-          mkdir -p "$RUNNER_TEMP/forecast-test"
-          echo "AQ5_DATA=$RUNNER_TEMP/forecast-test" >> "$GITHUB_ENV"
-          echo "AQ5_TEST_DATA=$RUNNER_TEMP/forecast-test" >> "$GITHUB_ENV"
-          echo "TMPDIR=$RUNNER_TEMP/forecast-test" >> "$GITHUB_ENV"
-          echo "PIP_CACHE_DIR=$RUNNER_TEMP/pip-cache" >> "$GITHUB_ENV"
-      - name: 固定训练依赖
-        run: |
-          python -m pip install --disable-pip-version-check --no-cache-dir --only-binary=:all: -r engine/requirements-forecast.txt
-      - name: 结构、预测、模拟、评估与集成
-        run: |
-          for test in engine/tests/test_forecast*.py; do python -B "$test"; done
-          for test in engine/tests/test_decision*.py; do python -B "$test"; done
-          node --test engine/tests/test_decision_cloud.mjs
-          node --test engine/tests/test_research_ui.mjs
-          node --test engine/tests/test_full_research.mjs engine/tests/test_research_progress.mjs
-          node --check engine/cloudflare-relay/full-research.js
-          python -B engine/tests/test_execution_guards.py
-          python -B engine/tests/test_handoff.py
-          python -B engine/tests/test_release_integration.py
-          python -B engine/tests/test_cloud.py
-          python -B engine/tests/test_cloud_chunks.py
-          node --check engine/web/js/forecast.js
-          node engine/tests/test_forecast_ui.js
-          node engine/tests/test_static.js
-          node engine/tests/test_forecast_queue.mjs
-          node engine/tests/test_forecast_routing.mjs
-          node engine/tests/test_cloud_kick.mjs
-          node engine/tests/test_live_relay.mjs
-      - name: 单股票公开行情实际读取（缺口保留）
+      - name: 用公开行情计时中天科技原版分析
         working-directory: engine
         env:
+          AQ5_DATA: ${{ runner.temp }}/aq5-profile-public
+          AQ5_FORECAST_REQUEST: '1'
+          AQ5_CLOUD: '1'
           AQ5_MOCK: '0'
-        run: python -B -m aq5.forecast.diagnostics --output "$RUNNER_TEMP/forecast-public-report.json"
-      - name: 保存公开诊断证据
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: forecast-public-diagnostics
-          path: ${{ runner.temp }}/forecast-public-report.json
-          if-no-files-found: warn
-          retention-days: 7
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONUNBUFFERED: '1'
+        run: python -B profile_original.py
