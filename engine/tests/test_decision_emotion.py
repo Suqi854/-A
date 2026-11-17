@@ -1,6 +1,7 @@
 import os,sys,unittest,json,uuid,hashlib,time
 from pathlib import Path
 from datetime import datetime,timedelta
+from threading import Event
 from unittest.mock import patch
 from urllib.parse import parse_qs,urlsplit
 
@@ -15,6 +16,26 @@ def history():
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_cloud_focus_starts_association_while_reading_ranked_boards(self):
+        started = Event()
+        code = 'sh600522'
+
+        def association(codes, at):
+            self.assertEqual(codes, [code])
+            started.set()
+            return [], [], [], []
+
+        def boards():
+            self.assertTrue(started.wait(2))
+            return [{'f12': 'BK001', 'f14': '测试'}], [], 1, True
+
+        with (patch.object(em, '_focus_fallback', side_effect=association),
+              patch.object(em, '_boards', side_effect=boards),
+              patch.object(em, '_get', return_value=({'success': True, 'result': {'pages': 1, 'data': []}}, {}))):
+            result = em.collect([{'code': code, 'name': '中天科技'}], focus_codes=[code], parallel_focus=True)
+        self.assertTrue(result['coverage']['board_list_complete'])
+        self.assertTrue(result['coverage']['lhb_list_complete'])
+
     def test_board_requires_multiday_and_breadth(self):
         b={'f3':5,'f104':8,'f105':2}
         self.assertTrue(em.board_signal(b,history())['eligible'])

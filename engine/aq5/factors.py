@@ -58,7 +58,7 @@ def _sig(x: float, c: float, s: float) -> float:
     return 100 / (1 + math.exp(-z))
 
 
-def raw_factors(rows: list[dict], live: dict | None, market_median: float = 0.0,
+def raw_factors(rows: list[dict], live: dict | None, market_median: float | None = 0.0,
                 flows: list[dict] | None = None) -> tuple[dict, dict]:
     """rows: 日K（最后一根可以是今天盘中）；live: 实时行情行。返回 (raw, ind)。"""
     ind = pack(rows)
@@ -95,7 +95,8 @@ def raw_factors(rows: list[dict], live: dict | None, market_median: float = 0.0,
     hi = (live or {}).get("high") or rows[-1]["high"]
     lo = (live or {}).get("low") or rows[-1]["low"]
     pos_day = (last - lo) / (hi - lo) if hi and lo and hi > lo else 0.5
-    strength = (pct - market_median) + 2 * (pos_day - 0.5)
+    relative = pct - market_median if market_median is not None else 0.0
+    strength = relative + 2 * (pos_day - 0.5)
 
     a = ind["atr"][-1]
     atrp = (a / last * 100) if a and last else 3.5

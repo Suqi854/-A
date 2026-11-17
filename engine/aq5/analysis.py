@@ -106,9 +106,9 @@ def rating(total: float, ind) -> tuple[str, str, str]:
 
 
 def evaluate(code, rows, live, session="intraday", market_median=0.0, flows=None, weights=None, sw=None,
-             risk=None) -> dict:
+             risk=None, *, sector_lookup=True) -> dict:
     raw, ind = raw_factors(rows, live, market_median, flows)
-    if live and live.get("price"):
+    if sector_lookup and live and live.get("price"):
         try:
             from . import sectors
             st = sectors.strength(code)
@@ -126,21 +126,25 @@ def evaluate(code, rows, live, session="intraday", market_median=0.0, flows=None
             "plan": trade_plan(rows, ind, live, risk), "ind": ind}
 
 
-def analyze(code: str) -> dict:
+def analyze(code: str, *, published_breadth=None) -> dict:
     code = market.norm_code(code)
     rows = market.kline_with_live(code, 250)
     if len(rows) < 30:
         raise ValueError("K线数据不足（新股或代码错误）")
     live = market.quotes([code]).get(code) or {}
-    snap = {r["code"]: r for r in market.snapshot()} if not code.startswith(("hk", "us")) else {}
+    scoped = published_breadth is not None
+    snap = {r["code"]: r for r in market.snapshot()} if not scoped and not code.startswith(("hk", "us")) else {}
     srow = snap.get(code, {})
     live = {**srow, **{k: v for k, v in live.items() if v is not None}}
     if srow.get("main_pct") is not None:
         live["main_pct"] = srow["main_pct"]
-    med = market.breadth(list(snap.values()))["median_pct"] if snap else 0.0
+    if scoped:
+        med = published_breadth.get("median_pct")
+    else:
+        med = market.breadth(list(snap.values()))["median_pct"] if snap else 0.0
     flows = market.fundflow(code, 30)
     ver, w = current_weights()
-    ev = evaluate(code, rows, live, "intraday", med, flows, w, strategy_weights())
+    ev = evaluate(code, rows, live, "intraday", med, flows, w, strategy_weights(), sector_lookup=not scoped)
     ind = ev.pop("ind")
     e = ind["extra"]
     lab, tone, advice = rating(ev["score"], ind)
@@ -170,12 +174,12 @@ def analyze(code: str) -> dict:
         risks.append("主力资金" + mf["label"])
     try:
         from . import sectors
-        sec = sectors.of_stock(code)
+        sec = None if scoped else sectors.of_stock(code)
     except Exception:  # noqa: BLE001
         sec = None
     try:
         from . import marketstate
-        mkt = marketstate.state()
+        mkt = marketstate.state(breadth=published_breadth) if scoped else marketstate.state()
     except Exception:  # noqa: BLE001
         mkt = None
     if mkt and mkt.get("label"):
@@ -200,7 +204,7 @@ def analyze(code: str) -> dict:
         f"凯利建议仓位 {kel['full']:.0f}%，实战用一半（{kel['half']:.0f}%）。EV 为负的交易，长期做一定亏钱。",
         "板块效应：A股资金常按行业和题材轮动，同一行业的股票往往同涨同跌。选股先看行业强不强，再挑行业里的龙头或补涨股，胜率更高。",
     ]
-    return {"code": code, "name": live.get("name"), "quote": {k: live.get(k) for k in (
+    result = {"code": code, "name": live.get("name"), "quote": {k: live.get(k) for k in (
                 "price", "pct", "chg", "open", "high", "low", "prev", "vol", "amount", "turnover", "vr", "pe", "pb", "outer", "inner", "avg", "amp",
                 "mcap", "fmcap", "main_net", "main_pct", "up_limit", "dn_limit", "time", "bids", "asks")},
             "score": ev["score"], "fscore": ev["fscore"], "sscore": ev["sscore"], "prob": ev["prob"],
@@ -212,3 +216,7 @@ def analyze(code: str) -> dict:
                        "reg_line": (mdl.get("reg") or {}).get("line"), "kelly": kel, "summary": models.summary_lines(mdl),
                        "formulas": models.FORMULAS},
             "flows": [{"date": f["date"], "main": f["main"], "main_pct": f["main_pct"]} for f in flows[-20:]]}
+    if scoped:
+        result["kline"] = rows
+        result["breadth_asof"] = published_breadth.get("asof")
+    return result

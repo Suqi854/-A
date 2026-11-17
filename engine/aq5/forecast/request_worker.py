@@ -124,7 +124,9 @@ def fulfill(item, password, analyze, *, context=None, handlers=None):
             _restore_targets(item['code'], context.get('targets', []), password)
         if handlers is None:
             from .. import decision_collect
-            handlers = {'analysis': decision_collect.analysis, 'screen': decision_collect.screen}
+            def analyze_stock(code):
+                return decision_collect.analysis(code, public_origin=os.environ.get('AQ5_RELAY'))
+            handlers = {'analysis': analyze_stock, 'screen': decision_collect.screen}
         if kind == 'analysis':
             result = handlers['analysis'](item['code'])
             if result.get('code') != item['code'] or result.get('fusion', {}).get('code') != item['code']:

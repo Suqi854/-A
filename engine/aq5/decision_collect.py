@@ -5,10 +5,14 @@ they never retroactively create historical selections.
 """
 from __future__ import annotations
 
+import json
+import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from urllib.request import Request, urlopen
 
 from . import db, market, research, decision, decision_evidence as evidence
-from .config import now
+from .config import CN_TZ, now
 
 VERSION = "decision-collection-1"
 MAX_FINANCIAL_CODES = 100
@@ -46,14 +50,26 @@ def _ingest(report):
     return {"inserted": inserted, "rejected": failures, "active_ids": ids}
 
 
-def collect(snapshot, codes, *, focus=False):
+def _measure(timing, key, call, /, *args, **kwargs):
+    start = time.monotonic()
+    try:
+        return call(*args, **kwargs)
+    finally:
+        if timing is not None:
+            timing[key] = round((time.monotonic() - start) * 1000)
+
+
+def collect(snapshot, codes, *, focus=False, timing=None):
     from . import decision_growth, decision_emotion
     db.init()
+    emotion_options = {"focus_codes": codes} if focus else {}
+    if focus and timing is not None:
+        emotion_options["parallel_focus"] = True
     jobs = {"growth": lambda: decision_growth.collect(codes),
-            "emotion": lambda: decision_emotion.collect(snapshot, **({"focus_codes": codes} if focus else {}))}
+            "emotion": lambda: decision_emotion.collect(snapshot, **emotion_options)}
     reports = {}
     with ThreadPoolExecutor(max_workers=2) as executor:
-        pending = {key: executor.submit(job) for key, job in jobs.items()}
+        pending = {key: executor.submit(_measure, timing, key, job) for key, job in jobs.items()}
         for key, future in pending.items():
             try:
                 report = future.result()
@@ -70,7 +86,8 @@ def collect(snapshot, codes, *, focus=False):
     return {"version": VERSION, "observed_at": evidence.stamp(now()), "sources": reports,
             "scope": {"financial_requested": len(codes), "snapshot_count": len(snapshot),
                       "financial_codes": codes, "full_market": False,
-                      "selection": "沪深主板非ST公开快照，按成交额优先的最多100股财务核对；主线情绪以采集器实际覆盖为准"}}
+                      "selection": ("指定股票的公开报价、财务与情绪证据" if focus else
+                                    "沪深主板非ST公开快照，按成交额优先的最多100股财务核对；主线情绪以采集器实际覆盖为准")}}
 
 
 def screen(*,read_only=True):
@@ -120,27 +137,66 @@ def _lhb_details(items):
     return details
 
 
-def analysis(code):
+def _published_breadth(origin, at):
+    """Read the existing public aggregate with explicit age and coverage checks."""
+    try:
+        url = origin.rstrip("/") + "/data/latest.json"
+        with urlopen(Request(url, headers={"User-Agent": "aq5-stock-analysis"}), timeout=5) as response:
+            body = json.loads(response.read(1024 * 1024))
+        if body.get("mock") is not False:
+            return {}
+        stamp = datetime.fromisoformat(body["time"])
+        stamp = stamp.astimezone(CN_TZ) if stamp.tzinfo else stamp.replace(tzinfo=CN_TZ)
+        age = (at - stamp).total_seconds()
+        closed_today = (stamp.date() == at.date() and stamp.hour >= 15
+                        and body.get("phase") in ("after", "closed"))
+        breadth = body["breadth"]
+        total, up = breadth.get("total"), breadth.get("up")
+        if (age < 0 or (age > 180 and not closed_today) or type(total) is not int or total < 1000
+                or type(up) is not int or not 0 <= up <= total or not evidence.finite(breadth.get("median_pct"))):
+            return {}
+        return {**breadth, "asof": stamp.isoformat()}
+    except (AttributeError, ValueError, TypeError, KeyError, OSError):
+        return {}
+
+
+def analysis(code, *, public_origin=None):
     from . import analysis as base
     code = evidence.code_of(market.norm_code(code))
     if not market.is_main_board(code):
         raise ValueError("当前融合分析仅支持沪深主板")
     db.init()
-    try:
-        snapshot = market.snapshot()
-    except (RuntimeError, OSError):
-        snapshot = []
-    # Run the three independent reads together, then reuse a single structure snapshot.
+    timing = {} if public_origin else None
+    snapshot = []
+    if not public_origin:
+        try:
+            snapshot = market.snapshot()
+        except (RuntimeError, OSError):
+            pass
+
+    def technical_report():
+        if not public_origin:
+            return base.analyze(code)
+        breadth = _measure(timing, "published_breadth", _published_breadth, public_origin, now())
+        return base.analyze(code, published_breadth=breadth)
+
     with ThreadPoolExecutor(max_workers=2) as pool:
-        technical = pool.submit(base.analyze, code)
-        structure = pool.submit(decision.load_forecast, code)
-        collection = collect(_pool(snapshot), [code], focus=True)
+        technical = pool.submit(_measure, timing, "technical", technical_report)
+        structure = pool.submit(_measure, timing, "four_timeframes", decision.load_forecast, code)
+        if public_origin:
+            try:
+                stock = _measure(timing, "stock_quote", market.quotes, [code]).get(code)
+            except (RuntimeError, OSError):
+                stock = None
+            snapshot = [stock] if stock and stock.get("code") == code else []
+        collection = _measure(timing, "evidence", collect, _pool(snapshot), [code], focus=True, timing=timing)
         raw = technical.result()
         forecast = structure.result()
     fusion = decision.view(code, forecast=forecast)
     result = decision.merge(raw, fusion)
     result["forecast"] = {k: forecast[k] for k in ("symbol", "summary", "structures", "predictions", "request", "status", "coverage")}
-    result["kline"] = market.kline_with_live(code, 250)
+    if not public_origin:
+        result["kline"] = market.kline_with_live(code, 250)
     result["analysis_time"] = evidence.stamp(now())
     result["source_evidence"] = evidence.latest(now()).get(code, {})
     lhb = [x for x in collection["sources"].get("emotion", {}).get("proxy_metrics", []) if x.get("code") == code]
@@ -148,4 +204,6 @@ def analysis(code):
     details.extend(_lhb_details(lhb))
     result["collection"] = _public({**collection, "sources": {k: {x: y for x, y in v.items() if x != "records"}
                                                                 for k, v in collection["sources"].items()}})
+    if timing is not None:
+        print("AQ5_ANALYSIS_MS " + json.dumps(timing, sort_keys=True), flush=True)
     return result

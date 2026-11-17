@@ -440,18 +440,35 @@ def select_context(records):
     return chosen,alternatives
 
 
-def collect(snapshot, asof=None, *, max_boards=5, max_history=30, max_seats=12, focus_codes=None):
+def collect(snapshot, asof=None, *, max_boards=5, max_history=30, max_seats=12, focus_codes=None,
+            parallel_focus=False):
     at = _at(asof)
     if at > now() + timedelta(seconds=5):
         raise ValueError("future_asof")
     codes = {r["code"] for r in snapshot if market.is_main_board(str(r.get("code", ""))) and "ST" not in str(r.get("name", "")).upper()}
     focuses = [code for code in (focus_codes or []) if code in codes]
     target_codes = codes if focus_codes is None else set(focuses)
+    if parallel_focus and focuses:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            related = pool.submit(_focus_fallback, focuses, at)
+            return _collect(snapshot, at, codes, focuses, target_codes, max_boards, max_history, max_seats,
+                            focused=focus_codes is not None, related=related)
+    return _collect(snapshot, at, codes, focuses, target_codes, max_boards, max_history, max_seats,
+                    focused=focus_codes is not None)
+
+
+def _collect(snapshot, at, codes, focuses, target_codes, max_boards, max_history, max_seats, *, focused, related=None):
     records, failures, assessments, proxies, receipts = [], [], [], [], []
     coverage = {"input_count": len(snapshot), "mainboard_count": len(codes), "board_total": 0,
                 "board_received": 0, "board_list_complete": False, "boards_examined": 0, "history_count": 0,
                 "membership_codes": 0, "lhb_candidates": 0, "lhb_details": 0, "hot_money_identified": 0,
                 "limits": {"max_boards": max_boards, "max_history": max_history, "max_seats": max_seats}}
+    if focused and not target_codes:
+        coverage["lhb_list_complete"] = False
+        return {"version": VERSION, "asof": at.isoformat(), "records": [], "coverage": coverage,
+                "selected_contexts": [], "assessments": [], "proxy_metrics": [], "sources": [],
+                "failures": [{"stage": "target_quote", "reason": "未取得可用于情绪分析的目标股票行情"}],
+                "full_market_screen": False}
     known_members = set()
     try:
         boards, br, total, complete = _boards(); receipts += br
@@ -499,15 +516,15 @@ def collect(snapshot, asof=None, *, max_boards=5, max_history=30, max_seats=12, 
         except (RuntimeError,ValueError,KeyError,TypeError,OSError) as exc:
             failures.append({'stage':'sina_fallback','reason':str(exc)[:180]})
     if not coverage["board_received"] or focuses:
-        selected_focus = focuses if focus_codes is not None else [r["code"] for r in sorted(snapshot,key=lambda r:-(r.get("pct") if _finite(r.get("pct")) else -999)) if r.get("code") in codes][:max_boards]
+        selected_focus = focuses if focused else [r["code"] for r in sorted(snapshot,key=lambda r:-(r.get("pct") if _finite(r.get("pct")) else -999)) if r.get("code") in codes][:max_boards]
         coverage["focus_codes"] = selected_focus
         try:
-            fr,fs,fa,ff = _focus_fallback(selected_focus,at)
+            fr,fs,fa,ff = related.result() if related else _focus_fallback(selected_focus,at)
             records += fr;receipts += fs;assessments += fa;failures += ff
         except (RuntimeError,ValueError,KeyError,TypeError,OSError) as exc:
             failures.append({"stage":"focus_fallback","reason":str(exc)[:180]})
     try:
-        focused_lhb = focus_codes is not None
+        focused_lhb = focused
         lhb_codes = set(focuses) if focused_lhb else codes
         if focused_lhb and not lhb_codes:
             raise ValueError("lhb_no_eligible_focus_codes")

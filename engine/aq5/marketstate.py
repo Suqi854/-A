@@ -107,20 +107,24 @@ def index_state(code: str, name: str) -> dict:
     return out
 
 
-def state(force: bool = False) -> dict:
-    if not force and _cache["data"] and time.time() - _cache["t"] < 60:
+def state(force: bool = False, *, breadth=None) -> dict:
+    """Use only the main index for a stock report with supplied market breadth."""
+    stock_report = breadth is not None
+    if not stock_report and not force and _cache["data"] and time.time() - _cache["t"] < 60:
         return _cache["data"]
     idx = []
-    for code, name in INDICES:
+    indices = [item for item in INDICES if item[0] == "sh000300"] if stock_report else INDICES
+    for code, name in indices:
         try:
             idx.append(index_state(code, name))
         except Exception:  # noqa: BLE001
             idx.append({"code": code, "name": name})
-    _alert_indices(idx)
+    if not stock_report:
+        _alert_indices(idx)
     main = next((x for x in idx if x["code"] == "sh000300"), {})
     try:
-        br = market.breadth(market.snapshot())
-        up_ratio = br["up"] / br["total"] if br["total"] else 0.5
+        br = breadth if stock_report else market.breadth(market.snapshot())
+        up_ratio = br["up"] / br["total"] if br.get("total") else 0.5
     except Exception:  # noqa: BLE001
         br, up_ratio = {}, 0.5
     pct300 = main.get("pct") or 0
@@ -134,6 +138,8 @@ def state(force: bool = False) -> dict:
             "up_ratio": round(up_ratio, 3), "risk_off": risk_off, "stance": stance, "advice": advice,
             "breadth": {k: br.get(k) for k in ("up", "down", "limit_up", "limit_down", "amount_yi", "median_pct")},
             "shifts": STATE["shifts"][-12:]}
+    if stock_report:
+        return data
     if main.get("live"):
         _track_shift(label, data)
     _cache.update(t=time.time(), data=data)
