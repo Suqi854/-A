@@ -289,7 +289,7 @@ def _features(structures, close, rows):
 
 def _chart(book, rows):
     """Display-only evidence from the same input and final snapshot as the structures."""
-    bars = [{k: row[k] for k in ("date", "open", "high", "low", "close")} for row in rows[-180:]]
+    bars = [{k: row[k] for k in ("date", "open", "high", "low", "close", "vol")} for row in rows[-180:]]
     divergence = []
     for level, points in (("stroke", book.bs_point_lst), ("segment", book.seg_bs_point_lst)):
         for point in points.bsp_iter():

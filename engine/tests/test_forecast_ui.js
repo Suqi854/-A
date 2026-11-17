@@ -55,7 +55,7 @@ test('main view uses original panels and Chinese levels, diagnostics are collaps
   const h=harness();await h.render();const html=h.root.innerHTML,main=html.split('<details')[0];
   assert.match(main,/class="panel"/);assert.match(main,/class="ph"/);assert.match(main,/class="in"/);
   assert.match(main,/股票名称或代码/);assert.match(main,/>分析<\/button>/);
-  assert.match(main,/>日线<\/option>/);assert.match(main,/>60分钟<\/option>/);assert.match(main,/>15分钟<\/option>/);assert.match(main,/>5分钟<\/option>/);
+  assert.match(main,/aria-pressed="true">日线<\/button>/);assert.match(main,/>60分钟<\/button>/);assert.match(main,/>15分钟<\/button>/);assert.match(main,/>5分钟<\/button>/);
   assert.doesNotMatch(main,/fc-cards|60个交易日|独立模拟记录|训练数据指纹/);
   assert.match(html,/<details class="fc-diagnostics">/);assert.doesNotMatch(html,/<details[^>]*\bopen/);
   assert.match(main,/走势分析已更新，概率尚未验证/);assert.doesNotMatch(main,/<table/);
@@ -123,6 +123,23 @@ test('chart never places offscreen or ineligible buy markers at the chart edges'
   frame.quality.eligible=false;
   assert.doesNotMatch(h.ui.chart(frame),/<circle/);
 });
+test('chart shows intermediate dates, same-session volume and minute ticks after switching levels',async()=>{
+  const data=fixture(), day=data.structures['sh600000:day'];
+  day.price_bars=Array.from({length:12},(_,i)=>({
+    date:`2026-11-${String(i+1).padStart(2,'0')}T15:00:00+08:00`,open:10,close:10.4,high:10.6,low:9.9,vol:100+i
+  }));
+  data.structures['sh600000:60m']={...day,price_bars:[
+    {...day.price_bars[0],date:'2026-11-12T10:30:00+08:00'},
+    {...day.price_bars[1],date:'2026-11-12T11:30:00+08:00'}
+  ]};
+  const h=harness({initial:data});await h.render();
+  assert.ok((h.root.innerHTML.match(/class="fc-date-tick"/g)||[]).length>2);
+  assert.equal((h.root.innerHTML.match(/class="fc-volume"/g)||[]).length,12);
+  assert.match(h.root.innerHTML,/id="fc-ohlc"[^>]*>2026-11-12.*收 10.40.*量 111/);
+  h.nodes.get('fc-tf').onclick({target:{closest:()=>({dataset:{level:'60m'}})}});
+  assert.match(h.root.innerHTML,/class="fc-date-tick"[^>]*>11-12 10:30/);
+  assert.match(h.root.innerHTML,/aria-pressed="true">60分钟<\/button>/);
+});
 test('Chan outlook carries a labeled color state for each center position',async()=>{
   for(const [position,label] of [['above','上沿上方'],['inside','区间内'],['below','下沿下方'],['unknown','方向待确认']]){
     const data=fixture();
@@ -174,7 +191,7 @@ test('failed data validation cannot claim that current analysis is ready',async(
 });
 test('mobile rules and chart inherit terminal theme variables',()=>{
   assert.match(css,/\.fc-search input\.in \{ width:100%; min-width:0;/);assert.match(css,/min-height:40px/);
-  const h=harness();const svg=h.ui.chart(fixture().structures['sh600000:day']);assert.match(svg,/var\(--muted\)/);assert.match(svg,/viewBox/);
+  const h=harness();const svg=h.ui.chart(fixture().structures['sh600000:day']);assert.match(svg,/var\(--ch-axis\)/);assert.match(svg,/viewBox/);
   assert.doesNotMatch(css.slice(css.indexOf('.fc-shell')),/fc-cards|border-radius:8px/);
 });
 

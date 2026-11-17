@@ -1,4 +1,4 @@
-"""离线验证计划默认影子语义，以及显式开启的旧版兼容入口。"""
+"""离线验证计划模拟建盘、历史兼容和独立自动交易。"""
 import os, sys
 from datetime import datetime
 os.environ["AQ5_MOCK"] = "1"
@@ -61,15 +61,28 @@ assert res["mode"] == "t_trade" and "锁定" in res["reason"], res
 res = plan.set_mode("auto")
 assert res["mode"] in plan.MODES
 
-# 5 默认影子模式：历史计划仍可读，选股或盘中评估不会自动生成旧策略开仓单。
+# 5 历史计划没有独立设置时，继续遵循过去的影子开关。
 plan.set_mode("attack")
+assert plan.view()["auto_trade"]
+with db.tx() as c:
+    c.execute("UPDATE plan SET cfg=json_remove(cfg, '$.auto_trade') WHERE id=1")
 assert not config.load_settings()["strategy_v2"]["legacy_auto"]
 before = db.q1("SELECT COUNT(*) AS n FROM orders WHERE account='plan'")["n"]
+config.save_settings({"pick": {"auto_trade": False}})
+real_on_picks = plan.on_picks
+dispatched = []
+def record_picks(picks, session):
+    dispatched.append(session)
+    real_on_picks(picks, session)
+plan.on_picks = record_picks
 pr = picker.run("close")
+plan.on_picks = real_on_picks
+assert dispatched == ["close"]
 assert pr["picks"] and all(p["eligible"] == (p["tier"] in ("A", "B")) for p in pr["picks"])
 plan.on_picks(pr["picks"], "close")
 plan.tick()
 v2 = plan.view()
+assert not v2["auto_trade"]
 assert v2["exists"] and v2["active"] and len(v2["account"]["positions"]) == 3
 assert db.q1("SELECT COUNT(*) AS n FROM orders WHERE account='plan'")["n"] == before
 
@@ -196,4 +209,24 @@ after = len(db.q("SELECT id FROM orders WHERE account='plan' AND reason LIKE '%�
 assert after == before + 1, (before, after)
 print("盘中机会买入 OK")
 config.save_settings({"strategy_v2": {"legacy_auto": False}})
+
+# 空仓锁定做T：按大盘风控等合格候选，只建一只，随后回到锁定策略。
+plan.start({"cash": 100000, "risk": "均衡", "mode": "t_trade"})
+marketstate.state = lambda **_: {"stance": "防守", "risk_off": True}
+plan.on_picks([explicit_pick], "close")
+assert not plan.view()["account"]["trades"]
+marketstate.state = lambda **_: {"stance": "中性"}
+plan.on_picks([{**explicit_pick, "tier": "C", "eligible": False}], "close")
+assert not plan.view()["account"]["trades"]
+plan._stance_seen.update(stance="中性", since=_tm.time() - plan.STEADY_SEC - 1)
+plan.on_picks([{**explicit_pick, "tier": "C", "eligible": False}], "close")
+assert not plan.view()["account"]["trades"]
+second = {**explicit_pick, "code": codes[0], "price": market.quotes([codes[0]])[codes[0]]["price"]}
+plan.on_picks([explicit_pick, second], "close")
+plan.on_picks([explicit_pick, second], "close")
+v = plan.view()
+assert v["active"] and v["auto_trade"] and v["mode"] == v["cfg"]["mode"] == "t_trade", v["reason"]
+assert len(v["account"]["positions"]) == len(v["account"]["trades"]) == 1
+assert v["account"]["positions"][0]["avail"] == 0, "新仓遵守 T+1"
+assert not config.load_settings()["strategy_v2"]["legacy_auto"]
 print("ALL OK")

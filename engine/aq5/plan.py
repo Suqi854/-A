@@ -45,6 +45,19 @@ def active() -> bool:
     return bool(r and r["active"] and db.q1("SELECT 1 FROM accounts WHERE id=?", (ACCT,)))
 
 
+def _auto_trade(cfg: dict) -> bool:
+    # Existing plans without an execution setting retain their previous mode.
+    if "auto_trade" in cfg:
+        return bool(cfg["auto_trade"])
+    return bool(load_settings().get("strategy_v2", {}).get("legacy_auto", False))
+
+
+def trading_enabled() -> bool:
+    r = _row()
+    return bool(r and r["active"] and _auto_trade(r["cfg"])
+                and db.q1("SELECT 1 FROM accounts WHERE id=?", (ACCT,)))
+
+
 def _tag(mode: str) -> str:
     return f"计划·{MODES[mode][0]}"
 
@@ -158,7 +171,7 @@ def start(b: dict) -> dict:
     hold_val = d["hold_cost"]
     ts = now().strftime("%Y-%m-%d %H:%M:%S")
     cfg = {"cash": cash, "buys": buys, "holdings": holds, "risk": risk, "mode": lock, "init_total": d["init_total"],
-           "started": ts}
+           "started": ts, "auto_trade": True}
     with _lock, db.tx() as c:
         for t in ("positions", "orders", "trades", "equity"):
             c.execute(f"DELETE FROM {t} WHERE account=?", (ACCT,))
@@ -186,7 +199,8 @@ def start(b: dict) -> dict:
 def _after_start() -> None:
     _set_exits()
     try:
-        choose(force=True)
+        with _lock:
+            choose(force=True)
     except Exception as e:  # noqa: BLE001
         db.event("plan", "计划模拟：策略选择出错", str(e)[:200], "warn")
 
@@ -205,18 +219,17 @@ def _set_exits() -> None:
 
 
 def stop() -> dict:
-    with db.tx() as c:
+    with _lock, db.tx() as c:
         c.execute("UPDATE plan SET active=0 WHERE id=1")
         c.execute("UPDATE orders SET status='cancelled' WHERE account=? AND status='pending'", (ACCT,))
-    db.event("plan", "计划模拟已暂停", "持仓和记录保留，AI 不再交易（到价止损止盈也停了）")
-    with db.tx() as c:
         c.execute("UPDATE positions SET auto=0 WHERE account=?", (ACCT,))
+    db.event("plan", "计划模拟已暂停", "持仓和记录保留，AI 不再交易（到价止损止盈也停了）")
     return {"ok": True}
 
 
 def resume() -> dict:
-    with db.tx() as c:
-        c.execute("UPDATE plan SET active=1 WHERE id=1")
+    with _lock, db.tx() as c:
+        c.execute("UPDATE plan SET active=1, cfg=json_set(cfg, '$.auto_trade', json('true')) WHERE id=1")
         c.execute("UPDATE positions SET auto=1 WHERE account=?", (ACCT,))
     db.event("plan", "计划模拟已恢复", "")
     threading.Thread(target=lambda: choose(force=True), daemon=True).start()
@@ -224,13 +237,10 @@ def resume() -> dict:
 
 
 def set_mode(mode: str) -> dict:
-    r = _row()
-    if not r:
-        raise ValueError("还没有建立计划")
-    cfg = r["cfg"]
-    cfg["mode"] = mode if mode in MODES else "auto"
-    with db.tx() as c:
-        c.execute("UPDATE plan SET cfg=? WHERE id=1", (db.dumps(cfg),))
+    with _lock, db.tx() as c:
+        if not c.execute("UPDATE plan SET cfg=json_set(cfg, '$.mode', ?) WHERE id=1",
+                         (mode if mode in MODES else "auto",)).rowcount:
+            raise ValueError("还没有建立计划")
     return choose(force=True)
 
 
@@ -262,7 +272,9 @@ def _decide(cash_ratio: float, n: int, weak: int, ms: dict, risk: str | None, lo
     """策略选择规则（choose 和 preview 共用）。返回 (策略, 额外理由)。"""
     stance = ms.get("stance") or "中性"
     why = []
-    if lock in MODES:
+    if lock == "t_trade" and not n:
+        why.append("空仓时先按大盘与现金判断是否建仓，有持仓后继续做T")
+    elif lock in MODES:
         return lock, ["你锁定了策略"]
     if ms.get("risk_off") or stance == "防守" or (n and weak * 2 >= n and stance in ("谨慎", "防守")):
         mode = "defense"
@@ -279,6 +291,8 @@ def _decide(cash_ratio: float, n: int, weak: int, ms: dict, risk: str | None, lo
     while st and st[mode]["n"] >= 5 and (st[mode]["win"] or 0) < 0.35 and mode not in seen:
         seen.add(mode)
         nxt = FALLBACK[mode]
+        if nxt == "t_trade" and not n:
+            nxt = "defense"
         why.append(f"「{MODES[mode][0]}」本计划已平仓 {st[mode]['n']} 笔、胜率 {st[mode]['win']:.0%}，降级为「{MODES[nxt][0]}」")
         mode = nxt
     return mode, why
@@ -314,8 +328,15 @@ def choose(force: bool = False) -> dict:
     stance = _steady_stance(raw, r["stance"] if (r["updated"] or "")[:10] == today() else None)
     if stance != raw:
         ms = {**ms, "stance": stance, "risk_off": False if stance != "防守" else ms.get("risk_off")}
+    lock = r["cfg"].get("mode", "auto")
     if not force and r["mode"] and r["stance"] == stance and (r["updated"] or "")[:10] == today():
-        return {"mode": r["mode"], "reason": r["reason"]}
+        if lock != "t_trade" and r["mode"] != "t_trade":
+            return {"mode": r["mode"], "reason": r["reason"]}
+        has_inventory = db.q1(
+            "SELECT 1 FROM positions WHERE account=? AND qty>0 UNION ALL "
+            "SELECT 1 FROM orders WHERE account=? AND side='buy' AND status='pending' LIMIT 1", (ACCT, ACCT))
+        if bool(has_inventory) == (r["mode"] == "t_trade"):
+            return {"mode": r["mode"], "reason": r["reason"]}
     v = sim.view(ACCT, light=True)
     eq = v["equity"] or 1
     pend = db.q("SELECT code, qty, price FROM orders WHERE account=? AND status='pending' AND side='buy'", (ACCT,))
@@ -327,7 +348,7 @@ def choose(force: bool = False) -> dict:
     weak = [c for c, s in sc.items() if s < 50]
     n = len(codes)
     why = [f"现金占比 {cash_ratio:.0%}", f"持仓 {n} 只" + (f"（{len(weak)} 只评分<50）" if weak else ""), f"大盘「{stance}」"]
-    mode, more = _decide(cash_ratio, n, len(weak), ms, r["cfg"].get("risk"), r["cfg"].get("mode", "auto"), mode_stats())
+    mode, more = _decide(cash_ratio, n, len(weak), ms, r["cfg"].get("risk"), lock, mode_stats())
     why = more[:1] + why + more[1:] if more and more[0] == "你锁定了策略" else why + more
     reason = "；".join(why) + f" → {MODES[mode][0]}：{MODES[mode][1]}"
     ts = now().strftime("%Y-%m-%d %H:%M:%S")
@@ -384,11 +405,9 @@ def _size_k() -> float:
 
 def on_picks(picks: list[dict], session: str) -> None:
     """竞价/尾盘选股后调用：按当前策略决定买卖。"""
-    if not load_settings().get("strategy_v2", {}).get("legacy_auto", False):
-        return
-    if not active():
-        return
     with _lock:
+        if not trading_enabled():
+            return
         mode = choose(force=True)["mode"]
         rk = _risk()
         v = sim.view(ACCT, light=True)
@@ -414,9 +433,10 @@ def on_picks(picks: list[dict], session: str) -> None:
                         cash += pos["avail"] * (pos["price"] or pos["cost"]) * 0.998
                         held.discard(pos["code"])
         tiers = ("A", "B")
-        limit = 3 if mode == "attack" else 2
-        cands = [p for p in picks if p.get("tier", "A") in tiers]
-        if mode == "attack" and not cands:  # 这次没有 A/B 级：综合分够高的 C 级小仓位试错，不让资金一直闲着
+        seed_t = not held and _row()["cfg"].get("mode") == "t_trade"
+        limit = 1 if seed_t else (3 if mode == "attack" else 2)
+        cands = [p for p in picks if p.get("tier", "" if seed_t else "A") in tiers and p.get("eligible", True)]
+        if mode == "attack" and not cands and not seed_t:  # 普通进攻保留原有小仓试错
             cands = [p for p in picks if (p.get("score") or 0) >= C_MIN_SCORE][:1]
         bought, sk = 0, _size_k()
         for p in cands:
@@ -431,21 +451,24 @@ def on_picks(picks: list[dict], session: str) -> None:
                 held.add(p["code"])
                 cash -= budget
                 bought += 1
+                if seed_t:
+                    choose(force=True)
+                    break
 
 
 def tick() -> None:
     """盘中每 2 分钟：大盘立场变了就重新选策略；做T / 轮动 / 进攻模式下对持仓按做T信号高抛低吸。"""
-    if not load_settings().get("strategy_v2", {}).get("legacy_auto", False):
-        return
-    if not active() or not sim.can_trade_now():
+    if not sim.can_trade_now():
         return
     from . import signals
     with _lock:
+        if not trading_enabled():
+            return
         mode = choose()["mode"]
         if mode not in ("t_trade", "rotate", "attack"):
             return
         hm = now().hour * 100 + now().minute
-        if mode in ("attack", "rotate") and hm < 1450:
+        if mode in ("attack", "rotate") and hm < 1450 and _row()["cfg"].get("mode") != "t_trade":
             _scan_entries(mode)
         for p in db.q("SELECT * FROM positions WHERE account=?", (ACCT,)):
             code = p["code"]
@@ -572,7 +595,8 @@ def view() -> dict:
     base = baseline(r["cfg"])
     performance = accounting.plan_performance(r["cfg"], acct)
     pend = [o for o in acct.get("orders", []) if o["status"] == "pending"]
-    return {"exists": True, "active": bool(r["active"]), "cfg": r["cfg"], "mode": r["mode"], "pending": pend,
+    return {"exists": True, "active": bool(r["active"]), "auto_trade": _auto_trade(r["cfg"]),
+            "cfg": r["cfg"], "mode": r["mode"], "pending": pend,
             "mode_name": MODES[r["mode"]][0] if r["mode"] else None, "reason": r["reason"], "updated": r["updated"],
             "stance": r["stance"], "history": r["history"][::-1], "stats": mode_stats(), "baseline": base, "performance": performance,
             "excess": round(acct["total_pct"] - base["pct"], 2) if base and acct.get("total_pct") is not None else None,

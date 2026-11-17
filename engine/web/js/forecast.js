@@ -40,26 +40,43 @@
   function chart(item,historical=false){
     const s=item?.structures||{};
     const candles=item?.price_bars?.length>0;
-    const W=Math.min(960,Math.max(320,document.getElementById('stock-summary')?.clientWidth||860));
-    const bars=(candles?item.price_bars:s.klines||[]).filter(b=>finite(b.high)&&finite(b.low)).slice(-(W<600?85:160));
+    const W=Math.max(280,(document.getElementById('stock-summary')?.clientWidth||860)-18);
+    const bars=(candles?item.price_bars:s.klines||[]).filter(b=>finite(b.high)&&finite(b.low)).slice(-(W<600?70:160));
     if(!bars.length)return '<div class="empty">该级别的结构图尚未更新，收到完整行情后显示。</div>';
-    const H=W<600?238:306,left=48,right=W-12,top=10,bottom=H-28;
+    const H=W<600?300:388,left=6,right=W-51,top=9,axis=H-25;
+    const maxVol=candles?Math.max(0,...bars.map(b=>finite(b.vol)?b.vol:0)):0;
+    const bottom=axis-(maxVol?Math.round(H*.19):0);
     const low=Math.min(...bars.map(b=>b.low)),high=Math.max(...bars.map(b=>b.high));
     const pad=(high-low||high*.02||1)*.09,range=high-low+2*pad,step=(right-left)/bars.length;
     const x=i=>left+(i+.5)*step,y=p=>bottom-(p-low+pad)/range*(bottom-top);
     const dates=bars.map(b=>b.date||b.end||b.at||b.time||''),times=dates.map(timestamp);
+    const label=i=>String(dates[i]).slice(0,currentTF==='day'?10:16).replace('T',' ');
+    const volText=v=>window.Charts?.fmtV(v)??String(v);
+    const quoteLine=(bar,i)=>label(i)+(candles&&finite(bar.open)&&finite(bar.close)
+      ?`  开 ${num(bar.open)}  高 ${num(bar.high)}  低 ${num(bar.low)}  收 ${num(bar.close)}${finite(bar.vol)?'  量 '+volText(bar.vol):''}`
+      :`  高 ${num(bar.high)}  低 ${num(bar.low)}`);
     const first=timestamp(bars[0].start||dates[0]),last=times.at(-1);
     const index=t=>times.findIndex(end=>end>=t);
     const at=t=>{const time=timestamp(t);return time>=first&&time<=last?x(index(time)):null;};
     const qualified=!historical&&item.quality?.eligible!==false;
     const dash=row=>qualified&&row.confirmed?'none':'4 3';
-    let svg=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(levels[currentTF])}缠论结构图">
+    let svg=`<svg id="fc-plot-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(levels[currentTF])}缠论结构图">
       <defs><clipPath id="fc-plot"><rect x="${left}" y="${top}" width="${right-left}" height="${bottom-top}"/></clipPath></defs>`;
     for(let k=0;k<5;k++){
       const price=low+k*(high-low)/4, py=y(price);
-      svg+=`<text x="0" y="${py+4}" font-size="10" fill="var(--muted)">${num(price)}</text><path d="M${left} ${py}H${right}" stroke="var(--line)"/>`;
+      svg+=`<text x="${right+5}" y="${py+4}" font-size="11" fill="var(--ch-axis)">${num(price)}</text><path d="M${left} ${py}H${right}" stroke="var(--ch-grid)"/>`;
     }
-    svg+='<g clip-path="url(#fc-plot)">';
+    const ticks=Math.min(bars.length,Math.max(2,Math.floor((right-left)/(currentTF==='day'?75:90))));
+    for(let k=0;k<ticks;k++){
+      const i=ticks===1?0:Math.round(k*(bars.length-1)/(ticks-1)),px=x(i);
+      const anchor=k===0?'start':k===ticks-1?'end':'middle';
+      svg+=`<path d="M${px} ${top}V${axis+4}" stroke="var(--ch-grid)"/>
+        <text class="fc-date-tick" x="${px}" y="${axis+18}" text-anchor="${anchor}" font-size="11" fill="var(--ch-text)">${esc(label(i).slice(5))}</text>`;
+    }
+    svg+=`<path d="M${left} ${axis}H${right}V${top}" fill="none" stroke="var(--ch-grid2)"/>`;
+    if(maxVol)svg+=`<path d="M${left} ${bottom}H${right}" stroke="var(--ch-grid2)"/>
+      <text x="${right+5}" y="${bottom+14}" font-size="10" fill="var(--ch-axis)">${volText(maxVol)}</text>`;
+    svg+='<g class="fc-mark" clip-path="url(#fc-plot)">';
     for(const c of s.centers||[]){
       const low=c.low??c.ZD??c.low_price,high=c.high??c.ZG??c.high_price,start=timestamp(c.start),end=timestamp(c.end);
       if(!finite(low)||!finite(high)||!(start<=last&&end>=first))continue;
@@ -67,15 +84,25 @@
       const color=c.level==='segment'?'var(--fc-outer-color)':'var(--cyan)';
       svg+=`<rect x="${x0}" y="${y(high)}" width="${Math.max(2,x1-x0)}" height="${Math.max(1,y(low)-y(high))}" fill="${color}" fill-opacity=".1" stroke="${color}" stroke-dasharray="${dash(c)}"><title>${esc(layers[c.level]||'笔')}中枢 ${num(low)} – ${num(high)}</title></rect>`;
     }
+    svg+='</g>';
     bars.forEach((bar,i)=>{
       const candle=candles&&finite(bar.open)&&finite(bar.close);
       const color=candle?(bar.close>=bar.open?'var(--up)':'var(--down)'):'var(--muted)';
-      svg+=`<path d="M${x(i)} ${y(bar.high)}V${y(bar.low)}" stroke="${color}" opacity=".7"/>`;
+      const px=x(i),width=Math.max(1,step*.65);
+      svg+=`<g data-fc-bar="${esc(quoteLine(bar,i))}" data-x="${px}">
+        <rect x="${px-step/2}" y="${top}" width="${step}" height="${axis-top}" fill="transparent"/>
+        <path d="M${px} ${y(bar.high)}V${y(bar.low)}" stroke="${color}"/>`;
       if(candle){
-        const width=Math.max(1,step*.64);
-        svg+=`<rect x="${x(i)-width/2}" y="${y(Math.max(bar.open,bar.close))}" width="${width}" height="${Math.max(1,Math.abs(y(bar.open)-y(bar.close)))}" fill="${color}"/>`;
+        const fill=bar.close>=bar.open&&width>=3?'var(--ch-bg)':color;
+        svg+=`<rect x="${px-width/2}" y="${y(Math.max(bar.open,bar.close))}" width="${width}" height="${Math.max(1,Math.abs(y(bar.open)-y(bar.close)))}" fill="${fill}" stroke="${color}"/>`;
       }
+      if(maxVol&&finite(bar.vol)&&bar.vol>0){
+        const height=bar.vol/maxVol*(axis-bottom-6);
+        svg+=`<rect class="fc-volume" x="${px-width/2}" y="${axis-height}" width="${width}" height="${height}" fill="${color}" opacity=".66"/>`;
+      }
+      svg+='</g>';
     });
+    svg+='<g class="fc-mark" clip-path="url(#fc-plot)">';
     for(const kind of ['strokes','segments'])for(const line of s[kind]||[]){
       const p=line.start_price??line.begin_value??line.begin_price,q=line.end_price??line.end_value;
       const x0=at(line.start),x1=at(line.end);
@@ -96,9 +123,12 @@
       const color=p.side==='buy'?'var(--up)':'var(--down)',py=y(p.price);
       svg+=`<circle cx="${px}" cy="${py}" r="${p.level==='segment'?4:2.7}" fill="${color}"><title>${esc(pointLabel(p))} ${esc(layers[p.level]||'笔')} ${esc(displayTime(p.at))} ¥${num(p.price)}</title></circle>`;
     }
-    const label=i=>esc(String(dates[i]).slice(0,currentTF==='day'?10:16).replace('T',' '));
-    svg+=`</g><text x="${left}" y="${H-8}" font-size="10" fill="var(--muted)">${label(0)}</text><text x="${right}" y="${H-8}" text-anchor="end" font-size="10" fill="var(--muted)">${label(dates.length-1)}</text></svg>`;
-    return svg+`<div class="hint">${candles?'已完成K线 · 三角为分型':'合并K线区间'} · <span class="fc-pen">笔</span> · <span class="fc-segment">线段和笔中枢</span> · <span class="fc-outer">更高层线段和线段中枢</span> · 虚线为观察结构 · 圆点为确认买卖点</div>`;
+    svg+=`</g><line id="fc-cursor" y1="${top}" y2="${axis}" stroke="var(--amber)" stroke-dasharray="3 3" visibility="hidden" pointer-events="none"/></svg>`;
+    return `<div class="row hint fc-legend"><label><input type="checkbox" id="fc-show-structure" checked> 缠论标记</label>
+      <span class="fc-pen">橙线 · 笔（连接相邻转折）</span><span class="fc-segment">蓝线 · 线段，蓝框 · 笔中枢</span>
+      <span class="fc-outer">紫色 · 更高层结构</span><span>△ 分型 · 虚线待确认 · ● 已确认买卖点</span></div>
+      <div id="fc-ohlc" class="mono">${esc(quoteLine(bars.at(-1),bars.length-1))}</div>${svg}
+      <div class="hint">${candles?'已完成K线':'合并K线区间'} · 矩形框表示价格反复重叠的区间</div>`;
   }
   function structureSummary(f,code){
     const selected=f.structures?.[code+':'+currentTF],supplied=(!f.symbol?.code||normalize(f.symbol.code)===code)?f.summary:null;
@@ -178,7 +208,7 @@
       <p class="hint">${summary.quality?.eligible===false?'当前行情未通过校验，合格周期保留结构观察。'+(summary.quality.reason?' '+esc(explain(summary.quality.reason)):''):probabilities.length?'可查看已验证模型的概率预测。':'走势分析已更新，概率尚未验证。'}${updated?' 更新于 '+esc(displayTime(updated)):''}</p>
       ${stale?'<p class="fc-notice">以下为上次结构分析，行情可能已变化。点击“分析”请求更新。</p>':''}${historical?qualityNotes(f):''}`;
     else analysis=`${reportLine}<div class="empty">${request?.status==='queued'||request?.status==='requesting'?'正在等待这只股票的云端分析。':report?'这份报告暂无缠论快照。':'这只股票尚无缓存分析，点击“分析”发起请求。'}</div>`;
-    const toolbar=`<label class="fc-timeframe-label" for="fc-tf">级别</label><select class="in" id="fc-tf">${Object.entries(levels).map(([key,label])=>`<option value="${key}" ${key===currentTF?'selected':''}>${label}</option>`).join('')}</select>`;
+    const toolbar=`<div class="seg" id="fc-tf" role="group" aria-label="结构图周期">${Object.entries(levels).map(([key,label])=>`<button type="button" data-level="${key}" class="${key===currentTF?'on':''}" aria-pressed="${key===currentTF}">${label}</button>`).join('')}</div>`;
     const visible=historical||summary.quality?.eligible===false?[]:Object.keys(horizons).map(h=>latest.get(h)).filter(r=>r&&r.validated&&finite(r.probability));
     const predictions=visible.length?table(visible,['预测期限','上涨概率','收益区间'],r=>`<tr><td>${esc(horizons[r.horizon])}</td><td>${pct(r.probability)}</td><td>${pct(r.quantiles?.p10)} ～ ${pct(r.quantiles?.p90)}</td></tr>`,'fc-forecast-table'):'<p class="hint">概率尚未验证，暂不显示上涨概率和收益区间。当前可先查看真实行情形成的结构与走势解读。</p>';
     const structure=summary.available||selected?panel(historical?'上次已验证结构':'缠论结构图',
@@ -275,7 +305,23 @@
       input.onblur=()=>setTimeout(()=>{if(box)box.style.display='none';},180);
     }
     if(box){box.onmousedown=e=>e.preventDefault();box.onclick=e=>{const target=e.target.closest('[data-fc-code]');if(target)choose({code:target.dataset.fcCode,name:names.get(target.dataset.fcCode)||''},options);};}
-    const tf=root.querySelector('#fc-tf');if(tf)tf.onchange=e=>{currentTF=e.target.value;paint(options);};
+    const tf=root.querySelector('#fc-tf');
+    if(tf)tf.onclick=e=>{
+      const level=e.target.closest('[data-level]')?.dataset.level;
+      if(Object.hasOwn(levels,level)&&level!==currentTF){currentTF=level;paint(options);}
+    };
+    const plot=root.querySelector('#fc-plot-svg'),quote=root.querySelector('#fc-ohlc'),cursor=root.querySelector('#fc-cursor');
+    if(plot&&quote&&cursor){
+      const latest=quote.textContent;
+      plot.onpointermove=plot.onpointerdown=e=>{
+        const bar=e.target.closest('[data-fc-bar]');
+        if(!bar)return;
+        quote.textContent=bar.dataset.fcBar;
+        cursor.setAttribute('x1',bar.dataset.x);cursor.setAttribute('x2',bar.dataset.x);
+        cursor.setAttribute('visibility','visible');
+      };
+      plot.onpointerleave=e=>{if(e.pointerType==='mouse'){quote.textContent=latest;cursor.setAttribute('visibility','hidden');}};
+    }
     const unlock=root.querySelector('#fc-unlock');if(unlock)unlock.onclick=options.unlock;
     root.querySelectorAll('[data-fc-action]').forEach(button=>button.onclick=async()=>{try{await options.api('forecast/control',{action:button.dataset.fcAction});await render(options,{keepSelection:true});}catch(error){message(explain(error.message));}});
   }

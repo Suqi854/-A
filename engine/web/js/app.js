@@ -90,9 +90,8 @@
         const priv = privateForDisplay(), p = priv?.plan, mini = livePrivate();
         const failed = mini ? mini.hash !== activeRelay()?.private_pack_sha256 : !!S.privateSession?.error;
         if (p) return { ...p, static_time: priv.time, static_refresh_failed: failed };
-        return { exists: false, static: true, error: S.priv
-          ? '个人快照中没有计划模拟（在电脑或连上电脑后设定）。' + privateStatus(priv.time, failed)
-          : '解锁个人数据后可以看计划模拟' };
+        return S.priv ? { exists: false, static_time: priv.time, static_refresh_failed: failed }
+          : { exists: false, error: '解锁个人数据后可以看计划模拟' };
       }
       case 'learn': return sj('learn.json');
       case 'events': { const e = await sj('events.json'); return S.priv ? [...S.priv.events, ...e].sort((x, y) => y.time < x.time ? -1 : 1) : e; }
@@ -1590,16 +1589,21 @@
 
   // ================================================================== F4 模拟盘
   const acctSeg = () => `<div class="seg rw pv" id="acctSeg"><button data-a="me" class="${S.acct === 'me' ? 'on' : ''}">我的模拟盘</button><button data-a="ai" class="${S.acct === 'ai' ? 'on' : ''}">AI自动盘</button>${STATIC && !S.priv ? '' : `<button data-a="plan" class="${S.acct === 'plan' ? 'on' : ''}">计划模拟</button>`}</div>`;
+  const bindSimAccounts = () => $$('#acctSeg button').forEach(b => b.onclick = () => {
+    S.acct = b.dataset.a; S.planEdit = false; renderSim();
+  });
   async function renderSim({ refresh = false } = {}) {
     if (STATIC && !S.priv) S.acct = 'ai';
     const acct = S.acct;
     let P = null;
     if (S.acct === 'plan') {
       P = await api('plan').catch(e => ({ error: e.message }));
+      if (S.page !== 'sim' || S.acct !== acct) return;
       if (P.error) return planError(P.error);
-      if (!P.exists && P.static) return planError(P.error);
-      if (STATIC) S.planEdit = false;
-      if (!P.exists || S.planEdit) return planSetup(P);
+      if (!P.exists || S.planEdit) {
+        if (refresh && canWrite()) return;
+        return canWrite() ? planSetup(P) : planInitialSnapshot(P);
+      }
     }
     const a = P ? P.account : await api('sim?acct=' + acct).catch(e => ({ error: e.message }));
     if (S.page !== 'sim' || S.acct !== acct) return;
@@ -1610,7 +1614,7 @@
     const st = a.stats;
     $('#p-sim').innerHTML = `<div class="grid">
       <div class="panel c12"><div class="ph"><h3>SIM <small>模拟盘</small></h3><div class="r">${acctSeg()}
-        <span class="rw row">${P ? '' : '<input class="in" id="simCode" placeholder="代码" style="width:90px;height:22px"><button class="btn sm buy" id="simNew">下单</button>'}<button class="btn sm" id="simReset">${P ? '重新设定' : '重置'}</button></span></div></div>
+        ${P ? '<button class="btn sm" id="simReset">初始状态</button>' : '<span class="rw row"><input class="in" id="simCode" placeholder="代码" style="width:90px;height:22px"><button class="btn sm buy" id="simNew">下单</button><button class="btn sm" id="simReset">重置</button></span>'}</div></div>
         <div class="summary"><div><div class="l">总资产</div><div class="v">${yuan(shownEquity(a))}</div></div><div><div class="l">可用现金</div><div class="v">${yuan(a.cash)}</div></div>
           <div><div class="l">持仓市值</div><div class="v">${yuan(a.market_value)}</div></div><div><div class="l">今日盈亏</div><div class="v">${dayPnl(a)}</div></div>
           <div><div class="l">累计盈亏</div><div class="v ${cls(a.total_pnl)}">${sgn(a.total_pnl)}</div></div><div><div class="l">${P ? '录入成本收益率' : '累计收益率'}</div><div class="v ${cls(a.total_pct)}">${pct(a.total_pct)}</div></div></div>
@@ -1637,7 +1641,7 @@
           <td class="${cls(t.pnl)}">${t.pnl == null ? '' : sgn(t.pnl)}</td><td class="l hide-m nm">${esc(t.reason || '')} <span class="chip">${esc(t.emotion || '')}</span></td>
           <td>${S.acct === 'me' && t.side === 'sell' && (!STATIC || (S.priv && S.priv.ai && S.priv.ai.trades[t.id])) ? `<button class="btn sm" data-tr="${t.id}">AI复盘</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="8" class="muted">暂无</td></tr>'}</table></div>`, { cls: 'c12', np: true })}
     </div>`;
-    $$('#acctSeg button').forEach(b => b.onclick = () => { S.acct = b.dataset.a; S.planEdit = false; renderSim(); });
+    bindSimAccounts();
     if (S.acct === 'ai') loadHF();
     if (P) bindPlan(P);
     $$('#p-sim [data-tr]').forEach(b => b.onclick = async () => {
@@ -1674,7 +1678,7 @@
     $('#p-sim').innerHTML = `<div class="grid"><div class="panel c12"><div class="ph"><h3>SIM <small>模拟盘</small></h3><div class="r">${acctSeg()}</div></div></div>
       ${panel('PLAN <small>计划模拟</small>', old ? `<div class="empty"><b>电脑上运行的引擎还是旧版本，没有「计划模拟」功能</b><br><br>网页已经是 5.1，但引擎要重启一次才会加载新代码（大约 10 秒）。<br><br>
           <button class="btn pri rw" id="plRestart">立即重启引擎</button><br><br><small class="muted">也可以双击 stop.cmd 再双击 launch.cmd</small></div>` : `<div class="empty">${esc(msg)}</div>`, { cls: 'c12', nofold: true })}</div>`;
-    $$('#acctSeg button').forEach(b => b.onclick = () => { S.acct = b.dataset.a; S.planEdit = false; renderSim(); });
+    bindSimAccounts();
     const rb = $('#plRestart'); if (rb) rb.onclick = async () => {
       rb.disabled = true; rb.textContent = '重启中…';
       try { await api('admin/restart', {}); } catch (e) { if (/本机/.test(e.message)) { rb.disabled = false; rb.textContent = '立即重启引擎'; return toast('只能在电脑本机重启：请在电脑上打开页面点这个按钮，或双击 stop.cmd 再双击 launch.cmd', 1); } }
@@ -1685,22 +1689,52 @@
   function planBox(P, a) {
     const mo = Object.entries(P.modes).map(([k, m]) => `<option value="${k}" ${P.cfg.mode === k ? 'selected' : ''}>锁定：${esc(m.name)}</option>`).join('');
     const pend = P.pending || [];
+    const enabled = P.active && P.auto_trade !== false;
+    const waitingToBuild = enabled && P.cfg.mode === 't_trade' && !a.positions.length && !pend.some(o => o.side === 'buy');
     return `<div class="pb" id="planBox"><div class="row"><span class="hint">当前策略</span><span class="chip a" style="font-size:13px">${esc(P.mode_name || '选择中…')}</span>
-        <span class="chip">${P.cfg.mode === 'auto' ? 'AI 自选' : '已锁定'}</span><span class="chip">风格 ${esc(P.cfg.risk)}</span>${P.active ? '' : '<span class="chip d">已暂停</span>'}<span class="sp"></span>
+        <span class="chip">${P.cfg.mode === 'auto' ? 'AI 自选' : '锁定 ' + esc(P.modes[P.cfg.mode]?.name || P.cfg.mode)}</span><span class="chip">风格 ${esc(P.cfg.risk)}</span>${enabled ? '' : `<span class="chip d">${P.active ? '自动交易未开启' : '已暂停'}</span>`}<span class="sp"></span>
         <select class="in rw" id="plModeSel" style="width:auto;height:24px"><option value="auto" ${P.cfg.mode === 'auto' ? 'selected' : ''}>策略：AI 自选</option>${mo}</select>
-        <button class="btn sm rw" id="plToggle">${P.active ? '暂停' : '恢复'}</button></div>
-      ${P.static_time ? `<div class="hint" style="margin-bottom:4px">网页版只读。${esc(privateStatus(P.static_time, P.static_refresh_failed))}。改策略、暂停、重新设定请在电脑上或连上电脑后操作</div>` : ''}
+        <button class="btn sm rw" id="plToggle">${enabled ? '暂停' : P.active ? '开启自动交易' : '恢复'}</button></div>
+      ${P.static_time ? `<div class="hint" style="margin-bottom:4px">${esc(privateStatus(P.static_time, P.static_refresh_failed))}。从「初始状态」连接电脑后可编辑或调整策略。</div>` : ''}
+      ${waitingToBuild ? '<div class="hint">当前空仓。等竞价或尾盘出现合格 A/B 级候选，风控允许时先建一只股票，再继续持仓做T。</div>' : ''}
       <div class="hint" style="margin-top:4px">${esc(P.reason || 'AI 正在分析持仓和大盘，几秒后刷新就能看到它选的策略…')}${P.updated ? ` <span class="mono">（${esc(P.updated.slice(5, 16))}）</span>` : ''}</div>
       ${pend.length ? `<div class="row hint" style="margin-top:4px"><span class="amber">待成交</span>${pend.map(o => `<span class="chip">${esc(o.name)} ${o.side === 'buy' ? '买' : '卖'} ${o.qty} 股</span>`).join('')}<span>非交易时间下的单，开盘后按 A 股规则自动成交</span></div>` : ''}
       ${planReturns(P, a)}
-      <div class="modechips" style="margin-top:6px">${Object.entries(P.stats).map(([k, s]) => `<span class="chip ${k === P.mode ? 'on' : ''}">${esc(s.name)} · ${s.n} 笔${s.win == null ? '' : ' · 胜率 ' + num(s.win * 100, 0) + '%'}${s.n ? ' · ' + sgn(s.pnl, 0) : ''}</span>`).join('')}</div>
+      <div class="modechips" style="margin-top:6px">${Object.entries(P.stats).map(([k, s]) => `<span class="chip ${k === P.mode ? 'on' : ''}">${esc(s.name)} · ${s.n} 笔平仓${s.win == null ? '' : ' · 胜率 ' + num(s.win * 100, 0) + '%'}${s.n ? ' · ' + sgn(s.pnl, 0) : ''}</span>`).join('')}</div>
       ${P.history.length ? `<details class="fx"><summary>策略切换记录（${P.history.length}）</summary>${P.history.map(h => `<div style="font-size:12px;margin:4px 0"><span class="mono">${esc(h.time.slice(5, 16))}</span> ${esc(h.from ? P.modes[h.from].name : '开始')} → <b>${esc(P.modes[h.to].name)}</b><div class="hint">${esc(h.reason)}</div></div>`).join('')}</details>` : ''}
       <details class="note"><summary>AI 怎么选策略</summary><div class="hint">${Object.values(P.modes).map(m => `<b>${esc(m.name)}</b>：${esc(m.desc)}`).join('<br>')}<br>每天开盘、大盘立场变化、每次选股前都会重新判断；某个策略在本计划已平仓 ≥5 笔且胜率 &lt;35% 时自动降级到更稳的策略。计划模拟盘按真实 A 股规则：T+1、100 股一手、不融资融券、涨跌停限制、真实手续费。「一直不动」= 初始持仓和开局买入的股票一直拿着、现金不动的对照收益。</div></details></div>`;
   }
   function bindPlan(P) {
     const ms = $('#plModeSel'); if (ms) ms.onchange = async () => { try { const r = await api('plan/mode', { mode: ms.value }); toast('策略：' + (P.modes[r.mode] ? P.modes[r.mode].name : '已更新')); } catch (e) { toast(e.message, 1); } renderSim(); };
-    const tg = $('#plToggle'); if (tg) tg.onclick = async () => { if (P.active && !confirm('暂停后 AI 不再交易，到价止损止盈也会停，持仓和记录保留。确定暂停？')) return; try { await api(P.active ? 'plan/stop' : 'plan/resume', {}); } catch (e) { toast(e.message, 1); } renderSim(); };
+    const tg = $('#plToggle'); if (tg) tg.onclick = async () => {
+      const pause = P.active && P.auto_trade !== false;
+      if (pause && !confirm('暂停后 AI 停止交易及到价止损止盈，持仓和记录保留。确定暂停？')) return;
+      try { await api(pause ? 'plan/stop' : 'plan/resume', {}); } catch (e) { toast(e.message, 1); }
+      renderSim();
+    };
     if (!STATIC && (!P.mode || !P.reason)) setTimeout(() => { if (S.page === 'sim' && S.acct === 'plan' && !S.planEdit) renderSim(); }, 6000);  // 刚建立：等 AI 选完策略自动刷新
+  }
+  function planInitialSnapshot(P) {
+    const c = P.cfg || {};
+    const buys = (c.buys || []).map(x => `${x.name || x.code} ${x.amount ? yuan(x.amount) + ' 元' : x.qty + ' 股'}`).join('、');
+    const holds = (c.holdings || []).map(x => `${x.name || x.code} ${x.qty} 股 · 成本 ${num(x.cost)}`).join('、');
+    $('#p-sim').innerHTML = `<div class="grid"><div class="panel c12"><div class="ph"><h3>SIM <small>模拟盘</small></h3><div class="r">${acctSeg()}</div></div></div>
+      ${panel('PLAN <small>初始状态</small>', `${P.exists ? `<dl class="kv"><dt>初始资金</dt><dd>${yuan(c.cash)} 元</dd>
+        <dt>开局买入</dt><dd>${esc(buys || '无')}</dd><dt>初始持仓</dt><dd>${esc(holds || '无')}</dd>
+        <dt>风格与策略</dt><dd>${esc(c.risk || '均衡')} · ${esc(P.modes?.[c.mode]?.name || 'AI 自选')}</dd></dl>` : '<p>尚未设定计划模拟盘</p>'}
+        <p class="hint">${esc(privateStatus(P.static_time, P.static_refresh_failed))}。连接正在运行的电脑引擎后可设置初始资金、开局买入和初始持仓。</p>
+        <div class="row"><span class="sp"></span>${P.exists ? '<button class="btn" id="plCancel">返回</button>' : ''}<button class="btn pri" id="plConnect">连接电脑编辑</button></div>`, { cls: 'c12', nofold: true })}</div>`;
+    bindSimAccounts();
+    const cancel = $('#plCancel'); if (cancel) cancel.onclick = () => { S.planEdit = false; renderSim(); };
+    const connect = $('#plConnect');
+    connect.onclick = async () => {
+      connect.disabled = true;
+      try {
+        if (!S.privateSession?.remote?.url) await api('overview').catch(() => {});
+        if (!S.privateSession?.remote?.url) return toast('电脑端启动引擎并开启远程连接后可在这里编辑', 1);
+        if (await connectRemote(true) && S.page === 'sim' && S.acct === 'plan') renderSim();
+      } finally { connect.disabled = false; }
+    };
   }
   function planSetup(P) {
     const c = (P.exists && P.cfg) || {};
@@ -1708,7 +1742,7 @@
     let risk = c.risk || '均衡';
     const mo = Object.entries(P.modes).map(([k, m]) => `<option value="${k}" ${c.mode === k ? 'selected' : ''}>锁定：${esc(m.name)} — ${esc(m.desc)}</option>`).join('');
     $('#p-sim').innerHTML = `<div class="grid"><div class="panel c12"><div class="ph"><h3>SIM <small>模拟盘</small></h3><div class="r">${acctSeg()}</div></div></div>
-      ${panel('PLAN <small>计划模拟 · 设定初始条件，AI 自己选策略交易</small>', `
+      ${panel('PLAN <small>初始状态 · 设置计划模拟</small>', `
         <div class="plstep"><b>① 资金与风格</b></div>
         <div class="planform">
           <label>初始资金（元）<input class="in" id="plCash" inputmode="decimal" value="${c.cash ?? 500000}">
@@ -1722,9 +1756,9 @@
         <div class="planrows" id="plHolds"></div>
         <div class="plstep"><b>④ 预览</b><span class="hint">按现价估算，AI 会先选什么策略</span></div>
         <div id="plPrev" class="hint">填好后这里会显示资金合计和 AI 的策略预判</div>
-        <p class="hint" style="margin-top:8px">按真实 A 股规则：T+1、100 股一手、不融资融券、涨跌停限制、真实手续费。AI 根据现金占比、持仓强弱、大盘立场在「进攻跟随 / 波段轮动 / 持仓做T / 防守减仓」之间切换，每次切换都写进日志。${P.exists ? '<b class="down">重新设定会清空当前计划模拟盘的持仓和记录。</b>' : ''}</p>
+        <p class="hint" style="margin-top:8px">开始计划会开启此计划的自动交易，按 A 股 T+1、整手和涨跌停规则模拟撮合。锁定「持仓做T」且空仓时，风控允许才从合格 A/B 级候选中建一只股票。${P.exists ? '<b class="down">重新设定会清空当前计划模拟盘的持仓和记录。</b>' : ''}</p>
         <div class="row"><span class="sp"></span>${P.exists ? '<button class="btn" id="plCancel" type="button">取消</button>' : ''}<button class="btn pri" id="plGo" type="button">开始计划模拟</button></div>`, { cls: 'c12', nofold: true })}</div>`;
-    $$('#acctSeg button').forEach(b => b.onclick = () => { S.acct = b.dataset.a; S.planEdit = false; renderSim(); });
+    bindSimAccounts();
     $$('[data-cash]').forEach(b => b.onclick = () => { $('#plCash').value = b.dataset.cash; prev(); });
     $$('#plRisk button').forEach(b => b.onclick = () => { risk = b.dataset.r; $$('#plRisk button').forEach(x => x.classList.toggle('on', x === b)); $('#plRiskD').textContent = RISKD[risk]; prev(); });
     $('#plMode').onchange = () => prev(); $('#plCash').oninput = () => prev();

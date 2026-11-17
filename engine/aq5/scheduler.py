@@ -108,10 +108,12 @@ def loop() -> None:
                         threading.Thread(target=lambda: marketstate.state(force=True), daemon=True).start()
                     if hm >= 1000:
                         _once("market_morning", marketstate.record_morning)
-                    if s.get("strategy_v2", {}).get("legacy_auto", False) and time.time() - last_t > 120:
+                    if time.time() - last_t > 120:
                         last_t = time.time()
-                        threading.Thread(target=signals.scan_t, daemon=True).start()
-                        threading.Thread(target=plan.tick, daemon=True, name="aq5-plan").start()
+                        if s.get("strategy_v2", {}).get("legacy_auto", False):
+                            threading.Thread(target=signals.scan_t, daemon=True).start()
+                        if plan.trading_enabled():
+                            threading.Thread(target=plan.tick, daemon=True, name="aq5-plan").start()
                     slot = (hm // 100) * 2 + (1 if hm % 100 >= 30 else 0)
                     bg(f"watch_intra_{slot}", lambda: signals.run_watch("intra"))
                 if hm >= 1510 and s.get("strategy_v2", {}).get("legacy_auto", False):
