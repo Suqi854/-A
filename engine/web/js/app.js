@@ -183,7 +183,7 @@
     return j;
   }
   async function requestDecision(kind, code, body = {}) {
-    const session = S.privateSession, page = kind === 'screen' ? 'pick' : 'anly';
+    const session = S.privateSession, page = kind === 'screen' ? 'pick' : 'forecast';
     if (!S.priv || !session?.key) throw new Error('请先解锁个人数据，再使用云端融合研究');
     code = kind === 'screen' ? null : normCode(code);
     if (code && !/^(sh|sz)\d{6}$/.test(code)) throw new Error('请选择有效股票代码');
@@ -440,6 +440,9 @@
   }
   function show(p, arg) {
     stopResearchProgress(); S.researchPreviewRequest = null;
+    const fullReport = p === 'anly' && !!arg;
+    if (fullReport) p = 'forecast';
+    clearStockReport();
     if (p !== 'forecast') { S.forecastRequest = null; S.forecastSelection = null; }
     else if (arg) {
       const selected = normCode(arg);
@@ -450,10 +453,21 @@
     $$('#nav a').forEach(a => a.classList.toggle('on', a.dataset.p === p));
     $$('.page').forEach(s => s.classList.toggle('on', s.id === 'p-' + p));
     $('#main').scrollTop = 0;
-    ({ mon: renderMon, pick: renderPick, anly: () => renderAnly(arg), sim: renderSim, learn: renderLearn, bt: renderBt, log: renderLog, set: renderSet,
-      forecast: () => window.ForecastUI.render({api,code:arg ? normCode(arg) : null,staticMode:STATIC,unlock:showUnlock,
-        search:q => api('search?q=' + encodeURIComponent(q)),selectCode:code => go('forecast',normCode(code)),
-        analyze:code => api('analyze?code=' + normCode(code)),requestForecast}) })[p]();
+    ({ mon: renderMon, pick: renderPick, anly: renderWatch, sim: renderSim, learn: renderLearn, bt: renderBt, log: renderLog, set: renderSet,
+      forecast: () => {
+        const code = arg ? normCode(arg) : null;
+        window.ForecastUI.render({api,code,staticMode:STATIC,unlock:showUnlock,
+          isVisible:() => S.page === 'forecast',
+          getReport:selected => S.anly?.code === selected ? S.anly : null,
+          selectCode:(selected, quick) => {
+            if (S.anlyCode && S.anlyCode !== selected) clearStockReport();
+            if (S.forecastSelection !== selected) S.forecastRequest = null;
+            S.forecastSelection = selected;
+            history.replaceState(null, '', '#' + (quick ? 'forecast/' : 'anly/') + selected);
+          },
+          requestAnalysis:renderAnly,requestForecast:STATIC ? requestForecast : null});
+        if (fullReport) renderAnly(code);
+      } })[p]();
   }
   window.addEventListener('hashchange', () => { const [p, a] = location.hash.slice(1).split('/'); show(PAGES.includes(p) ? p : 'mon', a); });
   document.addEventListener('keydown', e => {
@@ -493,9 +507,11 @@
     }
   });
   $('#cmd').addEventListener('blur', () => setTimeout(() => $('#suggest').style.display = 'none', 150));
-  function pickCode(c) { $('#cmd').value = ''; $('#suggest').style.display = 'none'; $('#cmd').blur(); go(S.page === 'forecast' ? 'forecast' : 'anly', normCode(c)); }
+  function pickCode(c) { $('#cmd').value = ''; $('#suggest').style.display = 'none'; $('#cmd').blur(); go('anly', normCode(c)); }
 
   // ------------------------------------------------------------------ 顶栏、跑马灯
+  const domesticTapeIndex = code => /^(sh000|sz399)\d{3}$/.test(code || '');
+  const overseasTapeIndex = code => /^(hkHSI|hkHSCEI|hkHSTECH|usIXIC|usDJI|usINX)$/i.test(code || '');
   setInterval(() => { const d = new Date(); $('#clock').textContent = d.toTimeString().slice(0, 8); }, 500);
   function header(ov) {
     const snapshot = STATIC && !ov.live_quote_time;
@@ -504,7 +520,8 @@
     $('#mockTag').hidden = !ov.mock && !STATIC; if (STATIC) $('#mockTag').textContent = '云端版';
     $('#lastUpd').textContent = ov.live_quote_time ? '中转报价 ' + sourceTime(ov.live_quote_time)
       : STATIC ? '快照 ' + ov.time.slice(5, 16) : '更新 ' + ov.time.slice(11);
-    const items = [...ov.indices, ...ov.overseas, ...ov.watchlist.filter(w => w.price)];
+    const items = [...(ov.indices || []).filter(q => domesticTapeIndex(q.code)),
+                   ...(ov.overseas || []).filter(q => overseasTapeIndex(q.code))];
     const html = items.map(q => `<span class="it" data-c="${q.code}"><b>${esc(q.name)}</b><span class="${cls(q.pct)}">${num(q.price)} ${pct(q.pct)}</span></span>`).join('');
     const inner = $('#tapeInner'); if (inner.dataset.h !== html) { inner.innerHTML = html + html; inner.dataset.h = html; }
     const lr = ov.last_run;
@@ -519,8 +536,9 @@
     });
     updateBell(ov.events || []);
   }
-  $('#tape').addEventListener('click', e => { const it = e.target.closest('[data-c]'); if (!it || !/^(sh|sz)\d{6}$/.test(it.dataset.c)) return;
-    if (/^(sh000|sz399)/.test(it.dataset.c)) openIndex(it.dataset.c, it.querySelector('b').textContent); else go('anly', it.dataset.c); });
+  $('#tape').addEventListener('click', e => { const it = e.target.closest('[data-c]');
+    if (it && domesticTapeIndex(it.dataset.c)) openIndex(it.dataset.c, it.querySelector('b').textContent);
+  });
 
   // ---- 小喇叭：大盘异动 / 提醒 / 选股 / 成交，红点 = 未读条数（已读位置记在本机浏览器）
   const BELL_KINDS = ['market', 'announce', 'alert', 'pick', 'trade'];
@@ -1250,9 +1268,11 @@
     const box = $('#sigBox'); if (!box) return;
     let r = null;
     try { r = await api('watch/signal?code=' + code); } catch { }
-    let d = r && (phase ? r.phases[phase] : r.latest);
+    if (!box.isConnected) return;
+    let d = r && (phase ? r.phases?.[phase] : r.latest);
     if ((!d || d.code !== code) && !STATIC) { try { d = await api('watch/plan', { code }); r = { latest: d, phases: { [d.phase]: d } }; } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; } }
-    if (!d) { box.innerHTML = '<div class="empty">公开版暂无这只股票的当日信号（电脑连上后可用）</div>'; return; }
+    if (!box.isConnected) return;
+    if (!d || d.code !== code) { box.innerHTML = '<div class="empty">公开版暂无这只股票的当日信号（电脑连上后可用）</div>'; return; }
     const PH = { pre: '盘前计划', intra: '盘中', post: '盘后总结' };
     $('#sigPh').innerHTML = Object.keys(PH).filter(k => r.phases && r.phases[k]).map(k => `<button data-ph="${k}" class="${k === d.phase ? 'on' : ''}">${PH[k]}</button>`).join('');
     $$('#sigPh button').forEach(b => b.onclick = () => loadSig(code, b.dataset.ph));
@@ -1304,26 +1324,45 @@
     $$('[data-confirm-route]',m).forEach(button => button.onclick = async () => {
       const x = a.fusion.routes[button.dataset.confirmRoute]; button.disabled = true;
       try { const saved = await api('decision/confirm', {code:a.code, route:x.route, proposal_id:x.proposal.id, source_request_id:a.fusion.cloud_request_id, previous_id:x.confirmed_target?.id || null});
-        x.confirmed_target = saved; toast('研究目标已确认，原版本保留'); m.remove(); renderAnly(a.code);
+        x.confirmed_target = saved; toast('研究目标已确认，原版本保留'); m.remove(); if (S.anly === a) renderAnly(a.code);
       } catch(e) { toast(e.message,1); button.disabled = false; }
     });
   }
+  function clearStockReport() {
+    clearInterval(S.timers.anly);
+    S.anly = null; S.anlyCode = null;
+    $('#stock-report').replaceChildren();
+  }
   async function renderAnly(code) {
-    S.anlyCode = code || null;
-    if (!code) return renderWatch();
+    if (S.page !== 'forecast' || !/^(sh|sz)\d{6}$/.test(code || '')) return;
+    clearStockReport();
+    S.anlyCode = code;
     S.lastCode = code;
-    $('#p-anly').innerHTML = `<div class="loading">分析 ${short(code)} 中</div>`;
+    const report = document.createElement('div');
+    $('#stock-report').appendChild(report);
+    const active = () => S.page === 'forecast' && S.anlyCode === code && report.isConnected;
+    report.innerHTML = `<div class="loading" role="status">正在完整分析 ${short(code)}</div>`;
     let a;
-    try { a = await api('analyze?code=' + code); } catch (e) { if (S.page !== 'anly' || S.anlyCode !== code) return; const index = STATIC ? await staticIndex() : ''; if (S.page !== 'anly' || S.anlyCode !== code) return; $('#p-anly').innerHTML = `<div class="empty">${STATIC ? '' : '分析失败：'}${esc(e.message)}</div>` + index; return; }
-    if (S.page !== 'anly' || S.anlyCode !== code) return;
+    try {
+      a = await api('analyze?code=' + code);
+      if (a?.code !== code) throw new Error('返回结果与当前股票不匹配');
+    } catch (e) {
+      if (!active()) return;
+      const index = STATIC ? await staticIndex() : '';
+      if (active()) report.innerHTML = `<div class="empty">完整分析暂不可用 · ${esc(e.message)}</div>` + index;
+      return;
+    }
+    if (!active()) return;
     S.anly = a;
+    window.ForecastUI.useAnalysis(a);
     const q = a.quote, pl = a.plan, mf = a.main_force;
+    const comment = S.priv?.ai?.comments?.[a.code];
     const ring = (v, col) => `<div class="ring"><svg width="96" height="96"><circle cx="48" cy="48" r="42" fill="none" stroke="var(--line)" stroke-width="7"/><circle cx="48" cy="48" r="42" fill="none" stroke="${col}" stroke-width="7" stroke-dasharray="${(v / 100 * 264).toFixed(1)} 264" style="filter:drop-shadow(0 0 6px ${col})"/></svg><b style="color:${col}">${num(v, 0)}</b></div>`;
     const tone = { buy: 'var(--up)', watch_buy: 'var(--amber)', hold: 'var(--muted)', reduce: 'var(--down)', avoid: 'var(--down)' }[a.tone];
     const mfc = mf.tone === 'up' ? 'up' : mf.tone === 'down' ? 'down' : 'amber';
     const maxF = Math.max(...a.flows.map(f => Math.abs(f.main)), 1);
     const inWl = S.ov && S.ov.watchlist.some(w => w.code === a.code);
-    $('#p-anly').innerHTML = `<div class="grid">
+    report.innerHTML = `<div class="grid">
       <div class="panel c12"><div class="qhead"><button class="btn sm" onclick="location.hash='anly'" title="返回自选列表">‹ 自选</button><span class="nm">${esc(a.name)}</span><span class="mono muted">${a.code.toUpperCase()}</span>
         <span class="px ${cls(q.pct)}" id="aPx">${num(q.price)}</span><span class="ch ${cls(q.pct)}" id="aCh">${sgn(q.chg)} ${pct(q.pct)}</span><span class="sp"></span>
         <span class="hint mono" id="aQuoteTime">行情时点 ${esc(sourceTime(q.quote_time || q.time))}</span><button class="btn rw" id="aWl">${inWl ? '已自选' : '+ 自选'}</button><button class="btn buy rw" id="aBuy">模拟买入</button><button class="btn sell rw" id="aSell">模拟卖出</button><button class="btn rw" id="aBt">回测</button></div>
@@ -1371,22 +1410,22 @@
             <div><div class="l">仓位口径</div><div class="v muted">待独立验证</div></div><div><div class="l">3日毛收益&gt;1%标签</div><div class="v">${a.prob_src === 'model' ? probability(a.prob) : '--'}</div></div></div>
           ${a.chips ? `<div class="sep"></div><div class="row hint mono"><span>筹码：获利盘 <b class="amber">${a.chips.profit_ratio}%</b></span><span>平均成本 <b>${a.chips.avg_cost}</b></span><span>筹码峰 ${a.chips.peak}</span><span>90%集中度 ${a.chips.c90}%（${a.chips.range90.join('~')}）</span>${a.chips.estimated ? '<span>（流通股本未知，换手按估算）</span>' : ''}</div>` : ''}
           <details class="fx"><summary>查看模型公式</summary>${Object.entries(a.models.formulas).map(([k, v]) => `<div><code>${esc(v)}</code></div>`).join('')}</details>`, { cls: 'c8' }) : ''}
-      ${STATIC ? (S.priv && S.priv.ai && S.priv.ai.comments[a.code] ? panel('AI <small>AI 点评 · 电脑端生成</small>', md(S.priv.ai.comments[a.code].content) + `<div class="hint mono">${esc(S.priv.ai.comments[a.code].created)}</div>`, { cls: 'c12' }) : '') : panel('AI <small>AI 点评 · ' + esc((S.aiStatus && S.aiStatus.cfg.model) || '未配置') + '</small>', '<div id="aiCmt" class="hint">载入中…</div>', { cls: 'c8', right: '<button class="btn sm" id="aiCmtGo">生成 / 刷新</button>' })}
+      ${STATIC ? (comment ? panel('AI <small>AI 点评 · 电脑端生成</small>', md(comment.content) + `<div class="hint mono">${esc(comment.created)}</div>`, { cls: 'c12' }) : '') : panel('AI <small>AI 点评 · ' + esc(S.aiStatus?.cfg?.model || '未配置') + '</small>', '<div id="aiCmt" class="hint">载入中…</div>', { cls: 'c8', right: '<button class="btn sm" id="aiCmtGo">生成 / 刷新</button>' })}
       ${STATIC ? '' : panel('NEWS <small>公告与新闻</small>', '<div id="aiNews" class="scroll" style="max-height:330px"><div class="loading">抓取中</div></div>', { cls: 'c4', np: true })}
       ${STATIC ? '' : panel('ASK <small>问 AI 关于这只股票</small>', `<div class="row"><input class="in" id="aiQ" style="flex:1" placeholder="例如：现在缩量回调，适合低吸吗？止损为什么设在这里？"><button class="btn pri" id="aiQGo">提问</button></div><div id="aiA" style="margin-top:8px"></div>`, { cls: 'c12' })}
       ${panel('LEARN <small>学习要点 · 这只股票教会你什么</small>', a.lessons.map(x => `<div class="lesson">${esc(x)}</div>`).join(''), { cls: 'c12' })}
     </div>`;
-    if (!STATIC) loadAiStock(a);
+    if (!STATIC) loadAiStock(a, report);
     drawOB(q);
     if (a.fusion) {
       $('#sigBox').innerHTML = decisionSignals(a.fusion); $('#sigBox').className = '';
       $('#aTarget').onclick = () => openDecisionTargets(a);
       $('#aTarget').onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDecisionTargets(a); } };
     } else loadSig(a.code);
-    const sr = $('#sigRe'); if (sr) sr.onclick = async () => { sr.disabled = true; try { if (a.fusion) { await renderAnly(a.code); } else { await api('watch/plan', { code: a.code }); await loadSig(a.code); } toast('已重新分析'); } catch (e) { toast(e.message, 1); } sr.disabled = false; };
+    const sr = $('#sigRe'); if (sr) sr.onclick = async () => { sr.disabled = true; try { if (a.fusion) { await renderAnly(a.code); } else { await api('watch/plan', { code: a.code }); if (active()) await loadSig(a.code); } toast('已重新分析'); } catch (e) { toast(e.message, 1); } sr.disabled = false; };
     const st = { p: 'day', main: 'ma', sub: 'macd' };
     let maSel = (lsGet('aq5_ma') || '5,10,20,60').split(',').map(Number);
-    $$('#p-anly [data-ma]').forEach(c => { c.checked = maSel.includes(+c.dataset.ma); c.onchange = () => { maSel = $$('#p-anly [data-ma]').filter(x => x.checked).map(x => +x.dataset.ma); lsSet('aq5_ma', maSel.join(',')); if (S.kchart) S.kchart.setMA(maSel); }; });
+    $$('[data-ma]', report).forEach(c => { c.checked = maSel.includes(+c.dataset.ma); c.onchange = () => { maSel = $$('[data-ma]', report).filter(x => x.checked).map(x => +x.dataset.ma); lsSet('aq5_ma', maSel.join(',')); if (S.kchart) S.kchart.setMA(maSel); }; });
     const ov = () => {
       if (!$('#chPlan').checked || st.p !== 'day') return [];
       if (!a.fusion) return [{zone:pl.buy_zone,fill:`rgba(${Charts.C.accRGB},.07)`},{price:pl.stop,color:Charts.C.down,label:'止损'},
@@ -1402,17 +1441,21 @@
       const k = Math.exp(2 * m.reg.sd); return [{ values: m.reg_line, color: Charts.C.white, dash: [4, 3] }, { values: m.reg_line.map(x => x * k), color: '#ff8a8a', dash: [2, 3] }, { values: m.reg_line.map(x => x / k), color: '#7cfc7c', dash: [2, 3] }]; };
     let kDay = null;
     const loadChart = async () => {
-      const box = $('.chartbox'); box.innerHTML = '<canvas id="chK"></canvas>';
+      const box = $('.chartbox', report); box.innerHTML = '<canvas id="chK"></canvas>';
+      const canvas = $('#chK', report);
+      const current = () => active() && box.firstElementChild === canvas;
       try {
-        if (st.p === 'i') { S.kchart = null; S.ichart = new Charts.Intraday($('#chK'), $('#chLg')); const d = await api('intraday?code=' + a.code); S.ichart.setData(d); $('#chSrc').textContent = d.source ? '数据源：' + d.source : ''; return; }
+        if (st.p === 'i') { S.kchart = null; S.ichart = new Charts.Intraday(canvas, $('#chLg')); const d = await api('intraday?code=' + a.code); if (current()) { S.ichart.setData(d); $('#chSrc').textContent = d.source ? '数据源：' + d.source : ''; } return; }
         S.ichart = null; S.kchart = new Charts.KChart($('#chK'), $('#chLg')); S.kchart.maN = maSel; S.kchart.main = st.main; S.kchart.sub = st.sub;
         const k = st.p === 'day' ? (kDay = kDay || await api(`kline?code=${a.code}&n=400`)) : await api(`kline?code=${a.code}&n=${st.p === 'month' ? 200 : 320}&period=${st.p}`);
+        if (!current()) return;
         S.kchart.chips = st.p === 'day' ? a.chips : null; S.kchart.showChips = $('#chChips').checked;
         S.kchart.setData(k.rows); S.kchart.setOverlays(ov()); S.kchart.setLines(regLines());
         $('#chSrc').textContent = '数据源：' + (k.source || '本地缓存（腾讯/同花顺/东财/新浪 自动切换）') + (a.cross_check && a.cross_check.note ? ' · 校验：' + a.cross_check.note : '');
-      } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+      } catch (e) { if (current()) box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
     };
     await loadChart();
+    if (!active()) return;
     $('#chPlan').onchange = () => S.kchart && S.kchart.setOverlays(ov());
     $('#chReg').onchange = () => S.kchart && S.kchart.setLines(regLines());
     $('#chChips').onchange = () => { if (S.kchart) { S.kchart.showChips = $('#chChips').checked; S.kchart.draw(); } };
@@ -1423,15 +1466,18 @@
     $('#aSell').onclick = () => openOrder({ code: a.code, name: a.name, price: q.price, side: 'sell' });
     $('#aBt').onclick = () => { S.btCode = a.code; go('bt'); };
     if (a.sector) $('#aSec').onclick = () => openSector(a.sector.code);
-    $('#aWl').onclick = async () => { await api('watchlist', { code: a.code, op: inWl ? 'remove' : 'add' }); toast(inWl ? '已移出自选' : '已加入自选'); await poll(); renderAnly(a.code); };
+    $('#aWl').onclick = async () => { await api('watchlist', { code: a.code, op: inWl ? 'remove' : 'add' }); toast(inWl ? '已移出自选' : '已加入自选'); await poll(); if (active()) renderAnly(a.code); };
     clearInterval(S.timers.anly);
     S.timers.anly = setInterval(async () => {
-      if (S.page !== 'anly' || S.anly !== a) return clearInterval(S.timers.anly);
-      try { const r = await api('quotes?codes=' + a.code); const x = r[a.code]; if (!x) return; if (x.bids?.length) drawOB(x);
+      if (!active()) return;
+      try { const r = await api('quotes?codes=' + a.code); const x = r[a.code]; if (!active() || !x) return; if (x.bids?.length) drawOB(x);
         $('#aQuoteTime').textContent = '行情时点 ' + sourceTime(x.quote_time || x.time);
         $('#aPx').textContent = num(x.price); $('#aPx').className = 'px ' + cls(x.pct); $('#aCh').textContent = x.chg == null ? pct(x.pct) : `${sgn(x.chg)} ${pct(x.pct)}`; $('#aCh').className = 'ch ' + cls(x.pct);
-        if (a.fusion && !STATIC) { const f = await api('decision/status?code=' + a.code); if (S.page === 'anly' && S.anly === a) { a.fusion = f; $('#sigBox').innerHTML = decisionSignals(f); $('#aDecisionAdvice').textContent = Object.values(f.routes).map(r => r.label + '：' + r.verdict).join('；'); $('#p-anly .rating').textContent = decisionRating(f); } }
-        if (S.ichart && S.ov && S.ov.phase === 'trading') S.ichart.setData(await api('intraday?code=' + a.code));
+        if (a.fusion && !STATIC) { const f = await api('decision/status?code=' + a.code); if (active()) { a.fusion = f; $('#sigBox').innerHTML = decisionSignals(f); $('#aDecisionAdvice').textContent = Object.values(f.routes).map(r => r.label + '：' + r.verdict).join('；'); $('.rating', report).textContent = decisionRating(f); } }
+        if (active() && S.ichart && S.ov?.phase === 'trading') {
+          const chart = S.ichart, d = await api('intraday?code=' + a.code);
+          if (active() && S.ichart === chart) chart.setData(d);
+        }
       } catch { }
     }, 5000);
   }
@@ -1468,22 +1514,27 @@
     $('#aiSugGo').onclick = async () => { $('#aiSug').innerHTML = '<div class="loading">AI 分析中，并在样本外回测验证</div>'; try { showSug(await api('ai/suggest', {})); } catch (e) { $('#aiSug').innerHTML = `<div class="up">${esc(e.message)}</div>`; } };
   }
   async function aiStatus() { try { S.aiStatus = await api('ai/status'); } catch { S.aiStatus = null; } return S.aiStatus; }
-  async function loadAiStock(a) {
+  async function loadAiStock(a, report) {
     const st = S.aiStatus || await aiStatus();
-    const box = $('#aiCmt');
-    const showCmt = c => { if (!$('#aiCmt')) return; $('#aiCmt').className = '';
-      $('#aiCmt').innerHTML = c && c.content ? md(c.content) + `<div class="hint mono" style="margin-top:6px">${esc(c.model || '')} · ${esc(c.created || '')}</div>` : '<div class="hint">还没有今天的 AI 点评，点右上角「生成」。</div>'; };
+    if (!report.isConnected) return;
+    const box = $('#aiCmt', report);
+    const showCmt = c => { box.className = '';
+      box.innerHTML = c && c.content ? md(c.content) + `<div class="hint mono" style="margin-top:6px">${esc(c.model || '')} · ${esc(c.created || '')}</div>` : '<div class="hint">还没有今天的 AI 点评，点右上角「生成」。</div>'; };
     if (!st || !st.ready) { box.innerHTML = '还没有配置 AI 接口。到「设置 → 密钥保险箱」填 DeepSeek Key，再到「AI 接口」点「测试连接」。'; }
     else { try { showCmt(await api('ai/comment?cached=1&code=' + a.code)); } catch (e) { box.textContent = e.message; } }
-    $('#aiCmtGo').onclick = async () => { const b = $('#aiCmtGo'); b.disabled = true; b.textContent = 'AI 思考中…';
+    if (!report.isConnected) return;
+    const b = $('#aiCmtGo', report);
+    b.onclick = async () => { b.disabled = true; b.textContent = 'AI 思考中…';
       try { showCmt(await api('ai/comment?refresh=1&code=' + a.code)); } catch (e) { toast(e.message, 1); } b.disabled = false; b.textContent = '生成 / 刷新'; };
-    $('#aiQGo').onclick = async () => { const q = $('#aiQ').value.trim(); if (!q) return; $('#aiA').innerHTML = '<div class="loading">AI 思考中</div>';
-      try { const r = await api('ai/ask', { code: a.code, question: q }); $('#aiA').innerHTML = md(r.answer); } catch (e) { $('#aiA').innerHTML = `<div class="up">${esc(e.message)}</div>`; } };
-    $('#aiQ').onkeydown = e => { if (e.key === 'Enter') $('#aiQGo').click(); };
+    const input = $('#aiQ', report), answer = $('#aiA', report), ask = $('#aiQGo', report);
+    ask.onclick = async () => { const q = input.value.trim(); if (!q) return; answer.innerHTML = '<div class="loading">AI 思考中</div>';
+      try { const r = await api('ai/ask', { code: a.code, question: q }); answer.innerHTML = md(r.answer); } catch (e) { answer.innerHTML = `<div class="up">${esc(e.message)}</div>`; } };
+    input.onkeydown = e => { if (e.key === 'Enter') ask.click(); };
+    const news = $('#aiNews', report);
     try {
       const ns = await api('ai/news?code=' + a.code);
-      if ($('#aiNews')) $('#aiNews').innerHTML = ns.length ? ns.map(n => `<div class="ev"><div class="tm">${esc(n.date.slice(5, 10))}<br><span class="${n.kind === '公告' ? 'amber' : 'cyan'}">${n.kind}</span></div><div><a href="${esc(n.url)}" target="_blank" rel="noopener" class="tt" style="color:var(--text)">${esc(n.title)}</a><div class="bd">${esc(n.source)}</div></div></div>`).join('') : '<div class="empty">没有抓到公告或新闻</div>';
-    } catch (e) { if ($('#aiNews')) $('#aiNews').innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+      news.innerHTML = ns.length ? ns.map(n => `<div class="ev"><div class="tm">${esc(n.date.slice(5, 10))}<br><span class="${n.kind === '公告' ? 'amber' : 'cyan'}">${n.kind}</span></div><div><a href="${esc(n.url)}" target="_blank" rel="noopener" class="tt" style="color:var(--text)">${esc(n.title)}</a><div class="bd">${esc(n.source)}</div></div></div>`).join('') : '<div class="empty">没有抓到公告或新闻</div>';
+    } catch (e) { news.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
   }
 
   // ------------------------------------------------------------------ 下单弹窗
@@ -2274,7 +2325,7 @@
         : '<div class="hint" style="padding:10px">我能看到大盘、板块、你的持仓、自选和最近的选股。在个股页打开我，我还会读那只股票的完整分析。</div>';
       $('#aiMsgs').scrollTop = 1e9;
       const qs = ['今天市场怎么样？', '哪些板块最强，为什么？', '我的持仓该怎么处理？'];
-      if (S.page === 'anly' && S.anly) qs.unshift(`${S.anly.name} 现在能买吗？`);
+      if (S.page === 'forecast' && S.anly) qs.unshift(`${S.anly.name} 现在能买吗？`);
       if (S.page === 'pick') qs.unshift('解释一下最近这次选股');
       $('#aiQuick').innerHTML = qs.map(q => `<button class="chip" data-q="${esc(q)}">${esc(q)}</button>`).join('');
       $$('#aiQuick [data-q]').forEach(b => b.onclick = () => { $('#aiInput').value = b.dataset.q; send(); });
@@ -2284,7 +2335,7 @@
       $('#aiInput').value = ''; S.chat.push({ role: 'user', content: t }); draw();
       $('#aiMsgs').insertAdjacentHTML('beforeend', '<div class="msg assistant loading">思考中</div>'); $('#aiMsgs').scrollTop = 1e9;
       try {
-        const r = await api('ai/chat', { messages: S.chat, page: S.page, code: S.page === 'anly' && S.anly ? S.anly.code : null });
+        const r = await api('ai/chat', { messages: S.chat, page: S.page, code: S.page === 'forecast' && S.anly ? S.anly.code : null });
         S.chat.push({ role: 'assistant', content: r.answer });
       } catch (e) { S.chat.push({ role: 'assistant', content: '出错了：' + e.message }); }
       save(); draw();
@@ -2310,7 +2361,7 @@
     }
     api('settings').then(s => { S.settings = s; syncLook(s.look); }).catch(() => { });
     const [page, arg] = location.hash.slice(1).split('/');
-    if (STATIC && page === 'forecast') {
+    if (STATIC && (page === 'forecast' || (page === 'anly' && arg))) {
       show(page, arg);
       poll();
       return;

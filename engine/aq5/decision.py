@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from . import db, decision_evidence as evidence
 from .config import now, CN_TZ
 
-VERSION = "decision-fusion-1"
+VERSION = "decision-fusion-2"
 _contexts = {}
 _proposals = {}
 _lock = threading.RLock()
@@ -63,6 +63,8 @@ def structure_context(code, forecast, asof):
         for kind in ("centers", "segments", "buy_sell_points"):
             rows = []
             for row in item.get("structures", {}).get(kind, []) if valid else []:
+                if kind == "segments" and row.get("level", "segment") != "segment":
+                    continue
                 try:
                     if (row.get("confirmed") is True and evidence.stamp(row["confirmed_at"]) <= at
                             and evidence.stamp(row.get("end") or row.get("at")) <= at):
@@ -70,9 +72,17 @@ def structure_context(code, forecast, asof):
                 except (ValueError, TypeError, KeyError):
                     continue
             geometry[kind] = sorted(rows, key=lambda r: (r.get("end") or r.get("at"), r["confirmed_at"]))
+        review = item.get("review", {}) if valid else {}
+        layer = review.get("reference_layer")
+        if layer:
+            geometry["centers"] = [r for r in geometry["centers"] if r.get("level") == layer]
         frames[tf] = {"eligible": bool(valid), **geometry}
         seg = geometry["segments"][-1] if geometry["segments"] else {}
-        notes.append(f"{tf}：" + ("已确认线段" + {"up": "向上", "down": "向下"}.get(seg.get("direction"), "方向待定") if seg else "结构待确认"))
+        direction = {"up": "向上", "down": "向下"}.get(seg.get("direction"))
+        details = [review["description"]] if review.get("description") else []
+        if direction:
+            details.append("已确认线段" + direction)
+        notes.append(f"{tf}：" + (" · ".join(details) or "结构待确认"))
     return frames, notes
 
 

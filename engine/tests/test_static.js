@@ -433,24 +433,40 @@ test('default monitoring page retains original panels and omits internal trainin
   assert.doesNotMatch(learn,/<details[^>]*legacyDiagnostics[^>]*\bopen\b/);
 });
 
-test('global stock selection stays on forecast but preserves existing analysis navigation elsewhere', () => {
+test('command bar uses the full stock report from any page', () => {
   const calls=[],node={style:{},blur(){}};
   const context=vm.createContext({S:{page:'forecast'},$:()=>node,normCode:x=>x==='600000'?'sh600000':x,
     go:(...args)=>calls.push(args)});
   vm.runInContext(source.match(/^  function pickCode.*$/m)[0],context);
-  context.pickCode('600000');assert.deepEqual(calls[0],['forecast','sh600000']);
+  context.pickCode('600000');assert.deepEqual(calls[0],['anly','sh600000']);
   context.S.page='mon';context.pickCode('sz000001');assert.deepEqual(calls[1],['anly','sz000001']);
 });
 
-test('forecast route passes the selected stock and existing app services to its viewer', () => {
-  let options;
+test('legacy stock details open the unified analysis page with a full report', () => {
+  let options, selected;
   const noOp=()=>{},node={classList:{toggle(){}},dataset:{},id:'p-forecast'};
   const context=vm.createContext({S:{},STATIC:true,$:()=>({}),$$:()=>[node],normCode:x=>'sh'+x,
-    window:{ForecastUI:{render:o=>{options=o;}}},api:noOp,showUnlock:noOp,go:noOp,requestForecast:noOp,stopResearchProgress:noOp,
-    renderMon:noOp,renderPick:noOp,renderAnly:noOp,renderSim:noOp,renderLearn:noOp,renderBt:noOp,renderLog:noOp,renderSet:noOp});
-  vm.runInContext(functionSource('show'),context);context.show('forecast','600000');
+    window:{ForecastUI:{render:o=>{options=o;}}},api:noOp,showUnlock:noOp,requestForecast:noOp,stopResearchProgress:noOp,clearStockReport:noOp,
+    renderMon:noOp,renderPick:noOp,renderWatch:noOp,renderAnly:code=>{selected=code;},renderSim:noOp,renderLearn:noOp,renderBt:noOp,renderLog:noOp,renderSet:noOp});
+  vm.runInContext(functionSource('show'),context);context.show('anly','600000');
   assert.equal(options.code,'sh600000');
-  for(const key of ['api','search','selectCode','analyze','requestForecast','unlock'])assert.equal(typeof options[key],'function');
+  assert.equal(context.S.page,'forecast');assert.equal(selected,'sh600000');
+  for(const key of ['api','selectCode','requestAnalysis','requestForecast','unlock'])assert.equal(typeof options[key],'function');
+});
+
+test('top tape contains domestic and overseas benchmark indices even with stocks in a configured list', () => {
+  const els={phase:{},mockTag:{},lastUpd:{},pickBadge:{},tapeInner:{dataset:{}}};
+  const context=vm.createContext({STATIC:false,PHASE:{closed:['休市','muted']},S:{seen:new Set()},
+    $:id=>els[id.slice(1)],esc:String,cls:()=>'',num:String,pct:String,updateBell(){}});
+  const predicates=['domesticTapeIndex','overseasTapeIndex'].map(name=>source.match(new RegExp('^  const '+name+'.*$','m'))[0]);
+  vm.runInContext([...predicates,functionSource('header')].join('\n'),context);
+  const quote=(code,name)=>({code,name,price:10,pct:0});
+  context.header({time:'2026-11-17 15:00:00',phase:'closed',
+    indices:[quote('sh000016','上证50'),quote('sh600522','中天科技')],
+    overseas:[quote('usDJI','道琼斯'),quote('usAAPL','苹果')],
+    watchlist:[quote('sz000001','平安银行')]});
+  assert.match(els.tapeInner.innerHTML,/上证50.*道琼斯/);
+  assert.doesNotMatch(els.tapeInner.innerHTML,/中天科技|苹果|平安银行/);
 });
 
 function forecastRequestHarness({fetchTask,decrypt,derive}={}) {

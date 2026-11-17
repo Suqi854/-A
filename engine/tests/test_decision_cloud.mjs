@@ -6,7 +6,7 @@ const source=readFileSync(new URL('../web/js/app.js',import.meta.url),'utf8');
 const implementation=source.match(/^  async function requestDecision\(.*?^  }/ms)[0];
 const code='sh600000', id='a'.repeat(32), hash='b'.repeat(64), proposal='c'.repeat(64);
 function harness({kind='analysis',data,queued=false,afterDecrypt,afterDerive,failSubmit=false}={}){
- const calls=[], S={page:kind==='screen'?'pick':'anly',anlyCode:code,priv:{},privateSession:{key:{}}};
+ const calls=[], S={page:kind==='screen'?'pick':'forecast',anlyCode:code,priv:{},privateSession:{key:{}}};
  let ticks=0;
  const context=vm.createContext({S,Date,TextEncoder,Uint8Array,AbortSignal,
    normCode:v=>String(v||'').toLowerCase(),relayBase:()=> 'https://relay.example',

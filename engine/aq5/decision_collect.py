@@ -130,13 +130,16 @@ def analysis(code):
         snapshot = market.snapshot()
     except (RuntimeError, OSError):
         snapshot = []
-    # Fetch the technical view while the independent evidence sources are read.
-    with ThreadPoolExecutor(max_workers=1) as pool:
+    # Run the three independent reads together, then reuse a single structure snapshot.
+    with ThreadPoolExecutor(max_workers=2) as pool:
         technical = pool.submit(base.analyze, code)
+        structure = pool.submit(decision.load_forecast, code)
         collection = collect(_pool(snapshot), [code], focus=True)
         raw = technical.result()
-    fusion = decision.view(code)
+        forecast = structure.result()
+    fusion = decision.view(code, forecast=forecast)
     result = decision.merge(raw, fusion)
+    result["forecast"] = {k: forecast[k] for k in ("symbol", "summary", "structures", "predictions", "request", "status", "coverage")}
     result["kline"] = market.kline_with_live(code, 250)
     result["analysis_time"] = evidence.stamp(now())
     result["source_evidence"] = evidence.latest(now()).get(code, {})

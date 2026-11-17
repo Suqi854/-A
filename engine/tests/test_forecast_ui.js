@@ -18,10 +18,10 @@ function fixture(code='sh600000',name='浦发银行'){
 }
 function harness({initial=fixture(),search=async()=>[],request,code}={}){
   const nodes=new Map(),timers=new Map(),requests=[],calls=[];let timerId=0;
-  const doc={activeElement:null,getElementById:id=>id==='p-forecast'?root:nodes.get(id)||null};
+  const doc={activeElement:null,getElementById:id=>id==='stock-summary'?root:nodes.get(id)||null};
   class Element{
     constructor(id){this.id=id;this.style={};this.attributes={};this.dataset={};this.value='';this._html='';this.textContent='';}
-    set innerHTML(html){this._html=html;if(this.id==='p-forecast'){
+    set innerHTML(html){this._html=html;if(this.id==='stock-summary'){
       nodes.clear();for(const match of html.matchAll(/<([a-z]+)\b([^>]*\bid="([^"]+)"[^>]*)>/g)){
         const node=new Element(match[3]);const value=match[2].match(/\bvalue="([^"]*)"/);if(value)node.value=decode(value[1]);nodes.set(node.id,node);
       }
@@ -33,7 +33,7 @@ function harness({initial=fixture(),search=async()=>[],request,code}={}){
     removeAttribute(k){delete this.attributes[k];}
     focus(){doc.activeElement=this;}
   }
-  const root=new Element('p-forecast'),snapshots=new Map([[initial.symbol?.code,initial]]);
+  const root=new Element('stock-summary'),snapshots=new Map([[initial.symbol?.code,initial]]);
   class Clock extends Date{static now(){return Date.parse('2026-11-09T14:00:10+08:00');}}
   const context=vm.createContext({window:{},document:doc,location:{hash:'#forecast'},Date:Clock,
     setTimeout(fn,delay){const id=++timerId;timers.set(id,{fn,delay});return id;},clearTimeout(id){timers.delete(id);},console});
@@ -85,6 +85,31 @@ test('click selection supports touch click and preserves unknown-stock queue sta
 test('six digit analysis button requests the entered stock without a cached symbol',async()=>{
   const h=harness();await h.render();h.nodes.get('fc-query').value='600036';await h.nodes.get('fc-analyze').onclick();
   assert.deepEqual(h.requests,['sh600036']);assert.match(h.root.innerHTML,/<small>600036<\/small>/);
+});
+test('one full analysis renders its structure and a later snapshot read preserves it',async()=>{
+  const calls=[],h=harness(),code='sh600036';
+  const data=fixture(code,'招商银行');
+  const frame=data.structures[code+':day'];
+  frame.price_bars=[{date:'2026-11-09',open:10,high:10.8,low:9.8,close:10.7}];
+  frame.review={state:'neutral',close:10.7,observation:'观察回踩',centers:{stroke:{low:10,high:10.5,position:'above',movement:'single'}}};
+  h.options.requestAnalysis=async selected=>{calls.push(selected);h.ui.useAnalysis({code:selected,forecast:data});};
+  await h.render();h.nodes.get('fc-query').value='600036';await h.nodes.get('fc-analyze').onclick();
+  assert.deepEqual(calls,[code]);assert.deepEqual(h.requests,[]);
+  assert.match(h.root.innerHTML,/招商银行 <small>600036/);
+  assert.match(h.root.innerHTML,/笔中枢/);assert.match(h.root.innerHTML,/观察回踩/);
+  await h.nodes.get('fc-refresh').onclick();
+  assert.match(h.root.innerHTML,/观察回踩/);
+  assert.ok(h.nodes.has('fc-quick'));
+});
+test('chart never places offscreen or ineligible buy markers at the chart edges',()=>{
+  const h=harness(),frame=fixture().structures['sh600000:day'];
+  const point={at:'2026-11-09',price:10,side:'buy',types:['1'],confirmed:true,level:'stroke'};
+  frame.structures.buy_sell_points=[{...point,at:'2026-11-10'}];
+  assert.doesNotMatch(h.ui.chart(frame),/<circle/);
+  frame.structures.buy_sell_points=[point];
+  assert.match(h.ui.chart(frame),/<circle[^>]*><title>一买/);
+  frame.quality.eligible=false;
+  assert.doesNotMatch(h.ui.chart(frame),/<circle/);
 });
 test('ambiguous name requires selecting a result, does not analyze an arbitrary first result',async()=>{
   const h=harness({search:async()=>[{code:'sh600000',name:'浦发银行'},{code:'sz000001',name:'平安银行'}]});await h.render();

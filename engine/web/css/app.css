@@ -88,11 +88,11 @@ a { color: var(--cyan); text-decoration: none; }
 /* ---------- 跑马灯 ---------- */
 #tape { position: fixed; top: var(--top); left: 0; right: 0; height: var(--tape); background: var(--bg0); border-bottom: 1px solid var(--line);
   overflow: hidden; z-index: 19; font: 12px/var(--tape) var(--mono); white-space: nowrap; }
-#tape .inner { display: inline-block; padding-left: 100%; animation: tape 60s linear infinite; }
+#tape .inner { display: inline-flex; animation: tape 60s linear infinite; }
 #tape:hover .inner { animation-play-state: paused; }
 #tape .it { margin-right: 28px; cursor: pointer; }
 #tape .it b { color: var(--text); font-weight: 500; margin-right: 6px; }
-@keyframes tape { to { transform: translateX(-100%); } }
+@keyframes tape { to { transform: translateX(-50%); } }
 
 /* ---------- 导航 ---------- */
 #nav { position: fixed; top: calc(var(--top) + var(--tape)); bottom: 0; left: 0; width: var(--nav); background: var(--bg2);
@@ -392,6 +392,7 @@ table.ob tr.obmid td { border-top: 1px solid var(--line2); border-bottom: 1px so
 .mkts { border-left: 1px dashed var(--line2); padding-left: 10px; max-height: 150px; overflow: auto; }
 .livep { gap: 6px; font-size: 12px; }
 .fc-shell { display:grid; gap:var(--pad); min-width:0; }
+#stock-report:not(:empty) { margin-top:var(--gap); }
 html[data-ui] .fc-shell > .panel:first-child { overflow:visible; z-index:2; }
 html .fc-shell > .panel:first-child > .pb { overflow:visible; }
 .fc-search-row { align-items:flex-end; }
@@ -404,9 +405,16 @@ html .fc-shell > .panel:first-child > .pb { overflow:visible; }
 .fc-shell #fc-search-message:not(:empty) { margin-top:7px; }
 .fc-summary { line-height:1.75; margin:9px 0; overflow-wrap:anywhere; }
 .fc-price-levels { max-width:440px; padding:8px 0; margin:0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
-.fc-chart { min-width:0; }
-.fc-chart svg { width:100%; height:auto; display:block; }
+.fc-chart { min-width:0; --fc-outer-color:#8966cf; }
+.fc-chart svg { width:100%; height:auto; max-height:420px; display:block; }
 .fc-chart .hint { margin-top:6px; line-height:1.6; }
+.fc-pen { color:var(--amber); }
+.fc-segment { color:var(--cyan); }
+.fc-outer { color:var(--fc-outer-color); }
+.fc-evidence { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr)); gap:0 var(--pad); margin:var(--pad) 0 0; }
+.fc-evidence > div { border-top:1px solid var(--line); padding:7px 0; min-width:0; }
+.fc-evidence dt { color:var(--muted); margin-bottom:3px; }
+.fc-evidence dd { margin:0; overflow-wrap:anywhere; }
 .fc-timeframe-label { font-size:12px; color:var(--muted); }
 .fc-notice { margin:0; padding:9px 10px; border-left:2px solid var(--amber); background:var(--panel2); color:var(--text); font-size:12px; line-height:1.6; overflow-wrap:anywhere; }
 .fc-shell .scroll { max-width:100%; overflow:auto; }
@@ -417,6 +425,7 @@ html .fc-shell > .panel:first-child > .pb { overflow:visible; }
 .fc-controls { margin-top:12px; }
 @media (max-width: 700px) {
   .fc-search { max-width:none; }
+  .fc-search-row .fc-search { flex-basis:100%; }
   .fc-search-row .btn { min-height:32px; }
   .fc-search input.in { height:32px; font-size:14px; }
   .fc-search .suggest { top:34px; }

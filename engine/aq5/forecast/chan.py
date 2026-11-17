@@ -287,7 +287,22 @@ def _features(structures, close, rows):
     return {k: v for k, v in features.items() if math.isfinite(v)}
 
 
-def analyze(code, timeframe, bars, asof):
+def _chart(book, rows):
+    """Display-only evidence from the same input and final snapshot as the structures."""
+    bars = [{k: row[k] for k in ("date", "open", "high", "low", "close")} for row in rows[-180:]]
+    divergence = []
+    for level, points in (("stroke", book.bs_point_lst), ("segment", book.seg_bs_point_lst)):
+        for point in points.bsp_iter():
+            if not any(t.value in ("1", "1p") for t in point.type):
+                continue
+            ratio = dict(point.features.items()).get("divergence_rate")
+            if isinstance(ratio, (float, int)) and math.isfinite(ratio) and 0 <= ratio <= CONFIG["divergence_rate"]:
+                divergence.append({"level": level, "at": rows[point.klu.idx]["date"],
+                                   "side": "buy" if point.is_buy else "sell", "ratio": ratio})
+    return {"bars": bars, "divergence": divergence}
+
+
+def analyze(code, timeframe, bars, asof, *, include_chart=False):
     """Compute the entire currently-known structure chain, fail closed on gaps.
 
     Adjustment evidence is explicit: adjustment='none'|'pit',
@@ -331,6 +346,8 @@ def analyze(code, timeframe, bars, asof):
             snapshot["revisions"] = events
             out.update(structures=snapshot, features=_features(snapshot, rows[-1]["close"], rows),
                        source_time=rows[-1]["date"], known_at=rows[-1]["known_at"])
+            if include_chart:
+                out["chart"] = _chart(engine[kind], rows)
         except Exception as exc:
             # Third-party structure failures must block this observation rather
             # than escape and kill the shared forecasting worker.
@@ -338,7 +355,7 @@ def analyze(code, timeframe, bars, asof):
     out["quality"] = {"eligible": not reasons, "reason": ";".join(sorted(reasons)) if reasons else "ok",
                       "input_bars": len(rows), "adjustment_required": True}
     out["confirmed"] = not reasons and bool([x for x in out["structures"]["strokes"] if x.get("confirmed")])
-    out["id"] = _hash({k: v for k, v in out.items() if k != "id"})
+    out["id"] = _hash({k: v for k, v in out.items() if k not in ("id", "chart")})
     return out
 
 

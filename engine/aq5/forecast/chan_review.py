@@ -1,0 +1,60 @@
+"""Read-only interpretation of confirmed Chan geometry for the stock report."""
+
+from . import chan
+
+MOVEMENT = {"rising": "中枢上移", "falling": "中枢下移", "overlap": "中枢重叠", "single": "单个确认中枢"}
+POSITION = {"above": "收于上沿上方", "inside": "收在中枢内", "below": "收于下沿下方"}
+
+
+def _center(centers, close):
+    if not centers:
+        return None
+    latest = centers[-1]
+    previous = next((x for x in reversed(centers[:-1]) if x["end"] < latest["start"]), None)
+    low, high = latest["low"], latest["high"]
+    if previous is None:
+        movement = "single"
+    elif low > previous["high"]:
+        movement = "rising"
+    elif high < previous["low"]:
+        movement = "falling"
+    else:
+        movement = "overlap"
+    position = "above" if close > high else "below" if close < low else "inside"
+    return {**latest, "position": position, "movement": movement,
+            "previous": {k: previous[k] for k in ("low", "high", "end")} if previous else None}
+
+
+def review(result, quality):
+    chart = result.get("chart", {})
+    bars = chart.get("bars", [])
+    if not quality["eligible"] or not bars:
+        return {"state": "unavailable"}
+
+    geometry = result["structures"]
+    close = bars[-1]["close"]
+    centers = {}
+    for level in ("stroke", "segment"):
+        confirmed = [r for r in geometry["centers"] if r["level"] == level and r["confirmed"]]
+        centers[level] = _center(confirmed, close)
+    # Use one layer end to end. The other layer remains visible as context.
+    layer = "stroke" if centers["stroke"] else "segment"
+    reference = centers[layer]
+    position = reference["position"] if reference else None
+    movement = reference["movement"] if reference else None
+    state = {("rising", "above"): "up", ("falling", "below"): "down"}.get(
+        (movement, position), "neutral" if reference else "waiting")
+    observation = {
+        "above": "观察回踩能否守住上沿。收回中枢即结束上方观察。",
+        "below": "观察反抽能否收回下沿。收回中枢即结束下方观察。",
+        "inside": "观察有效离开及随后的回试，再确认中枢外结构。",
+    }.get(position, "等待同层中枢确认。")
+    points = [r for r in geometry["buy_sell_points"] if r["confirmed"]]
+    key = lambda row: (row["level"], row["at"], row["side"])
+    ratios = {key(row): row["ratio"] for row in chart["divergence"]}
+    divergence = next((row for row in reversed(points) if key(row) in ratios), None)
+    if divergence:
+        divergence = {**divergence, "ratio": ratios[key(divergence)], "threshold": chan.CONFIG["divergence_rate"]}
+    return {"state": state, "close": close, "centers": centers, "reference_layer": layer if reference else None,
+            "description": f"{MOVEMENT[movement]}，{POSITION[position]}" if reference else "同层中枢待确认",
+            "observation": observation, "latest_point": points[-1] if points else None, "divergence": divergence}

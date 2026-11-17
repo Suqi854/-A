@@ -82,7 +82,7 @@ export default {
     ctx.waitUntil(kickCloud(env));
   },
   async fetch(req, env) {
-    const reviewedUi=await researchUiRoute(req);
+    const reviewedUi=await researchUiRoute(req,env);
     if(reviewedUi)return reviewedUi;
     const research = await fullResearchRoute(req, env);
     if (research) return research;

@@ -16,7 +16,7 @@ os.environ['AQ5_DATA'] = tempfile.mkdtemp(dir=base)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from aq5 import db
 from aq5.config import CN_TZ
-from aq5.forecast import service, chan
+from aq5.forecast import service, chan, chan_review
 
 
 def frames(at):
@@ -63,7 +63,10 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(result['symbol'], {'code': 'sz002911', 'name': '佛燃能源'})
         self.assertTrue(result['analysis_only'])
         self.assertEqual(len(result['structures']), 4)
-        self.assertTrue(result['structures']['sz002911:day']['structures']['strokes'])
+        day = result['structures']['sz002911:day']
+        self.assertTrue(day['structures']['strokes'])
+        self.assertEqual(day['price_bars'][-1]['date'], day['source_time'])
+        self.assertEqual(day['review']['close'], result['last_completed_close']['price'])
         self.assertIn('20日均线', result['summary']['summary'])
         self.assertIn('RSI(14)', result['summary']['summary'])
         self.assertIn('math_hurst', result['features'])
@@ -83,6 +86,32 @@ class AnalysisTests(unittest.TestCase):
         self.assertTrue(any('复权' in s for s in result['summary']['warnings']))
         self.assertNotIn('20日均线', result['summary']['summary'])
         self.assertFalse(result['structures']['sz002911:day']['quality']['eligible'])
+        self.assertEqual(result['structures']['sz002911:day']['review'], {'state': 'unavailable'})
+
+    def test_review_uses_comparable_centers_and_only_confirmed_divergence(self):
+        def center(begin, end, low, high, level='stroke', confirmed=True):
+            return dict(start=begin, end=end, low=low, high=high, level=level, confirmed=confirmed)
+        def point(at, confirmed):
+            return dict(at=at, level='stroke', side='buy', confirmed=confirmed, types=['1'])
+        old, tentative = point('2026-11-04', True), point('2026-11-07', False)
+        result = {'chart': {'bars': [{'close': 15}],
+                            'divergence': [{**old, 'ratio': .7}, {**tentative, 'ratio': .6}]},
+                  'structures': {'centers': [
+                      center('2026-11-01','2026-11-02',9,10),
+                      center('2026-11-02','2026-11-04',8,20),  # overlaps latest in time
+                      center('2026-11-03','2026-11-05',11,13),
+                      center('2026-11-04','2026-11-06',16,18,'segment'),
+                      center('2026-11-06','2026-11-07',17,19,confirmed=False),
+                  ], 'buy_sell_points': [old, tentative]}}
+        review = chan_review.review(result, {'eligible': True})
+        self.assertEqual(review['state'], 'up')
+        self.assertEqual(review['reference_layer'], 'stroke')
+        self.assertEqual(review['centers']['stroke']['previous']['low'], 9)
+        self.assertEqual(review['centers']['segment']['movement'], 'single')
+        self.assertEqual(review['latest_point'], old)
+        self.assertEqual(review['divergence']['ratio'], .7)
+        result['chart']['bars'][-1]['close'] = 13
+        self.assertEqual(chan_review.review(result, {'eligible': True})['state'], 'neutral')
 
     def test_one_level_failure_keeps_other_level_analysis(self):
         def feed(code, tf, asof):

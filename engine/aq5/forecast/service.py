@@ -13,10 +13,10 @@ from functools import partial
 
 from .. import db, market
 from ..config import now
-from . import calendar, chan, data, features, models
+from . import calendar, chan, chan_review, data, features, models
 
 LEVELS = {"day": "日线", "60m": "60分钟", "15m": "15分钟", "5m": "5分钟"}
-VERSION = "forecast-on-demand-1"
+VERSION = "forecast-on-demand-2"
 REASONS = {
     "adjustment_unverified": "复权口径尚未核对",
     "stale_completed_bar": "尚未取得最新完成K线",
@@ -79,30 +79,27 @@ def _quality(frame, structure):
             ";".join(dict.fromkeys(str(q.get("reason") or "source_unavailable") for q in (fq, sq) if not q.get("eligible")))}
 
 
-def _summary(frames, structures, values, at):
-    qualities = {tf: _quality(frames.get(tf, {}), structures.get(tf, {})) for tf in LEVELS}
-    descriptions, warnings, directions = [], [], {}
+def _summary(qualities, reviews, values, at):
+    descriptions, warnings = [], []
     for tf, label in LEVELS.items():
-        result = structures.get(tf, {})
         if not qualities[tf]["eligible"]:
             warnings.append(label + "：" + _explain(qualities[tf]["reason"]) + "，该级别仅供观察。")
             continue
-        segments = [s for s in result.get("structures", {}).get("segments", [])
-                    if s.get("confirmed") and s.get("level", "segment") == "segment"]
-        segment = segments[-1] if segments else None
-        direction = segment.get("direction") if segment else None
-        directions[tf] = direction
-        descriptions.append(label + ("最近确认线段向上" if direction == "up" else
-                                    "最近确认线段向下" if direction == "down" else "线段方向尚待确认"))
-    known = set(directions.values()) - {None}
-    stance = "mixed" if len(known) > 1 else next(iter(known)) if known else "waiting"
-    if not qualities["day"]["eligible"] or not qualities["60m"]["eligible"]:
+        descriptions.append(label + " " + reviews[tf].get("description", "收盘数据待核对"))
+    primary = {reviews[tf]["state"] for tf in ("day", "60m")}
+    if primary == {"up", "down"}:
+        stance = "mixed"
+    elif len(primary) == 1 and primary <= {"up", "down", "neutral"}:
+        stance = next(iter(primary))
+    else:
         stance = "waiting"
     text = "；".join(descriptions) + "。" if descriptions else "完整行情尚未取得，暂不能形成可靠的结构判断。"
-    if len(known) > 1:
-        text += "各级别存在分歧，等待后续确认。"
-    elif known:
-        text += "该方向描述已确认结构，仍需后续行情验证。"
+    if stance == "mixed":
+        text += "日线与60分钟结构方向分歧。"
+    elif stance in ("up", "down"):
+        text += "日线与60分钟结构同向，15分钟和5分钟用于观察回试。"
+    elif descriptions:
+        text += "日线与60分钟尚待同向结构确认。"
     if qualities["day"]["eligible"]:
         ma, rsi, ratio, vol = (values.get(k) for k in
                               ("trend_ma20_distance", "momentum_rsi14", "volume_ratio5_20", "risk_vol20"))
@@ -117,11 +114,8 @@ def _summary(frames, structures, values, at):
             maths.append(f"近20日对数收益波动率为{vol*100:.2f}%")
         if maths:
             text += "量价与数学观察：" + "，".join(maths) + "。"
-    centers = [c for c in structures.get("day", {}).get("structures", {}).get("centers", [])
-               if c.get("confirmed")] if qualities["day"]["eligible"] else []
-    center = centers[-1] if centers else {}
-    if center:
-        warnings.append("支撑与阻力为最近确认日线中枢边界；价格可能已在中枢外，不保证到价反转。")
+    day = reviews["day"]
+    center = day.get("centers", {}).get(day.get("reference_layer")) or {}
     return {"stance": stance, "summary": text, "support": center.get("low"), "resistance": center.get("high"),
             "updated": at, "quality": {"eligible": all(q["eligible"] for q in qualities.values()),
                                         "reason": None if all(q["eligible"] for q in qualities.values()) else "部分周期行情不足"},
@@ -157,7 +151,8 @@ def analyze(code, asof=None, *, feed=None, quote_loader=None, context_loader=Non
             try:
                 frames[tf] = pending[tf].result() if pool else feed(code, tf, requested)
                 observed = requested or clock()
-                structures[tf] = chan.analyze(code, tf, frames[tf].get("rows", []), calendar.iso(observed))
+                structures[tf] = chan.analyze(code, tf, frames[tf].get("rows", []), calendar.iso(observed),
+                                              include_chart=True)
             except (RuntimeError, ValueError, TypeError, KeyError, OSError) as exc:
                 failures[tf] = type(exc).__name__
                 frames[tf] = {"rows": [], "quality": {"eligible": False, "reason": "source_unavailable"}}
@@ -176,7 +171,9 @@ def analyze(code, asof=None, *, feed=None, quote_loader=None, context_loader=Non
         disclosure = None
     f = features.build(frames.get("day", {}).get("rows", []), asof=at, chan=structures,
                        quote=quote, context=context, disclosure=disclosure)
-    summary = _summary(frames, structures, f["values"], calendar.iso(at))
+    qualities = {tf: _quality(frames.get(tf, {}), structures.get(tf, {})) for tf in LEVELS}
+    reviews = {tf: chan_review.review(structures.get(tf, {}), qualities[tf]) for tf in LEVELS}
+    summary = _summary(qualities, reviews, f["values"], calendar.iso(at))
     missing = [r["name"] for r in f["coverage"] if not r.get("count") and r.get("id") != "unimplemented"]
     if missing:
         summary["warnings"].append(f"有{len(missing)}类指标缺少可核对的数据，未参与综合判断；可展开运行与研究记录查看。")
@@ -211,7 +208,8 @@ def analyze(code, asof=None, *, feed=None, quote_loader=None, context_loader=Non
         small = {k: v[-(180 if k == "klines" else 40):] for k, v in structure.get("structures", {}).items() if k != "revisions"}
         out_structures[code + ":" + tf] = {**{k: structure.get(k) for k in
                                               ("id", "code", "timeframe", "asof", "source_time", "known_at", "confirmed", "config_hash")},
-                                         "quality": summary["timeframe_quality"][tf], "structures": small}
+                                         "quality": qualities[tf], "structures": small, "review": reviews[tf],
+                                         "price_bars": structure.get("chart", {}).get("bars", [])}
     latest = frames.get("day", {}).get("rows", [])
     return {"version": VERSION, "analysis_only": True, "symbol": symbol, "symbols": [symbol], "summary": summary,
             "request": {"status": "ready"}, "status": {"phase": "waiting_signal" if summary["quality"]["eligible"] else "data_blocked",
