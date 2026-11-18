@@ -19,7 +19,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from . import db, market, picker, sim, vault
-from .config import DATA, WEB, load_settings, now, today
+from .config import CN_TZ, DATA, WEB, load_settings, now, today
 
 STATE = {"last": None, "last_push": None, "error": None, "running": False}
 _lock = threading.Lock()
@@ -40,12 +40,37 @@ def _w(path: Path, obj) -> None:
     tmp.replace(path)
 
 
-def _ai_view() -> dict:
+def _entry_feedback() -> dict:
     from . import hf
+    try:
+        return hf.status()["entry_feedback"]
+    except Exception:  # 反馈缺失时仍可导出其余公开状态，不发布底层错误详情。
+        return {"reason": "高频反馈暂不可用"}
+
+
+def public_strategy_status(feedback=None) -> dict:
+    from . import pick_policy
+    stamp = now().astimezone(CN_TZ)
+    policy = {}
+    for session in pick_policy.SESSIONS:
+        try:
+            state = pick_policy.current(session)
+        except Exception:
+            state = {"protocol": pick_policy.VERSION, "status": "unavailable", "mode": "observe",
+                     "reason": "选股准入状态暂不可用"}
+        policy[session] = {k: state.get(k) for k in
+                           ("protocol", "status", "mode", "reason", "checked_at", "mature_signal_dates", "cost_bps")}
+    feedback = _entry_feedback() if feedback is None else feedback
+    return {"schema": 1, "source_day": stamp.date().isoformat(), "updated": stamp.isoformat(timespec="seconds"),
+            "pick_policy": policy, "entry_feedback": {k: feedback.get(k) for k in
+            ("active", "trading_day", "source_day", "matched", "closes", "multiplier", "reason")}}
+
+
+def _ai_view() -> dict:
     v = sim.view("ai")
     for t in v.get("trades", []):
         t.pop("order_id", None)
-    feedback = hf.status()["entry_feedback"]
+    feedback = _entry_feedback()
     v["entry_feedback"] = {k: feedback.get(k) for k in
                            ("active", "trading_day", "source_day", "matched", "closes", "net", "multiplier", "reason")}
     return v
@@ -258,8 +283,10 @@ def export(full: bool = True) -> dict:
     _site(root)
     files = []
     ov = public_overview()
-    files += ["latest.json", "runs.json", "quotes.json", "ai.json"]
-    _w(d / "ai.json", _ai_view())
+    files += ["latest.json", "runs.json", "quotes.json", "ai.json", "strategy-status.json"]
+    ai_view = _ai_view()
+    _w(d / "ai.json", ai_view)
+    _w(d / "strategy-status.json", public_strategy_status(ai_view.get("entry_feedback")))
     runs = _run_assets(d, ov.get("last_run"), full)
     _quote_assets(d, runs, ov)
     try:
@@ -275,7 +302,13 @@ def export(full: bool = True) -> dict:
     if full:
         from . import research
         _w(d / "research.json", research.preview())
-        _w(d / "learn.json", api_learn({}))
+        try:
+            learning = api_learn({})
+        except Exception:
+            learning = None
+        if learning is not None:
+            _w(d / "learn.json", learning)
+            files.append("learn.json")
         _w(d / "strategies.json", api_strategies({}))
         try:
             from . import signals, tracking
@@ -296,7 +329,6 @@ def export(full: bool = True) -> dict:
                                  "risk": s["risk"], "emotions": sim.EMOTIONS, "static": True,
                                  "ai": {"provider": s.get("ai", {}).get("provider"), "model": s.get("ai", {}).get("model")},
                                  "look": s.get("look") or {}})  # 外观（皮肤等）各端同步，不含个人数据
-        files.append("learn.json")
     generated = _analysis_assets(d, ov.get("last_run"), full, runs)
     if generated:
         files.append(f"analysis/*.json({generated})")

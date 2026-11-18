@@ -51,7 +51,7 @@ jobs:
           node engine/tests/test_live_relay.mjs
       - name: 选股准入、迭代和模拟盘回归
         run: |
-          for test in test_pick_policy test_paper_entry_controls test_plan; do
+          for test in test_pick_policy test_pick_publication test_paper_entry_controls test_plan; do
             case_dir=$(mktemp -d "$RUNNER_TEMP/$test.XXXXXX")
             AQ5_DATA="$case_dir" AQ5_TEST_DATA="$case_dir" python -B "engine/tests/$test.py"
           done

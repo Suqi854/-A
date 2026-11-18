@@ -53,6 +53,23 @@ class PublicationTests(unittest.TestCase):
                           [(rid, day, code, 7) for code in codes])
         return rid
 
+    def test_public_strategy_status_only_exports_admission_and_entry_controls(self):
+        policies = {"protocol": "strict-a-v1", "mode": "observe", "mature_signal_dates": 0,
+                    "weights": {"private": 1}}
+        feedback = {"active": True, "multiplier": 1.1, "matched": 24, "closes": 26, "net": -123,
+                    "trading_day": "2026-11-19", "positions": ["private"]}
+        with patch("aq5.pick_policy.current", return_value=policies):
+            result = publisher.public_strategy_status(feedback)
+        self.assertEqual(set(result), {"schema", "source_day", "updated", "pick_policy", "entry_feedback"})
+        self.assertEqual(set(result["pick_policy"]), {"auction", "close"})
+        for policy in result["pick_policy"].values():
+            self.assertEqual(set(policy), {"protocol", "status", "mode", "reason", "checked_at",
+                                          "mature_signal_dates", "cost_bps"})
+            self.assertEqual(policy["mature_signal_dates"], 0)
+        self.assertEqual(set(result["entry_feedback"]), {"active", "trading_day", "source_day", "matched",
+                                                         "closes", "multiplier", "reason"})
+        self.assertEqual(result["entry_feedback"]["multiplier"], 1.1)
+
     def test_partial_reconciles_runs_quotes_and_analysis_without_private_codes(self):
         root = DATA / "public-test"
         data = root / "data"
@@ -88,6 +105,7 @@ class PublicationTests(unittest.TestCase):
         ) as clock:
             publisher.export(full=False)
             self.assertTrue(read(data / "manifest.json")["full"])
+            self.assertEqual(read(data / "strategy-status.json")["source_day"], "2026-11-04")
             old_quote = read(data / "quotes.json")["quotes"][ARCHIVE]
             old_analysis = read(data / "analysis" / f"{ARCHIVE}.json")
             self.assertEqual(read(data / "picks" / "latest.json")["id"], first)
@@ -98,6 +116,7 @@ class PublicationTests(unittest.TestCase):
             analyzed.clear()
             publisher.export(full=False)
             self.assertFalse(read(data / "manifest.json")["full"])
+            self.assertEqual(read(data / "strategy-status.json")["source_day"], "2026-11-06")
             runs = read(data / "runs.json")
             self.assertEqual([r["id"] for r in runs], [newest, first])
             self.assertEqual(runs[0]["cand_list"], [{"code": CAND, "price": 17}])

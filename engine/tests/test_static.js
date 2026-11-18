@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const { gzipSync } = require('node:zlib');
 
 const source = readFileSync(path.join(__dirname, '../web/js/app.js'), 'utf8');
-const functions = ['sj', 'staticApi', 'updateMon', 'poll', 'privateStatus', 'refreshPrivate', 'unlockPrivate', 'autoUnlock', 'loadResearchPreview', 'researchRun', 'staticQuotes', 'quoteValues', 'pickRunCaption', 'shadowResearch', 'researchProgressText', 'renderResearchPreview', 'stopResearchProgress', 'readResearchStatus', 'watchResearchProgress'];
+const functions = ['sj', 'publicStrategyView', 'staticApi', 'updateMon', 'poll', 'privateStatus', 'refreshPrivate', 'unlockPrivate', 'autoUnlock', 'loadResearchPreview', 'researchRun', 'staticQuotes', 'quoteValues', 'pickRunCaption', 'shadowResearch', 'researchProgressText', 'renderResearchPreview', 'stopResearchProgress', 'readResearchStatus', 'watchResearchProgress'];
 const app = functions.map(name => source.match(new RegExp(`^  (?:async )?function ${name}\\(.*?^  }`, 'ms'))?.[0] || '').join('\n');
 const live = source.slice(source.indexOf('  const LIVE_AGE ='), source.indexOf('  // ================================================================== F1 监控'));
 const formatters = source.slice(source.indexOf('  const esc ='), source.indexOf('  const S ='));
@@ -19,7 +19,7 @@ const overview = (time = oldTime) => ({ time, watchlist: [], indices: [], overse
   accounts: { ai: account('AI自动盘') }, last_run: { date:'2026-10-28', finished:'10:01:00', items: [{ code: 'sh600000', price: 10, stop: 9, target1: 11 }] },
   pick_quotes: { sh600000: { price: 10.5, pct: 0, time:'20261028100200' } } });
 
-function harness({ snapshot = overview(), encrypted, isStatic = true, relay, preview, quotes, analysis } = {}) {
+function harness({ snapshot = overview(), encrypted, isStatic = true, relay, preview, quotes, analysis, strategyStatus, learn, ai } = {}) {
   const nodes = new Map();
   const $ = selector => {
     if (!nodes.has(selector)) nodes.set(selector, { children: [], dataset: {}, querySelectorAll: () => [] });
@@ -47,6 +47,9 @@ function harness({ snapshot = overview(), encrypted, isStatic = true, relay, pre
     async fetch(url) {
       requests.push(url);
       if (url.startsWith('data/latest.json')) return Response.json(snapshot);
+      if (url.startsWith('data/strategy-status.json') && strategyStatus) return Response.json(strategyStatus);
+      if (url.startsWith('data/learn.json') && learn) return Response.json(learn);
+      if (url.startsWith('data/ai.json') && ai) return Response.json(ai);
       if (url.startsWith('data/private.enc')) return new Response(encrypted);
       if (url.startsWith('data/quotes.json') && quotes) return Response.json(quotes);
       if (url.startsWith('data/analysis/') && analysis) return Response.json(analysis);
@@ -154,6 +157,24 @@ test('live monitor retains its quote polling', () => {
   assert.deepEqual(h.requests, ['quotes?codes=sh600000']);
 });
 
+test('published strategy review augments an older snapshot only within its applicable dates', async () => {
+  const policy = {protocol:'strict-a-v1', mode:'observe', checked_at:oldTime};
+  const status = {schema:1, source_day:'2026-10-28', updated:newTime, pick_policy:{close:policy},
+    entry_feedback:{trading_day:'2026-10-29', multiplier:1.1}};
+  const h = harness({strategyStatus:status, learn:{}, ai:{equity:100}});
+  assert.equal((await h.context.staticApi('learn')).pick_policy.close.mode, 'observe');
+  assert.equal((await h.context.staticApi('sim?acct=ai')).entry_feedback.multiplier, 1.1);
+  h.advance(2 * 86400000);
+  assert.equal((await h.context.staticApi('sim?acct=ai')).entry_feedback, undefined);
+  const newer = harness({strategyStatus:status, learn:{pick_policy:{close:{...policy,mode:'all_a',checked_at:newTime}}}});
+  assert.equal((await newer.context.staticApi('learn')).pick_policy.close.mode, 'all_a');
+  const revoked = harness({strategyStatus:status, learn:{pick_policy:{close:{...policy,mode:'all_a'}}}});
+  assert.equal((await revoked.context.staticApi('learn')).pick_policy.close.mode, 'observe');
+  const unavailable = {...status, pick_policy:{close:{...policy, status:'unavailable', checked_at:null}}};
+  const blocked = harness({strategyStatus:unavailable, learn:{pick_policy:{close:{...policy,mode:'all_a'}}}});
+  assert.equal((await blocked.context.staticApi('learn')).pick_policy.close.status, 'unavailable');
+});
+
 test('monitor requires a dated post-selection quote and distinguishes shadow candidates from entries', () => {
   const h = harness(), ov = overview();
   ov.pick_quotes.sh600000.time = '20261028100059';
@@ -166,7 +187,7 @@ test('monitor requires a dated post-selection quote and distinguishes shadow can
   ov.last_run.research = {selection:{protocol:'strict-a-v1', tier_counts:{A:2}, reason:'成本后验证未通过'}};
   h.context.updateMon(ov);
   assert.match(h.$('#monPick').innerHTML, /强信号 2 只 · 正式入选 0 只 · 成本后验证未通过/);
-  assert.match(h.context.shadowResearch(null, {pick_policy:{close:{mode:'observe', reason:'样本不足'}}}), /尾盘选股.*仅观察.*样本不足/);
+  assert.match(h.context.shadowResearch(null, {pick_policy:{close:{mode:'observe', reason:'样本不足',mature_signal_dates:0}}}), /尾盘选股.*仅观察.*样本不足.*完整结果的信号日 0 天/);
 });
 
 const password = 'synthetic test password';

@@ -32,6 +32,31 @@
     }
     return JSON.parse(await pending.get(url));
   }
+  async function publicStrategyView(file, field) {
+    const [page, status] = await Promise.all([sj(file), sj('strategy-status.json').catch(() => null)]);
+    const asof = sourceStamp(status?.updated), day = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
+    if (status?.schema !== 1 || !Number.isFinite(asof) || asof > Date.now() + 5000 ||
+        !/^\d{4}-\d\d-\d\d$/.test(status.source_day) || day < status.source_day ||
+        day > (status.entry_feedback?.trading_day || status.source_day)) return page;
+    if (field === 'entry_feedback') {
+      const fresh = status.entry_feedback;
+      if (fresh?.trading_day && (!page.entry_feedback?.trading_day || fresh.trading_day > page.entry_feedback.trading_day)) {
+        page.entry_feedback = fresh;
+      }
+    } else {
+      const merged = {...page.pick_policy};
+      for (const session of ['auction', 'close']) {
+        const candidate = status.pick_policy?.[session], prior = merged[session];
+        const newer = sourceStamp(candidate?.checked_at), older = sourceStamp(prior?.checked_at);
+        const revoked = candidate?.mode === 'observe' && prior?.mode !== 'observe' &&
+          (Number.isFinite(newer) ? newer === older : !Number.isFinite(older) || asof >= older);
+        if (candidate?.protocol === 'strict-a-v1' && (!prior ||
+            Number.isFinite(newer) && (!Number.isFinite(older) || newer > older) || revoked)) merged[session] = candidate;
+      }
+      if (Object.keys(merged).length) page.pick_policy = merged;
+    }
+    return page;
+  }
   async function staticApi(path, body) {
     if (path === 'decision/confirm' && body !== undefined) return requestDecision('confirm', body.code, body);
     if (body !== undefined) throw new Error('这是公开只读版：下单、选股、设置等操作请在电脑端进行');
@@ -77,7 +102,7 @@
         if (x?.kline?.length) return { code, rows: x.kline, source: '云端发布 · 日K截至 ' + (x.kline.at(-1)?.date || '未知') }; if (S.liteCache && S.liteCache.code === code) return { code, rows: S.liteCache.rows, source: '腾讯（浏览器直连）' };
         const k = await Lite.klines(code, 'day', 320); return { code, rows: k.rows, source: k.source }; }
       case 'intraday': return sj('intraday/' + code + '.json').catch(() => Lite.intraday(code));
-      case 'sim': { const priv = privateForDisplay(); return q.get('acct') === 'me' && priv ? priv.me : sj('ai.json'); }
+      case 'sim': { const priv = privateForDisplay(); return q.get('acct') === 'me' && priv ? priv.me : publicStrategyView('ai.json', 'entry_feedback'); }
       case 't/live': { const priv = privateForDisplay(); return { signals: priv?.intraday || {}, status: priv?.intraday_status, training: priv?.training }; }
       case 'forecast': {
         const cached = code && S.forecastResults?.[code];
@@ -93,7 +118,7 @@
         return S.priv ? { exists: false, static_time: priv.time, static_refresh_failed: failed }
           : { exists: false, error: '解锁个人数据后可以看计划模拟' };
       }
-      case 'learn': return sj('learn.json');
+      case 'learn': return publicStrategyView('learn.json', 'pick_policy');
       case 'events': { const e = await sj('events.json'); return S.priv ? [...S.priv.events, ...e].sort((x, y) => y.time < x.time ? -1 : 1) : e; }
       case 'settings': return sj('settings.json');
       case 'strategies': return sj('strategies.json');
@@ -1147,7 +1172,8 @@
     const admission = ['auction', 'close'].map(session => {
       const p = l.pick_policy?.[session], mode = {observe:'仅观察', all_a:'强 A 榜可入选', top1:'仅第一名可入选'};
       const scope = p?.validation?.[p.mode === 'top1' ? 'top1' : 'all_a'];
-      return `<div class="row"><b>${SESSION[session]}</b><span>${mode[p?.mode] || '等待验证'}</span><span class="hint">${esc(p?.reason || '这份快照尚无新版验证记录。')}${p?.checked_at ? ' · ' + esc(sourceTime(p.checked_at)) : ''}</span></div>` +
+      const sample = Number.isInteger(p?.mature_signal_dates) ? ` · 已有完整结果的信号日 ${num(p.mature_signal_dates, 0)} 天` : '';
+      return `<div class="row"><b>${SESSION[session]}</b><span>${mode[p?.mode] || '等待验证'}</span><span class="hint">${esc(p?.reason || '这份快照尚无新版验证记录。')}${sample}${p?.checked_at ? ' · ' + esc(sourceTime(p.checked_at)) : ''}</span></div>` +
         (scope ? `<div class="hint">样本外信号日 ${num(p.validation.days, 0)} 天 · 假设往返成本 ${num(p.cost_bps, 0)} 基点 · 平均净收益 ${pct(scope.net_pct)} · 净收益为正 ${num(scope.win * 100, 1)}%</div>` : '');
     }).join('');
     const info = admission + `<div data-nc class="hint">概率模型 ${esc(l.active_model_version ?? '未启用')} · ${esc(l.prob_label || '暂无已标注概率模型')}</div>`;
@@ -1859,8 +1885,8 @@
     };
   }
   function hfFeedback(f) {
-    if (!f) return '<div class="hint">当前快照尚无高频开仓复核记录。</div>';
-    return `<div class="hint"><b>${esc(f.trading_day)} 高频开仓</b> · ${esc(f.reason)} · 门槛 ×${num(f.multiplier, 2)}<br>${esc(f.source_day || '日期待核')} 平仓 ${num(f.closes, 0)} 笔，双边费用可核对 ${num(f.matched, 0)} 笔，合计净额 ${f.net == null ? '--' : yuan(f.net) + ' 元'}</div>`;
+    if (!f?.trading_day) return `<div class="hint">${esc(f?.reason || '当前快照尚无高频开仓复核记录。')}</div>`;
+    return `<div class="hint"><b>${esc(f.trading_day)} 高频开仓</b> · ${esc(f.reason)} · 门槛 ×${num(f.multiplier, 2)}<br>${esc(f.source_day || '日期待核')} 平仓 ${num(f.closes, 0)} 笔，双边费用可核对 ${num(f.matched, 0)} 笔${f.net == null ? '' : '，合计净额 ' + yuan(f.net) + ' 元'}</div>`;
   }
   async function loadHF(account) {
     const box = $('#hfBox'); if (!box) return;
