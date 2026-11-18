@@ -41,9 +41,13 @@ def _w(path: Path, obj) -> None:
 
 
 def _ai_view() -> dict:
+    from . import hf
     v = sim.view("ai")
     for t in v.get("trades", []):
         t.pop("order_id", None)
+    feedback = hf.status()["entry_feedback"]
+    v["entry_feedback"] = {k: feedback.get(k) for k in
+                           ("active", "trading_day", "source_day", "matched", "closes", "net", "multiplier", "reason")}
     return v
 
 

@@ -204,11 +204,15 @@ def analyze(code, asof=None, *, feed=None, quote_loader=None, context_loader=Non
         summary["warnings"].append("当前展示已完成K线的结构分析；没有满足有效报价和期限条件的即时概率预测。")
     symbol = {"code": code, "name": str(quote.get("name") or "")}
     out_structures = {}
+    sessions = calendar.calendar_window(at.year)
+    if any((calendar.stamp(s.get("source_time")) or at).year == at.year - 1 for s in structures.values()):
+        sessions = calendar.official_days(at.year - 1) + sessions
     for tf, structure in structures.items():
         small = {k: v[-(180 if k == "klines" else 40):] for k, v in structure.get("structures", {}).items() if k != "revisions"}
         out_structures[code + ":" + tf] = {**{k: structure.get(k) for k in
                                               ("id", "code", "timeframe", "asof", "source_time", "known_at", "confirmed", "config_hash")},
                                          "quality": qualities[tf], "structures": small, "review": reviews[tf],
+                                         "scenario": chan_review.next_bar_scenario(structure, reviews[tf], at, sessions),
                                          "price_bars": structure.get("chart", {}).get("bars", [])}
     latest = frames.get("day", {}).get("rows", [])
     return {"version": VERSION, "analysis_only": True, "symbol": symbol, "symbols": [symbol], "summary": summary,

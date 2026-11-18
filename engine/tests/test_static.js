@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const { gzipSync } = require('node:zlib');
 
 const source = readFileSync(path.join(__dirname, '../web/js/app.js'), 'utf8');
-const functions = ['sj', 'staticApi', 'updateMon', 'poll', 'privateStatus', 'refreshPrivate', 'unlockPrivate', 'autoUnlock', 'loadResearchPreview', 'researchRun', 'staticQuotes', 'quoteValues', 'researchProgressText', 'renderResearchPreview', 'stopResearchProgress', 'readResearchStatus', 'watchResearchProgress'];
+const functions = ['sj', 'staticApi', 'updateMon', 'poll', 'privateStatus', 'refreshPrivate', 'unlockPrivate', 'autoUnlock', 'loadResearchPreview', 'researchRun', 'staticQuotes', 'quoteValues', 'pickRunCaption', 'shadowResearch', 'researchProgressText', 'renderResearchPreview', 'stopResearchProgress', 'readResearchStatus', 'watchResearchProgress'];
 const app = functions.map(name => source.match(new RegExp(`^  (?:async )?function ${name}\\(.*?^  }`, 'ms'))?.[0] || '').join('\n');
 const live = source.slice(source.indexOf('  const LIVE_AGE ='), source.indexOf('  // ================================================================== F1 监控'));
 const formatters = source.slice(source.indexOf('  const esc ='), source.indexOf('  const S ='));
@@ -16,8 +16,8 @@ const account = (name, equity = 100) => ({ name, equity, positions: [] });
 const pack = (time, equity) => ({ time, watchlist: [], me: account('我的模拟盘'),
   plan: { exists: true, account: account('计划模拟盘', equity) } });
 const overview = (time = oldTime) => ({ time, watchlist: [], indices: [], overseas: [], top: [], inflow: [], events: [],
-  accounts: { ai: account('AI自动盘') }, last_run: { items: [{ code: 'sh600000', price: 10, stop: 9, target1: 11 }] },
-  pick_quotes: { sh600000: { price: 10.5, pct: 0 } } });
+  accounts: { ai: account('AI自动盘') }, last_run: { date:'2026-10-28', finished:'10:01:00', items: [{ code: 'sh600000', price: 10, stop: 9, target1: 11 }] },
+  pick_quotes: { sh600000: { price: 10.5, pct: 0, time:'20261028100200' } } });
 
 function harness({ snapshot = overview(), encrypted, isStatic = true, relay, preview, quotes, analysis } = {}) {
   const nodes = new Map();
@@ -142,7 +142,7 @@ test('static quotes are visible immediately, 0% survives, and old snapshots show
   delete ov.pick_quotes;
   h.S.pq = { sh600000: { price: 99, pct: 10 } };
   h.context.updateMon(ov);
-  assert.match(h.$('#monPick').innerHTML, /class="flat">--<.*<b>--<\/b>/s);
+  assert.match(h.$('#monPick').innerHTML, /title="暂缺可用报价">--<.*<b>--<\/b>/s);
   assert.doesNotMatch(h.$('#monPick').innerHTML, /99\.00/);
 });
 
@@ -152,6 +152,21 @@ test('live monitor retains its quote polling', () => {
   h.context.updateMon(overview());
   assert.match(h.$('#monPick').innerHTML, />10\.20</);
   assert.deepEqual(h.requests, ['quotes?codes=sh600000']);
+});
+
+test('monitor requires a dated post-selection quote and distinguishes shadow candidates from entries', () => {
+  const h = harness(), ov = overview();
+  ov.pick_quotes.sh600000.time = '20261028100059';
+  ov.last_run.items[0].tier = 'B';
+  h.context.updateMon(ov);
+  assert.match(h.$('#monPick').innerHTML, /历史分级榜 · A 级 0 只 · B 级 1 只/);
+  assert.match(h.$('#monPick').innerHTML, /较选出暂无可比报价/);
+  assert.doesNotMatch(h.$('#monPick').innerHTML, /\+5\.00%/);
+  ov.last_run.items = [];
+  ov.last_run.research = {selection:{protocol:'strict-a-v1', tier_counts:{A:2}, reason:'成本后验证未通过'}};
+  h.context.updateMon(ov);
+  assert.match(h.$('#monPick').innerHTML, /强信号 2 只 · 正式入选 0 只 · 成本后验证未通过/);
+  assert.match(h.context.shadowResearch(null, {pick_policy:{close:{mode:'observe', reason:'样本不足'}}}), /尾盘选股.*仅观察.*样本不足/);
 });
 
 const password = 'synthetic test password';

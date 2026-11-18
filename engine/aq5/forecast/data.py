@@ -46,6 +46,25 @@ def _ends(day, minutes):
             for h, m in ((9, 30), (13, 0)) for i in range(minutes, 121, minutes)]
 
 
+def next_bar_end(timeframe, source_time, sessions):
+    """First scheduled bar close following this completed bar on the supplied calendar."""
+    start = stamp(source_time)
+    if not start or timeframe not in PERIODS:
+        return None
+    day = start.date().isoformat()
+    if day not in sessions:
+        return None
+    minutes = PERIODS[timeframe]
+    for session in sessions[sessions.index(day):]:
+        ends = _ends(session, minutes) if minutes else [datetime.fromisoformat(session).replace(hour=15, tzinfo=CN_TZ)]
+        if session == day and start not in ends:
+            return None
+        for end in ends:
+            if end > start:
+                return end
+    return None
+
+
 def _expected_end(t, minutes):
     days = official_days(t.year)
     if not days:

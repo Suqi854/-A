@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main, 'feat/forecast-*', 'fix/forecast-*']
-    paths: ['engine/aq5/forecast/**', 'engine/aq5/decision*', 'engine/tests/test_decision*', 'engine/tests/test_forecast*', 'engine/tests/test_full_research.mjs', 'engine/tests/test_research_progress.mjs', 'engine/web/**', 'engine/cloudflare-relay/**', 'engine/requirements-forecast.txt', '.github/workflows/aq5-forecast*.yml', '.github/workflows/aq5-full-research.yml']
+    paths: ['engine/aq5/**', 'engine/tests/**', 'engine/web/**', 'engine/cloudflare-relay/**', 'engine/requirements-forecast.txt', '.github/workflows/aq5-forecast*.yml', '.github/workflows/aq5-full-research.yml']
 permissions:
   contents: read
 jobs:
@@ -49,6 +49,12 @@ jobs:
           node engine/tests/test_forecast_routing.mjs
           node engine/tests/test_cloud_kick.mjs
           node engine/tests/test_live_relay.mjs
+      - name: 选股准入、迭代和模拟盘回归
+        run: |
+          for test in test_pick_policy test_paper_entry_controls test_plan; do
+            case_dir=$(mktemp -d "$RUNNER_TEMP/$test.XXXXXX")
+            AQ5_DATA="$case_dir" AQ5_TEST_DATA="$case_dir" python -B "engine/tests/$test.py"
+          done
       - name: 单股票公开行情实际读取（缺口保留）
         working-directory: engine
         env:

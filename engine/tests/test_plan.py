@@ -77,8 +77,8 @@ def record_picks(picks, session):
 plan.on_picks = record_picks
 pr = picker.run("close")
 plan.on_picks = real_on_picks
-assert dispatched == ["close"]
-assert pr["picks"] and all(p["eligible"] == (p["tier"] in ("A", "B")) for p in pr["picks"])
+assert dispatched == (["close"] if pr["picks"] else [])
+assert all(sim.tradable_pick(p) for p in pr["picks"])
 plan.on_picks(pr["picks"], "close")
 plan.tick()
 v2 = plan.view()
@@ -91,7 +91,7 @@ config.save_settings({"strategy_v2": {"legacy_auto": True}})
 candidate = next(x for x in snap if x["code"] not in codes and 5 < x.get("price", 0) < 50)
 px = candidate["price"]
 explicit_pick = {"code": candidate["code"], "name": candidate["name"], "tier": "A",
-                 "eligible": True, "score": 90, "price": px, "rank": 1, "signals": [],
+                 "eligible": True, "selection_protocol": "strict-a-v1", "score": 90, "price": px, "rank": 1, "signals": [],
                  "plan": {"stop": px * 0.93, "target1": px * 1.1, "target2": px * 1.2}}
 plan.on_picks([explicit_pick], "close")
 v2 = plan.view()
@@ -198,7 +198,13 @@ with db.tx() as _c:
     _c.execute("UPDATE accounts SET cash=cash+300000 WHERE id='plan'")
 before = len(db.q("SELECT id FROM orders WHERE account='plan' AND reason LIKE '%盘中机会%'"))
 cand = [x for x in snap if x.get("price") and 5 < x["price"] < 40 and x["code"] not in {p["code"] for p in plan.view()["account"]["positions"]}][0]
-plan._scan.update(t=0.0, cands=[{"code": cand["code"], "name": cand.get("name"), "score": 80, "tier": "B", "id": None}])
+with db.tx() as c:
+    run_id = c.execute("INSERT INTO pick_runs(date,session) VALUES(?, 'auction')", (config.today(),)).lastrowid
+    c.execute("INSERT INTO research_runs(run_id,report) VALUES(?,?)",
+              (run_id, db.dumps({"selection": {"protocol": "strict-a-v1"}})))
+    c.execute("INSERT INTO picks(run_id,code,name,score,tier) VALUES(?,?,?,?,?)",
+              (run_id, cand["code"], cand.get("name"), 80, "A"))
+plan._scan["t"] = 0
 real_plan = signals.plan
 signals.plan = lambda code, phase=None, acct="me", save=True: {"name": cand.get("name"), "actions": ["买入"], "score": 80, "rating": "买入",
                                                               "price": cand["price"], "summary": "测试", "levels": {"stop": cand["price"] * 0.93,
@@ -207,6 +213,12 @@ plan._scan_entries("attack")
 signals.plan = real_plan
 after = len(db.q("SELECT id FROM orders WHERE account='plan' AND reason LIKE '%盘中机会%'"))
 assert after == before + 1, (before, after)
+with db.tx() as c:
+    empty = c.execute("INSERT INTO pick_runs(date,session) VALUES(?,'close')", (config.today(),)).lastrowid
+assert not plan._current_picks(), "最新空榜应让盘中旧候选失效"
+with db.tx() as c:
+    c.execute("INSERT INTO picks(run_id,code,name,score,tier) VALUES(?,?,?,?,?)", (empty,cand["code"],"旧A",99,"A"))
+assert not plan._current_picks(), "无新版研究证据的历史 A 不可开仓"
 print("盘中机会买入 OK")
 config.save_settings({"strategy_v2": {"legacy_auto": False}})
 

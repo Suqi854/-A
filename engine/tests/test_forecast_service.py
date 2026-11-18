@@ -16,7 +16,7 @@ os.environ['AQ5_DATA'] = tempfile.mkdtemp(dir=base)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from aq5 import db
 from aq5.config import CN_TZ
-from aq5.forecast import service, chan, chan_review
+from aq5.forecast import service, chan, chan_review, data
 
 
 def frames(at):
@@ -67,6 +67,18 @@ class AnalysisTests(unittest.TestCase):
         self.assertTrue(day['structures']['strokes'])
         self.assertEqual(day['price_bars'][-1]['date'], day['source_time'])
         self.assertEqual(day['review']['close'], result['last_completed_close']['price'])
+        expected = {'day':'15:00', '60m':'10:30', '15m':'09:45', '5m':'09:35'}
+        for tf, hour in expected.items():
+            frame = result['structures']['sz002911:' + tf]
+            scenario = frame['scenario']
+            self.assertEqual(scenario['status'], 'ready', tf)
+            self.assertEqual(scenario['source_time'], frame['price_bars'][-1]['date'])
+            self.assertEqual(scenario['base_close'], frame['price_bars'][-1]['close'])
+            self.assertEqual(scenario['timeframe'], tf)
+            self.assertEqual(scenario['due_at'], f'2026-11-16T{hour}:00+08:00')
+            self.assertEqual(scenario['issued_at'], self.at.isoformat())
+            self.assertTrue(scenario['reference_id'])
+            self.assertNotIn('probability', scenario)
         self.assertIn('20日均线', result['summary']['summary'])
         self.assertIn('RSI(14)', result['summary']['summary'])
         self.assertIn('math_hurst', result['features'])
@@ -87,6 +99,46 @@ class AnalysisTests(unittest.TestCase):
         self.assertNotIn('20日均线', result['summary']['summary'])
         self.assertFalse(result['structures']['sz002911:day']['quality']['eligible'])
         self.assertEqual(result['structures']['sz002911:day']['review'], {'state': 'unavailable'})
+        self.assertEqual(result['structures']['sz002911:day']['scenario']['status'], 'quality_blocked')
+
+    def test_next_bar_deadlines_follow_exchange_sessions_and_require_current_inputs(self):
+        days = ['2026-11-13', '2026-11-16']
+        for tf, expected in [('5m', '13:05'), ('15m', '13:15'), ('60m', '14:00')]:
+            self.assertEqual(data.next_bar_end(tf, '2026-11-13 11:30', days).isoformat(),
+                             f'2026-11-13T{expected}:00+08:00')
+        self.assertIsNone(data.next_bar_end('5m', '2026-11-13 11:32', days))
+        self.assertIsNone(data.next_bar_end('day', '2026-11-16 15:00', days))
+
+    def test_scenario_freezes_only_confirmed_prices_and_expires_at_next_close(self):
+        days = ['2026-11-13']
+        at = '2026-11-13 11:32'
+        stroke = dict(start_price=10., end_price=12., direction='up', confirmed=True,
+                      level='stroke', id='old', confirmed_at='2026-11-13T11:00:00+08:00')
+        center = dict(low=10., high=11., confirmed=True, level='stroke', id='center', confirmed_at=stroke['confirmed_at'])
+        result = dict(timeframe='5m', source_time='2026-11-13T11:30:00+08:00',
+                      chart={'bars':[dict(close=11.5, low=10.8, high=11.7)]},
+                      structures={'strokes':[stroke, {**stroke,'end_price':11.8,'confirmed':False}], 'segments':[]})
+        review = dict(close=11.5,state='neutral',centers={'stroke':center},reference_layer='stroke')
+        for movement, direction, expected in [('rising','up','up'), ('falling','down','down'),
+                                               ('rising','down','range'), ('single','up','range')]:
+            center['movement'] = movement
+            stroke.update(direction=direction, end_price=12. if direction=='up' else 9.)
+            projection = chan_review.next_bar_scenario(result, review, at, days)
+            self.assertEqual(projection['primary'], expected)
+            self.assertEqual(projection['reference_kind'], 'center')
+            self.assertEqual(projection['checkpoint'], {'up':12.,'down':11.,'range':None}[expected])
+        center['movement'] = 'rising'
+        result['structures']['segments'] = [dict(level='segment', direction='down', confirmed=True)]
+        self.assertEqual(chan_review.next_bar_scenario(result, review, at, days)['primary'], 'range')
+        review.update(centers={},reference_layer=None)
+        result['structures']['segments'][0]['direction'] = 'up'
+        fallback = chan_review.next_bar_scenario(result, review, at, days)
+        self.assertEqual((fallback['reference_kind'], fallback['high']), ('stroke', 12.))
+        self.assertEqual(fallback['primary'], 'up')
+        self.assertEqual(chan_review.next_bar_scenario(result, review, '2026-11-13 13:05', days)['status'], 'expired')
+        self.assertEqual(chan_review.next_bar_scenario(result, review, at, [])['status'], 'calendar_unavailable')
+        result['structures']['strokes'] = [dict(stroke,confirmed=False)]
+        self.assertEqual(chan_review.next_bar_scenario(result, review, at, days)['status'], 'no_reference')
 
     def test_review_uses_comparable_centers_and_only_confirmed_divergence(self):
         def center(begin, end, low, high, level='stroke', confirmed=True):

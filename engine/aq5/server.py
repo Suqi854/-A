@@ -283,16 +283,27 @@ def _follow(run_id: int) -> dict:
     r = next((x for x in picker.runs(10) if x["id"] == run_id), None)
     if not r:
         raise ValueError("找不到这次选股")
+    from .config import today
+    from . import pick_policy
+    protocol = ((r.get("research") or {}).get("selection") or {}).get("protocol")
+    latest_run = db.q1("SELECT id FROM pick_runs WHERE date=? AND session IN ('auction','close') ORDER BY id DESC LIMIT 1",
+                       (today(),))
+    if not latest_run or r["id"] != latest_run["id"] or protocol != pick_policy.VERSION:
+        raise ValueError("仅可补跟当日最新一次按现行规则发布的竞价或尾盘选股")
     from .analysis import analyze
     items = []
     for p in r["items"]:
+        if not sim.tradable_pick(p):
+            continue
         try:
             a = analyze(p["code"])
         except (RuntimeError, ValueError):
             continue
         items.append({"id": p["id"], "code": p["code"], "name": p["name"], "score": p["score"], "prob": p["prob"],
                       "price": a["quote"]["price"], "plan": a["plan"], "signals": a["signals"], "tier": p.get("tier"),
-                      "rank": p.get("rank")})
+                      "rank": p.get("rank"), "eligible": True, "selection_protocol": protocol})
+    if not items:
+        return {"orders": 0}
     before = len(db.q("SELECT id FROM orders WHERE account='ai'"))
     sim.auto_follow(items, "close" if r["session"] == "close" else "auction")
     return {"orders": len(db.q("SELECT id FROM orders WHERE account='ai'")) - before}

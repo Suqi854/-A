@@ -19,6 +19,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
+from functools import lru_cache
 
 from . import db, market
 from .config import MOCK, load_settings, now, today
@@ -45,6 +46,21 @@ def mode() -> str:
 
 def _log(msg: str) -> None:
     STATE["log"] = ([now().strftime("%H:%M:%S.%f")[:12] + " " + msg] + STATE["log"])[:120]
+
+
+def _round_trip_pct(px, qty, settings):
+    from .sim import fees
+    slip = settings["slippage"]
+    buy = qty * round(px * (1 + slip), 2)
+    sell = qty * round(px * (1 - slip), 2)
+    cost = buy - sell + fees("buy", buy, settings["fees"]) + fees("sell", sell, settings["fees"])
+    return 100 * cost / (qty * px)
+
+
+@lru_cache(maxsize=3)
+def _feedback(day, upcoming=False):
+    from .learn import tune_hf
+    return tune_hf(None if upcoming else day)
 
 
 # ----------------------------------------------------------------------------- 候选池
@@ -170,11 +186,15 @@ def tick(context=None) -> dict:
     n_today = context.orders_today() if context else (db.q1("SELECT COUNT(*) AS n FROM orders WHERE account='ai' AND created LIKE ?", (today() + "%",)) or {}).get("n", 0)
     state["orders_today"] = n_today
     hm = current().hour * 100 + current().minute
+    pending = context.pending() if context else {r["code"] for r in db.q(
+        "SELECT DISTINCT code FROM orders WHERE account='ai' AND status='pending'")}
 
     def act(code, side, qty, why):
         t0 = time.perf_counter()
         try:
             o = sim.place("ai", code, side, qty, reason=why, emotion="跟随系统", qd=qs.get(code))
+            if o.get("status") not in ("filled", "pending"):
+                return False
             ms = (time.perf_counter() - t0) * 1000
             state["latency_ms"] = round(ms, 2)
             log(f"{'买' if side == 'buy' else '卖'} {o.get('name')} {qty}股 @ {o.get('fill_price')}（{ms:.1f}ms）{why}")
@@ -186,7 +206,7 @@ def tick(context=None) -> dict:
     # —— 出场 ——
     for code, p in poss.items():
         f = feats.get(code)
-        if not f or f["n"] < 3:
+        if code in pending or not f or f["n"] < 3:
             continue
         if not str(p.get("source") or "").startswith("高频") and p["qty"] > 0:
             continue   # 竞价/尾盘选股买入的波段仓位由止损止盈规则管理，高频不动它
@@ -210,6 +230,7 @@ def tick(context=None) -> dict:
             if act(code, "buy" if q < 0 else "sell", abs(q), "高频·" + ("平空 " if q < 0 else "平多 ") + why):
                 best.pop(code, None)
                 cool[code] = clock()
+                n_today += 1
     if c["flat_eod"] and hm >= 1456:
         return {"flat": True}
     if n_today >= c["max_orders"] or hm >= 1450:
@@ -222,34 +243,48 @@ def tick(context=None) -> dict:
         ms = {}
     ex = sim.exposure("ai")
     eq = ex["equity"]
-    held = set(poss)
+    held = set(poss) | pending
     opened = 0
 
-    def size(px):
-        return int(eq * c["pos_pct"] / (px * 1.003) / 100) * 100
+    # Simulated executions are durable, including through a restart. Keep the
+    # frozen comparison on its original entry policy.
+    stopped = set()
+    multiplier = 1.0
+    if context is None:
+        multiplier = _feedback(today())["multiplier"]
+        stopped = {(r["code"], r["side"]) for r in db.q(
+            "SELECT DISTINCT code,side FROM trades WHERE account='ai' AND time LIKE ? AND pnl IS NOT NULL "
+            "AND (reason LIKE '高频·平多 止损%' OR reason LIKE '高频·平空 止损%')", (today() + "%",))}
+
+    def size(code, f, exit_side):
+        qty = int(eq * c["pos_pct"] / (f["p"] * 1.003) / 100) * 100
+        if context is None and qty >= 100:
+            if (code, exit_side) in stopped or abs(f["m120"]) <= multiplier * _round_trip_pct(f["p"], qty, settings):
+                return 0
+        return qty
 
     if not ms.get("risk_off"):
         for x in longs:
-            if opened >= 2 or len(held) >= c["max_pos"]:
+            if opened >= 2 or n_today + opened >= c["max_orders"] or len(held) >= c["max_pos"]:
                 break
             f = feats.get(x["code"])
             if not f or f["n"] < 15 or x["code"] in held or clock() - cool.get(x["code"], 0) < 300:
                 continue
-            if f["p"] > f["vwap"] and f["imb"] > c["imb"] and f["m120"] > c["mom"] and f["m30"] >= 0 and 0.3 <= f["pct"] <= 7.5:
-                qty = size(f["p"])
+            if f["p"] > f["vwap"] and f["imb"] > c["imb"] * multiplier and f["m120"] > c["mom"] * multiplier and f["m30"] >= 0 and 0.3 <= f["pct"] <= 7.5:
+                qty = size(x["code"], f, "sell")
                 if qty >= 100 and act(x["code"], "buy", qty, f"高频·做多：评分 {x['score']:.0f}，VWAP偏离 {f['dv']:+.2f}%，委比 {f['imb']:+.2f}，"
                                                              f"2分钟 {f['m120']:+.2f}%，30秒 {f['m30']:+.2f}%，主动净买 {f['flow']:+.0f}手"):
                     held.add(x["code"])
                     opened += 1
     if sim.ai_rules()["short"] and ms.get("stance") != "顺势做多":
         for x in shorts:
-            if opened >= 2 or len(held) >= c["max_pos"]:
+            if opened >= 2 or n_today + opened >= c["max_orders"] or len(held) >= c["max_pos"]:
                 break
             f = feats.get(x["code"])
             if not f or f["n"] < 15 or x["code"] in held or clock() - cool.get(x["code"], 0) < 300:
                 continue
-            if f["p"] < f["vwap"] and f["imb"] < -c["imb"] and f["m120"] < -c["mom"] and f["m30"] <= 0 and -7.5 <= f["pct"] <= -0.3:
-                qty = size(f["p"])
+            if f["p"] < f["vwap"] and f["imb"] < -c["imb"] * multiplier and f["m120"] < -c["mom"] * multiplier and f["m30"] <= 0 and -7.5 <= f["pct"] <= -0.3:
+                qty = size(x["code"], f, "buy")
                 if qty >= 100 and act(x["code"], "sell", qty, f"高频·融券做空：评分 {x['score']:.0f}，VWAP偏离 {f['dv']:+.2f}%，委比 {f['imb']:+.2f}，"
                                                               f"2分钟 {f['m120']:+.2f}%，30秒 {f['m30']:+.2f}%"):
                     held.add(x["code"])
@@ -290,4 +325,10 @@ def quick_scan(force: bool = False):
 
 def status() -> dict:
     from . import sim
-    return {"mode": mode(), "cfg": cfg(), "rules": sim.ai_rules(), **STATE}
+    c = cfg()
+    clock = now()
+    feedback = _feedback(today(), upcoming=True) if clock.hour >= 15 or clock.weekday() >= 5 else _feedback(today())
+    k = feedback["multiplier"]
+    return {"mode": mode(), "cfg": c, "rules": sim.ai_rules(), **STATE,
+            "entry_feedback": {**feedback, "effective_imb": c["imb"]*k, "effective_mom": c["mom"]*k,
+                               "round_trip_cost_multiplier": k}}

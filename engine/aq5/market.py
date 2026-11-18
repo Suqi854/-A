@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 from . import db, tdx
-from .config import MOCK, load_settings, now, today
+from .config import CN_TZ, MOCK, load_settings, now, today
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36"
 _pool = ThreadPoolExecutor(max_workers=8)
@@ -339,7 +339,7 @@ def quotes_recent(codes: list[str], max_age: float = 3.0) -> dict:
 
 
 # ----------------------------------------------------------------------------- 东财全市场快照
-EM_FIELDS = "f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13,f14,f15,f16,f17,f18,f20,f21,f22,f23,f26,f62,f184"
+EM_FIELDS = "f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13,f14,f15,f16,f17,f18,f20,f21,f22,f23,f26,f62,f124,f184"
 
 
 def _em_page(pn: int) -> tuple[int, list]:
@@ -355,6 +355,8 @@ def _em_row(r: dict) -> dict | None:
     if not is_main_board(code):
         return None
     ld = str(r.get("f26") or "")
+    stamp = _f(r.get("f124"))
+    observed = datetime.fromtimestamp(stamp, CN_TZ).isoformat(timespec="seconds") if stamp and 0 < stamp < 4102444800 else None
     return {"code": code, "name": r.get("f14"), "price": _f(r.get("f2")), "pct": _f(r.get("f3")),
             "chg": _f(r.get("f4")), "vol": (_f(r.get("f5"), 0) or 0) * 100, "amount": _f(r.get("f6"), 0),
             "amp": _f(r.get("f7")), "turnover": _f(r.get("f8")), "pe": _f(r.get("f9")), "vr": _f(r.get("f10")),
@@ -362,7 +364,7 @@ def _em_row(r: dict) -> dict | None:
             "open": _f(r.get("f17")), "prev": _f(r.get("f18")), "mcap": (_f(r.get("f20"), 0) or 0) / 1e8,
             "fmcap": (_f(r.get("f21"), 0) or 0) / 1e8, "speed": _f(r.get("f22")), "pb": _f(r.get("f23")),
             "listed": f"{ld[:4]}-{ld[4:6]}-{ld[6:8]}" if len(ld) == 8 else None,
-            "main_net": _f(r.get("f62")), "main_pct": _f(r.get("f184"))}
+            "main_net": _f(r.get("f62")), "main_pct": _f(r.get("f184")), "quote_time": observed, "source": "东财快照"}
 
 
 _em_state = {"bad_until": 0.0}

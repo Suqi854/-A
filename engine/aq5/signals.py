@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import time
+import threading
 
 from . import db, market
 from .config import load_settings, now, today
@@ -334,25 +335,32 @@ def scan_t() -> int:
     return n
 
 
+_ai_t_lock = threading.Lock()
+
+
 def _ai_t(code: str, pos: dict, fired: list[dict], lv: dict) -> None:
     """AI 自动盘做T：高抛卖 1/3 可卖仓位；之后低吸买回同样数量（同一天最多各一次）。"""
     from .sim import available, place
-    sells = db.q1("SELECT COALESCE(SUM(qty),0) AS q FROM orders WHERE account='ai' AND code=? AND side='sell' AND reason LIKE '做T%' "
-                  "AND created LIKE ?", (code, today() + "%"))["q"]
-    buys = db.q1("SELECT COALESCE(SUM(qty),0) AS q FROM orders WHERE account='ai' AND code=? AND side='buy' AND reason LIKE '做T%' "
-                 "AND created LIKE ?", (code, today() + "%"))["q"]
+    from .forecast.runtime import owns_ai
     sides = {f["side"] for f in fired}
     names = "、".join(T_STRATS[f["strategy"]][0] for f in fired)
-    try:
-        if "sell" in sides and not sells:
-            q = int(available("ai", code) / 3 / 100) * 100
-            if q >= 100:
-                place("ai", code, "sell", q, reason=f"做T高抛：{names}（价 {lv['price']}，高抛位 {lv['t_high']}）", emotion="跟随系统")
-        elif "buy" in sides and sells and not buys:
-            place("ai", code, "buy", int(sells), reason=f"做T低吸买回：{names}（价 {lv['price']}，低吸位 {lv['t_low']}）",
-                  emotion="跟随系统", stop=pos.get("stop"), target1=pos.get("target1"), target2=pos.get("target2"))
-    except ValueError as e:
-        db.event("trade", f"AI自动盘做T失败 {code}", str(e), "warn")
+    with _ai_t_lock:
+        if owns_ai() or db.q1("SELECT 1 FROM orders WHERE account='ai' AND code=? AND status='pending' LIMIT 1", (code,)):
+            return
+        legs = {r["side"]: r["q"] for r in db.q(
+            "SELECT side,SUM(qty) AS q FROM trades WHERE account='ai' AND code=? AND reason LIKE '做T%' "
+            "AND time LIKE ? GROUP BY side", (code, today() + "%"))}
+        remaining = legs.get("sell", 0) - legs.get("buy", 0)
+        try:
+            if "sell" in sides and not legs:
+                q = int(available("ai", code) / 3 / 100) * 100
+                if q >= 100:
+                    place("ai", code, "sell", q, reason=f"做T高抛：{names}（价 {lv['price']}，高抛位 {lv['t_high']}）", emotion="跟随系统")
+            elif "buy" in sides and remaining > 0:
+                place("ai", code, "buy", remaining, reason=f"做T低吸买回：{names}（价 {lv['price']}，低吸位 {lv['t_low']}）",
+                      emotion="跟随系统", stop=pos.get("stop"), target1=pos.get("target1"), target2=pos.get("target2"))
+        except ValueError as e:
+            db.event("trade", f"AI自动盘做T失败 {code}", str(e), "warn")
 
 
 def latest(code: str | None = None) -> list[dict] | dict | None:

@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 from datetime import date
 
-from . import accounting, db, market
+from . import accounting, db, market, pick_policy
 from .config import load_settings, now, today
 
 ACCOUNTS = {"me": "我的模拟盘", "ai": "AI自动盘", "plan": "计划模拟盘"}
@@ -53,8 +53,8 @@ def existing() -> list[str]:
     return [r["id"] for r in db.q("SELECT id FROM accounts") if r["id"] in ACCOUNTS]
 
 
-def fees(side: str, amount: float) -> float:
-    f = load_settings()["fees"]
+def fees(side: str, amount: float, rates=None) -> float:
+    f = rates if rates is not None else load_settings()["fees"]
     fee = max(amount * f["commission"], f["min_commission"]) + amount * f["transfer"]
     if side == "sell":
         fee += amount * f["stamp_tax"]
@@ -186,6 +186,40 @@ def try_fill(oid: int, qd: dict | None = None) -> str:
     return _execute(o, fill)
 
 
+def _filled_target(c, order):
+    if order["side"] == "sell" and (order.get("reason") or "").startswith("达到第一止盈"):
+        c.execute("UPDATE positions SET stage=1, stop=ROUND(MAX(cost, COALESCE(stop,0)),2) "
+                  "WHERE account=? AND code=? AND qty>0", (order["account"], order["code"]))
+
+
+def _pick_origin(c, pos, closing_qty):
+    """Reconcile a long position to one selection and its remaining opening fees."""
+    if not pos or pos["qty"] <= 0 or not pos["pick_id"] or not pos["opened"]:
+        return None, 0.0
+    pick_id = pos["pick_id"]
+    if not c.execute("SELECT 1 FROM picks WHERE id=? AND code=?", (pick_id, pos["code"])).fetchone():
+        return None, 0.0
+    qty, opening_fees = 0, 0.0
+    rows = c.execute("SELECT side,qty,pick_id,fee,time FROM trades WHERE account=? AND code=? AND time>=? ORDER BY id",
+                     (pos["account"], pos["code"], pos["opened"]))
+    for trade in rows:
+        if not qty and trade["time"] != pos["opened"]:
+            return None, 0.0
+        if trade["side"] == "buy":
+            if trade["pick_id"] != pick_id or trade["fee"] is None:
+                return None, 0.0
+            qty += trade["qty"]
+            opening_fees += trade["fee"]
+        elif trade["qty"] < qty:
+            opening_fees *= (qty - trade["qty"]) / qty
+            qty -= trade["qty"]
+        else:
+            return None, 0.0
+    if qty != pos["qty"]:
+        return None, 0.0
+    return pick_id, opening_fees * closing_qty / qty
+
+
 def _execute_ai(o: dict, fill: float) -> str:
     """AI 盘：持仓数量可正（多头）可负（空头）；现金可为负（融资）。"""
     acct, code, qty = o["account"], o["code"], o["qty"]
@@ -202,6 +236,10 @@ def _execute_ai(o: dict, fill: float) -> str:
         pos = c.execute("SELECT * FROM positions WHERE account=? AND code=?", (acct, code)).fetchone()
         old = pos["qty"] if pos else 0
         cost = pos["cost"] if pos else fill
+        if o["side"] == "sell" and (not r["short"] and qty > max(old, 0) or
+                                      not r["t0"] and min(qty, max(old, 0)) > available(acct, code)):
+            c.execute("UPDATE orders SET status='rejected', note='可卖持仓不足', updated=? WHERE id=?", (ts, o["id"]))
+            return "可卖持仓不足，订单作废"
         if o["side"] == "buy" and not r["margin"] and amount + fee > a["cash"] + 1e-6:
             c.execute("UPDATE orders SET status='rejected', note='资金不足', updated=? WHERE id=?", (ts, o["id"]))
             return "资金不足，订单作废"
@@ -209,8 +247,13 @@ def _execute_ai(o: dict, fill: float) -> str:
         new = old + sign * qty
         pnl = None
         closing = min(qty, abs(old)) if old and (old > 0) != (sign > 0) else 0
+        trade_pick = o["pick_id"]
         if closing:
             pnl = round(((fill - cost) if old > 0 else (cost - fill)) * closing - fee, 2)
+            trade_pick = None
+            if old > 0 and qty == closing:
+                trade_pick, opening_fees = _pick_origin(c, pos, closing)
+                pnl = round(pnl - opening_fees, 2)
         if new == 0:
             c.execute("DELETE FROM positions WHERE account=? AND code=?", (acct, code))
         elif pos and (old > 0) == (new > 0) and closing == 0:      # 同方向加仓：加权成本
@@ -226,11 +269,12 @@ def _execute_ai(o: dict, fill: float) -> str:
                       "pick_id, high_since, auto, stage) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",
                       (acct, code, o["name"], new, fill, o["stop"], o["target1"], o["target2"], ts, ts, o["reason"],
                        o["pick_id"], fill, o["auto"]))
+        _filled_target(c, o)
         c.execute("UPDATE accounts SET cash=cash+? WHERE id=?", (-(amount + fee) if sign > 0 else (amount - fee), acct))
         c.execute("UPDATE orders SET status='filled', fill_price=?, fee=?, updated=? WHERE id=?", (fill, fee, ts, o["id"]))
         c.execute("INSERT INTO trades(account, code, name, side, qty, price, fee, time, pnl, order_id, reason, emotion, pick_id, "
                   "hold_days) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                  (acct, code, o["name"], o["side"], qty, fill, fee, ts, pnl, o["id"], o["reason"], o["emotion"], o["pick_id"],
+                  (acct, code, o["name"], o["side"], qty, fill, fee, ts, pnl, o["id"], o["reason"], o["emotion"], trade_pick,
                    trading_days_between(pos["opened"][:10], today()) if pos and closing else None))
     kind = ("平空" if old < 0 else "买入") if sign > 0 else ("卖出" if old > 0 else "融券卖出")
     msg = f"{ACCOUNTS[acct]} {kind} {o['name']} {qty}股 @ {fill:.2f}" + (f"，盈亏 {pnl:+.2f}" if pnl is not None else "")
@@ -277,18 +321,20 @@ def _execute(o: dict, fill: float) -> str:
                 c.execute("UPDATE orders SET status='rejected', note='T+1可卖数量不足', updated=? WHERE id=?", (ts, o["id"]))
                 return "T+1可卖数量不足，订单作废"
             pnl = round((fill - pos["cost"]) * qty - fee, 2)
+            trade_pick, _ = _pick_origin(c, pos, qty)
             hold = trading_days_between(pos["opened"][:10], today())
             c.execute("UPDATE accounts SET cash=cash+? WHERE id=?", (amount - fee, acct))
             if pos["qty"] == qty:
                 c.execute("DELETE FROM positions WHERE account=? AND code=?", (acct, code))
             else:
                 c.execute("UPDATE positions SET qty=qty-? WHERE account=? AND code=?", (qty, acct, code))
+        _filled_target(c, o)
         c.execute("UPDATE orders SET status='filled', fill_price=?, fee=?, updated=? WHERE id=?",
                   (fill, fee, ts, o["id"]))
         c.execute("INSERT INTO trades(account, code, name, side, qty, price, fee, time, pnl, order_id, reason, "
                   "emotion, pick_id, hold_days) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                   (acct, code, o["name"], o["side"], qty, fill, fee, ts, pnl, o["id"], o["reason"], o["emotion"],
-                   o["pick_id"], hold))
+                   o["pick_id"] if o["side"] == "buy" else trade_pick, hold))
     side = "买入" if o["side"] == "buy" else "卖出"
     msg = f"{ACCOUNTS[acct]} {side} {o['name']} {qty}股 @ {fill:.2f}" + (f"，盈亏 {pnl:+.2f}" if pnl is not None else "")
     db.event("trade", msg, o["reason"] or "", "good" if (pnl or 0) >= 0 else "warn")
@@ -348,6 +394,10 @@ def tick() -> None:
     qs = market.quotes(codes)
     for o in pend:
         try_fill(o["id"], qs.get(o["code"]))
+    if pend:
+        poss = db.q("SELECT * FROM positions")
+    queued_sales = {(o["account"], o["code"]) for o in db.q(
+        "SELECT account,code FROM orders WHERE status='pending' AND side='sell' AND kind='market'")}
     risk = load_settings()["risk"]
     for p in poss:
         qd = qs.get(p["code"])
@@ -357,21 +407,21 @@ def tick() -> None:
         if px > (p["high_since"] or 0):
             with db.tx() as c:
                 c.execute("UPDATE positions SET high_since=? WHERE account=? AND code=?", (px, p["account"], p["code"]))
-        if not p["auto"] or p["qty"] < 0:
+        if not p["auto"] or p["qty"] < 0 or (p["account"], p["code"]) in queued_sales:
             continue
         av = available(p["account"], p["code"])
         if av <= 0:
             continue
         qty, reason = exit_decision(p, px, av, risk, today())
         if reason:
-            o = place(p["account"], p["code"], "sell", qty, reason=reason, emotion="计划内")
-            if "第一止盈" in reason and o["status"] == "filled":
-                set_exit(p["account"], p["code"], stop=round(max(p["cost"], p["stop"] or 0), 2))
-                with db.tx() as c:
-                    c.execute("UPDATE positions SET stage=1 WHERE account=? AND code=?", (p["account"], p["code"]))
+            place(p["account"], p["code"], "sell", qty, reason=reason, emotion="计划内", qd=qd)
 
 
 TIER_SIZE = {"A": 1.0, "B": 0.7, "C": 0.4}
+
+
+def tradable_pick(p: dict) -> bool:
+    return p.get("selection_protocol") == pick_policy.VERSION and p.get("tier") == "A" and p.get("eligible") is True
 
 
 def _traded_today(acct: str) -> int:
@@ -380,7 +430,7 @@ def _traded_today(acct: str) -> int:
 
 
 def auto_follow(picks: list[dict], session: str, context=None) -> None:
-    """旧版 AI 自动盘的受控兼容入口，仅允许 A/B 级候选。
+    """AI 自动盘仅跟随本版正式强 A，冻结的旧策略对照沿用 A/B。
 
     不使用未校准的上涨概率进行凯利放大；不为凑数据强制交易。
     """
@@ -413,7 +463,7 @@ def auto_follow(picks: list[dict], session: str, context=None) -> None:
         pl = p["plan"]
         sig = p["signals"][0]["name"] if p.get("signals") else "综合评分"
         try:
-            execute_order("ai", p["code"], "buy", qty, stop=pl["stop"], target1=pl["target1"], target2=pl["target2"],
+            order = execute_order("ai", p["code"], "buy", qty, stop=pl["stop"], target1=pl["target1"], target2=pl["target2"],
                   reason=f"{tag}选股[{p.get('tier', '?')}级 第{p.get('rank', '?')}名]：{sig}，评分{p['score']}；{why}",
                   emotion="跟随系统", pick_id=p.get("id"))
         except ValueError as e:
@@ -421,6 +471,8 @@ def auto_follow(picks: list[dict], session: str, context=None) -> None:
                 context.log(f"旧策略对照下单失败 {p['name']}: {e}")
             else:
                 db.event("trade", f"AI自动盘下单失败 {p['name']}", str(e), "warn")
+            return False
+        if order["status"] not in ("pending", "filled"):
             return False
         v["cash"] -= qty * p["price"]
         held.add(p["code"])
@@ -439,13 +491,17 @@ def auto_follow(picks: list[dict], session: str, context=None) -> None:
                 continue
             if sc < 50:
                 try:
-                    execute_order("ai", pos["code"], "sell", pos["avail"], reason=f"量化调仓：持仓评分降到 {sc:.0f}（<50），换入更强的股票",
+                    order = execute_order("ai", pos["code"], "sell", pos["avail"], reason=f"量化调仓：持仓评分降到 {sc:.0f}（<50），换入更强的股票",
                           emotion="跟随系统")
-                    v["cash"] += pos["avail"] * (pos["price"] or pos["cost"]) * 0.998
-                    held.discard(pos["code"])
+                    if order["status"] == "filled":
+                        v["cash"] += pos["avail"] * order["fill_price"] - order["fee"]
+                        if pos["avail"] == pos["qty"]:
+                            held.discard(pos["code"])
                 except ValueError:
                     pass
     for p in picks:
+        if context is None and not tradable_pick(p):
+            continue
         if p.get("tier") not in ("A", "B") or p.get("eligible") is False:
             continue
         if p["code"] in held or p["code"] in pend:

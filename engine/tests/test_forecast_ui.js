@@ -150,6 +150,66 @@ test('Chan outlook carries a labeled color state for each center position',async
     if(position!=='unknown')assert.match(css,new RegExp(`\\.fc-outlook\\[data-position="${position}"\\]`));
   }
 });
+function scenarioFixture(){
+  const data=fixture(),code=data.symbol.code;
+  const cases=[['day','2026-11-06T15:00:00+08:00',11.5,'up','15:00'],
+    ['60m','2026-11-09T14:00:00+08:00',9.7,'down','15:00'],
+    ['15m','2026-11-09T14:00:00+08:00',10.4,'range','14:15'],
+    ['5m','2026-11-09T14:00:00+08:00',11,'range','14:05']];
+  for(const [timeframe,date,close,primary,due] of cases){
+    data.structures[code+':'+timeframe]={code,timeframe,asof:data.summary.updated,quality:{eligible:true},structures:{},
+      price_bars:[{date,open:close,close,high:close+.2,low:close-.2,vol:120}],
+      scenario:{version:1,status:'ready',timeframe,source_time:date,issued_at:data.summary.updated,
+        due_at:'2026-11-09T'+due+':00+08:00',base_close:close,low:10,high:11,primary,
+        base_high:close+.2,base_low:close-.2,reference_kind:'center',reference_level:'stroke',checkpoint:primary==='up'?12:null}};
+  }
+  return data;
+}
+test('four levels draw their own future scenarios beyond the last candle without adding bars',async()=>{
+  const h=harness({initial:scenarioFixture()}); h.root.clientWidth=375; await h.render();
+  for(const [tf,label] of [['day','日线 · 偏上'],['60m','60分钟 · 偏下'],['15m','15分钟 · 震荡'],['5m','5分钟 · 震荡']]){
+    h.nodes.get('fc-tf').onclick({target:{closest:()=>({dataset:{level:tf}})}});
+    const html=h.root.innerHTML,candles=[...html.matchAll(/data-fc-bar="[^"]*" data-x="([.\d]+)"/g)];
+    assert.equal(candles.length,1);
+    assert.equal((html.match(/class="fc-volume"/g)||[]).length,1);
+    const xLast=+candles[0][1],edge=+html.match(/class="fc-future" data-boundary="([.\d]+)"/)[1];
+    assert.ok(edge>xLast);
+    const direction=html.match(/class="fc-primary" d="M([.\d]+) [.\d]+L([.\d]+) [.\d]+"/);
+    assert.equal(+direction[1],xLast);assert.ok(+direction[2]>edge);
+    assert.match(html,new RegExp(label));assert.match(html,/备选观察价/);
+    assert.match(html,/下一根/);assert.doesNotMatch(html,/class="fc-forecast-table"|NaN/);
+  }
+});
+test('expired, historical, unverified, mismatched and older snapshots cannot draw future scenarios',async()=>{
+  const variations=[
+    f=>{f.structures['sh600000:day'].scenario.due_at='2026-11-09T14:00:10+08:00';},
+    f=>{f.analysis_fallback={};}, f=>{f.structures['sh600000:day'].quality.eligible=false;},
+    f=>{f.structures['sh600000:day'].scenario.timeframe='5m';},
+    f=>{f.structures['sh600000:day'].scenario.base_close=12;},
+    f=>{delete f.structures['sh600000:day'].scenario;}
+  ];
+  for(const mutate of variations){
+    const data=scenarioFixture();mutate(data);
+    const h=harness({initial:data});await h.render();
+    assert.doesNotMatch(h.root.innerHTML,/class="fc-future"|class="fc-primary"/);
+    assert.match(h.root.innerHTML,/暂无有效走势推演/);
+  }
+  const data=scenarioFixture(),row=data.predictions[0];
+  Object.assign(row,{probability:.71,validated:true,due_at:'2026-11-09T14:00:10+08:00'});
+  const expired=harness({initial:data});await expired.render();assert.doesNotMatch(expired.root.innerHTML,/71\.00%/);
+  row.due_at='2026-11-09T15:00:00+08:00';
+  const live=harness({initial:data});await live.render();assert.match(live.root.innerHTML,/71\.00%/);
+});
+test('an open chart retires its scenario at the frozen deadline without waiting for a network poll',async()=>{
+  const data=scenarioFixture(),due='2026-11-09T14:00:11+08:00';
+  data.structures['sh600000:day'].scenario.due_at=due;
+  const h=harness({initial:data});await h.render();
+  assert.match(h.root.innerHTML,/class="fc-primary"/);
+  h.context.Date.now=()=>Date.parse(due);
+  await h.timersAt(1000);
+  assert.doesNotMatch(h.root.innerHTML,/class="fc-primary"/);
+  assert.match(h.root.innerHTML,/上次推演已到期/);
+});
 test('ambiguous name requires selecting a result, does not analyze an arbitrary first result',async()=>{
   const h=harness({search:async()=>[{code:'sh600000',name:'浦发银行'},{code:'sz000001',name:'平安银行'}]});await h.render();
   h.nodes.get('fc-query').value='银行';await h.nodes.get('fc-analyze').onclick();

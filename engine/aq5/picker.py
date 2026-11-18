@@ -10,7 +10,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from . import analysis, db, learn, market, notify, research
+from . import analysis, db, learn, market, notify, pick_policy, research
 from .config import load_settings, now, today
 from .factors import LABELS, current_weights
 from .strategies import strategy_weights
@@ -41,7 +41,7 @@ def _base_filter(r: dict, session: str, cfg: dict) -> bool:
     if cfg["exclude_st"] and ("ST" in name.upper() or "退" in name):
         return False
     p = r.get("price")
-    if not p or p < 2 or r.get("suspended") or not r.get("prev"):
+    if type(p) not in (int, float) or not math.isfinite(p) or p < 2 or r.get("suspended") or not r.get("prev"):
         return False
     if r.get("listed"):
         try:
@@ -92,8 +92,6 @@ def _run(session: str, top_n: int) -> dict:
     pool = [r for r in snap if _base_filter(r, session, cfg)]
     pool.sort(key=lambda r: -_prescore(r, session))
     cand = pool[:top_n]
-    wl = {market.norm_code(c) for c in s["watchlist"]}
-    have = {r["code"] for r in cand}
     # 自选股只服务“我的模拟盘”和个人分析，自动选股 / AI 自动盘不参考自选
     STATE.update(stage=f"精评 {len(cand)} 只候选", total=len(cand))
     ver, w = current_weights()
@@ -145,9 +143,12 @@ def _run(session: str, top_n: int) -> dict:
         top = list(ex.map(refine, top))
     evaluated = sorted(top + evaluated[30:], key=lambda e: -e["score"])
     # AI 新闻情绪：只给前 8 名做（省调用），正面最多 +4 分、负面最多 -4 分，并写进理由
+    sentiment_inputs = None
     try:
         from . import ai
-        if ai.ready() and ai.cfg()["auto_sentiment"]:
+        ai_settings = ai.cfg() if ai.ready() else {}
+        if ai_settings.get("auto_sentiment"):
+            sentiment_inputs = {k: ai_settings.get(k) for k in ("provider", "base_url", "model", "temperature", "daily_limit")}
             STATE["stage"] = "AI 读新闻打情绪分"
 
             def senti(ev):
@@ -167,7 +168,7 @@ def _run(session: str, top_n: int) -> dict:
     except Exception:  # noqa: BLE001
         pass
 
-    # 每次都取综合分前 N（默认10）只，再按“门槛”分级：A 重点 / B 关注 / C 观察（宁缺毋滥体现在分级上）
+    # 全部精评结果保留研究分级，正式入选只取满足当场 A 级门槛的机会。
     min_score = cfg["min_score"]
     if reg["code"] == "bear":
         min_score += 5
@@ -175,8 +176,7 @@ def _run(session: str, top_n: int) -> dict:
         min_score += 2
     if br["total"] and br["up"] / br["total"] < 0.2:
         min_score += 3
-    top_n = int(cfg.get("top_n", 10))
-    max_picks = top_n
+    max_picks = max(0, int(cfg.get("top_n", 10)))
     picks = []
     try:
         from . import sectors
@@ -195,21 +195,15 @@ def _run(session: str, top_n: int) -> dict:
         evaluated.sort(key=lambda ev: -ev["score"])
     per_ind: dict[str, int] = {}
     for ev in evaluated:
-        if len(picks) >= top_n:
-            break
-        if ev["code"] in wl and ev["row"] not in pool:
-            continue
         r = ev["row"]
+        features = research_features.setdefault(ev["code"], {})
+        features["reference"] = pick_policy.reference(r, session, asof)
         if "ST" in (r.get("name") or "") or not r.get("price"):
             continue
         lim = market.limit_pct(ev["code"], r.get("name"))
         if r.get("prev") and r["price"] >= round(r["prev"] * (1 + lim) - 0.005, 2):  # 涨停买不进，跳过
             continue
         ic = sec_data["stock"].get(ev["code"])
-        if ic and per_ind.get(ic, 0) >= 3:  # 同一行业最多 3 只，分散风险
-            continue
-        if ic:
-            per_ind[ic] = per_ind.get(ic, 0) + 1
         ev["sector"] = sec_data["by_code"].get(ic) if ic else None
         sig = ev["signals"]
         strong = bool(sig) and sig[0]["conf"] >= 0.5 and (ev["plan"]["rr"] or 0) >= 1.4 and ev["ind"]["extra"]["rsi6"] <= 88
@@ -219,8 +213,50 @@ def _run(session: str, top_n: int) -> dict:
             ev["tier"] = "B"
         else:
             ev["tier"] = "C"
+        features["pick_tier"] = ev["tier"]
+        if ev["tier"] != "A" or len(picks) >= max_picks or (ic and per_ind.get(ic, 0) >= 3):
+            continue
+        if ic:
+            per_ind[ic] = per_ind.get(ic, 0) + 1
         picks.append(ev)
 
+    # 对无时标或精评后已过期的强 A 只核验其冻结价格。不同价不回写先前评分。
+    decision_at = research.timestamp()
+    missing = [ev["code"] for ev in picks if not pick_policy.reference(ev["row"], session, decision_at)]
+    if missing:
+        try:
+            checked = market.quotes(missing)
+        except (RuntimeError, ValueError):
+            checked = {}
+        decision_at = research.timestamp()
+        for ev in picks:
+            code = ev["code"]
+            q = checked.get(code, {}) if code in missing else ev["row"]
+            verified = pick_policy.reference(q, session, decision_at)
+            research_features[code]["reference"] = (verified if q.get("price") == ev["row"]["price"]
+                                                     and not q.get("suspended") else None)
+    missing = [ev["code"] for ev in picks if not research_features[ev["code"]]["reference"]]
+    scope = pick_policy.fingerprint({"weights": w, "weights_version": ver, "strategy_weights": sw,
+             "factors": sorted(active), "risk": s["risk"], "mock": market.MOCK, "candidate_limit": top_n,
+             "sentiment_inputs": sentiment_inputs, "pick": {k: cfg.get(k) for k in (
+                 "top_n", "min_score", "min_amount_yi", "min_listed_days", "exclude_st", "times")}})
+    policy = pick_policy.current(session, scope)
+    verified = sum(bool(research_features[ev["code"]].get("reference")) for ev in evaluated)
+    quality_blocked = bool(missing) or not verified
+    if quality_blocked:
+        why = "强 A 原榜有报价时间或参考价无法核实" if missing else "缺少可核实的当场精评报价"
+        policy = {**policy, "status": "insufficient", "mode": "observe", "reason": why}
+    report["selection"] = {"protocol": pick_policy.VERSION, "scope": scope, "mode": policy["mode"],
+                           "status": policy["status"], "reason": policy["reason"],
+                           "checked_at": policy.get("checked_at"), "evidence_id": policy.get("evidence_id"),
+                           "baseline_codes": [ev["code"] for ev in picks], "missing_quotes": missing,
+                           "decision_at": decision_at, "quality_blocked": quality_blocked,
+                           "verified_quotes": verified, "evaluated_quotes": len(evaluated),
+                           "tier_counts": {tier: sum(ev.get("tier") == tier for ev in evaluated) for tier in "ABC"}}
+    if policy["mode"] == "top1":
+        picks = picks[:1]
+    elif policy["mode"] != "all_a":
+        picks = []
     report["prob_sources"] = {ev["code"]: ev["prob_src"] for ev in picks}
     research.init()
     with db.tx() as c:
@@ -258,10 +294,6 @@ def _run(session: str, top_n: int) -> dict:
             if reg["code"] != "bull":
                 risks.append(f"大盘处于{reg['state']}，仓位要比平时轻")
             pl = e["plan"]
-            if e["tier"] == "C":
-                risks.insert(0, f"仅为观察级：综合分 {e['score']:.0f} 低于门槛 {min_score:.0f} 或缺少可靠买点信号，不建议重仓")
-            elif e["tier"] == "B":
-                risks.insert(0, f"关注级：离门槛 {min_score:.0f} 分还差一点，适合小仓位试错")
             cur = c.execute("INSERT INTO picks(run_id, date, session, code, name, score, prob, price, stop, target1, "
                             "target2, factors, strategies, reasons, risks, tier, rank, industry) "
                             "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -271,7 +303,7 @@ def _run(session: str, top_n: int) -> dict:
                              len(out) + 1, sc["name"] if sc else None))
             out.append({"id": cur.lastrowid, "code": e["code"], "name": r.get("name"), "score": e["score"],
                         "industry": sc["name"] if sc else None, "tier": e["tier"], "rank": len(out) + 1,
-                        "eligible": e["tier"] in ("A", "B"), "prob": e["prob"],
+                        "eligible": True, "selection_protocol": pick_policy.VERSION, "prob": e["prob"],
                         "prob_src": e["prob_src"],
                         "prob_label": learn.PROB_LABEL if e["prob_src"] == "model" else learn.HEURISTIC_LABEL,
                         "price": r["price"], "pct": r.get("pct"), "plan": pl,
@@ -284,7 +316,8 @@ def _run(session: str, top_n: int) -> dict:
                          f"目标{p['plan']['target1']}" + (f"｜{p['signals'][0]['name']}" if p["signals"] else "") for p in out)
         db.event("pick", f"{label}：前 {len(out)} 名（A级 {na} 只）", body, "good" if na else "info")
     else:
-        body = f"扫描 {len(snap)} 只、精评 {len(evaluated)} 只，没有达到门槛（{min_score:.0f}分）的机会。宁缺毋滥，今天先观望。"
+        body = (f"扫描 {len(snap)} 只、精评 {len(evaluated)} 只，研究原榜有 "
+                f"{len(report['selection']['baseline_codes'])} 只强 A，正式入选 0 只。{policy['reason']}。")
         db.event("pick", f"{label}：无符合条件的机会", body)
     notify.send(f"A量化 · {label}", body)
     STATE["last"] = {"run_id": run_id, "picks": len(out), "time": now().strftime("%H:%M:%S"),
@@ -326,6 +359,9 @@ def runs(limit: int = 30) -> list[dict]:
         sources = (r["research"] or {}).get("prob_sources", {})
         r["items"] = picks_of(r["id"])
         for item in r["items"]:
+            if (r["research"] or {}).get("selection", {}).get("protocol") == pick_policy.VERSION:
+                item["selection_protocol"] = pick_policy.VERSION
+                item["eligible"] = item.get("tier") == "A"
             item["prob_src"] = sources.get(item["code"], "legacy")
             item["prob_label"] = (learn.PROB_LABEL if item["prob_src"] == "model" else learn.HEURISTIC_LABEL
                                   if item["prob_src"] == "heuristic" else "历史参考值，来源未记录")
@@ -345,6 +381,14 @@ def picks_of(run_id: int) -> list[dict]:
 def top_candidates(run_id: int, n: int = 20) -> list[dict]:
     rows = db.q("SELECT s.code, u.name, s.price, s.score, s.strategies FROM samples s LEFT JOIN universe u "
                 "ON u.code=s.code WHERE run_id=? ORDER BY score DESC LIMIT ?", (run_id, n))
+    evidence = {r["code"]: db.loads(r["factors"], {}) for r in db.q(
+        "SELECT code, factors FROM research_samples WHERE run_id=?", (run_id,))} if research.has_schema() else {}
+    selected = {r["code"] for r in db.q("SELECT code FROM picks WHERE run_id=?", (run_id,))}
     for r in rows:
         r["strategies"] = db.loads(r["strategies"], [])
+        features = evidence.get(r["code"], {})
+        if tier := features.get("pick_tier"):
+            ref = features.get("reference") or {}
+            r.update(tier=tier, eligible=r["code"] in selected, selection_protocol=pick_policy.VERSION)
+            r.update(reference_time=ref.get("quote_at"), reference_source=ref.get("source"))
     return rows

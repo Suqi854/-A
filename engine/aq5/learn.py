@@ -77,10 +77,17 @@ def _closed_rows(code, cutoff):
 
 def fill_outcomes() -> dict:
     from . import research
+    from .forecast.calendar import calendar_window
     cutoff = now()
     cut_date = cutoff.strftime("%Y-%m-%d")
-    pend = db.q("SELECT id, code, date, price, 'sample' AS t FROM samples WHERE evaluated=0 AND date<?", (cut_date,))
-    pend += db.q("SELECT id, code, date, price, stop, target1, 'pick' AS t FROM picks WHERE evaluated=0 AND date<?", (cut_date,))
+    has_research = research.has_schema()
+    join = (" LEFT JOIN research_samples rs ON rs.run_id=p.run_id AND rs.code=p.code "
+            if has_research else "")
+    features = "rs.factors" if has_research else "NULL"
+    pend = []
+    for table, kind, extra in (("samples", "sample", ""), ("picks", "pick", ",p.stop,p.target1")):
+        pend.extend(db.q(f"SELECT p.id,p.code,p.date,p.price,{features} AS features,? AS t{extra} "
+                         f"FROM {table} p {join} WHERE p.evaluated=0 AND p.date<?", (kind, cut_date)))
     if not pend:
         return {"updated": 0}
     days = sorted({r["date"] for r in _closed_rows("sh000300", cutoff)})
@@ -89,20 +96,41 @@ def fill_outcomes() -> dict:
     research.init()
     done, cache = 0, {}
     closed_dates = set(days)
+    calendars = {}
+    futures = {}
     for p in pend:
         if p["date"] not in closed_dates or not p["price"] or not math.isfinite(p["price"]):
             continue
+        evidence = db.loads(p["features"], {})
+        if "reference" in evidence and not evidence["reference"]:
+            continue
         if p["code"] not in cache:
             cache[p["code"]] = {r["date"]: r for r in _closed_rows(p["code"], cutoff)}
+        key = (p["date"], "reference" in evidence)
+        if key not in futures:
+            calendar = days
+            if key[1]:
+                year = int(p["date"][:4])
+                if year not in calendars:
+                    calendars[year] = calendar_window(year)
+                calendar = calendars[year] if p["date"] in calendars[year] else []
+            futures[key] = [d for d in calendar if d > p["date"]][:5]
         path = []
-        for day in [d for d in days if d > p["date"]][:5]:
+        for day in futures[key]:
             row = cache[p["code"]].get(day)
-            if not row:
+            if day not in closed_dates or not row:
                 break  # 缺前一根时，不拿后面的收盘价代替
             path.append(row)
         if not path:
             continue
-        base = p["price"]
+        scale = 1.0
+        if ref := evidence.get("reference"):
+            # 市场K线可能已前复权。用信号日同一开盘价把未来K线统一为冻结报价的尺度。
+            adj_open = (cache[p["code"]].get(p["date"]) or {}).get("open")
+            if not adj_open or not math.isfinite(adj_open) or adj_open <= 0:
+                continue
+            scale = adj_open / ref["open"]
+        base = p["price"] * scale
 
         def ret(k):
             return round((path[k - 1]["close"] / base - 1) * 100, 3) if len(path) >= k else None
@@ -122,10 +150,10 @@ def fill_outcomes() -> dict:
                 md = round((min((r.get("low") or r["close"]) for r in path) / base - 1) * 100, 2)
                 outcome = "持有中"
                 for r in path:
-                    if p["stop"] and (r.get("low") or r["close"]) <= p["stop"]:
+                    if p["stop"] and (r.get("low") or r["close"]) <= p["stop"] * scale:
                         outcome = "触发止损"
                         break
-                    if p["target1"] and (r.get("high") or r["close"]) >= p["target1"]:
+                    if p["target1"] and (r.get("high") or r["close"]) >= p["target1"] * scale:
                         outcome = "达到止盈1"
                         break
                 else:
@@ -177,15 +205,17 @@ def _strat_stat(hits: list[tuple[float, float]]) -> dict:
 
 def _realized() -> list[dict]:
     """AI 自动盘 / 计划模拟盘的真实平仓：按买入时选股记录里的策略归因，实战结果权重加倍。"""
-    rows = db.q("SELECT t.time, t.pnl, t.qty, t.price, p.strategies, p.session FROM trades t JOIN picks p ON p.id=t.pick_id "
-                "WHERE t.side='sell' AND t.pnl IS NOT NULL AND t.account IN ('ai','plan') ORDER BY t.id DESC LIMIT 2000")
+    rows = db.q("SELECT t.time, t.pnl, t.qty, t.price, t.fee, p.strategies, p.session FROM trades t "
+                "JOIN picks p ON p.id=t.pick_id AND p.code=t.code "
+                "WHERE t.side='sell' AND t.pnl IS NOT NULL AND t.fee IS NOT NULL AND t.account IN ('ai','plan') "
+                "ORDER BY t.id DESC LIMIT 2000")
     out = []
     for r in rows:
-        amt = (r["qty"] or 0) * (r["price"] or 0)
-        if amt <= 0:
+        basis = (r["qty"] or 0) * (r["price"] or 0) - r["fee"] - r["pnl"]
+        if basis <= 0:
             continue
         ids = [x["id"] if isinstance(x, dict) else x for x in (db.loads(r["strategies"], []) or [])]
-        out.append({"date": r["time"][:10], "ret": r["pnl"] / amt * 100, "ids": ids, "session": r["session"]})
+        out.append({"date": r["time"][:10], "ret": r["pnl"] / basis * 100, "ids": ids, "session": r["session"]})
     return out
 
 
@@ -268,26 +298,76 @@ def iterate(force: bool = False) -> dict:
             "ic": ic_mean, "strat": strat, "note": "影子建议（未启用）： " + note}
 
 
-def tune_hf() -> dict:
-    """高频阈值自调：按当天高频平仓的胜率收紧或放宽进场门槛（委比 imb、2分钟动量 mom），有上下限。"""
-    from .config import load_settings
-    rows = db.q("SELECT pnl FROM trades WHERE account='ai' AND reason LIKE '高频·平%' AND pnl IS NOT NULL AND time LIKE ?",
-                (now().strftime("%Y-%m-%d") + "%",))
-    n = len(rows)
-    if n < 15:
-        return {"changed": False, "reason": f"今日高频平仓 {n} 笔，少于 15 笔不调整"}
-    win = sum(1 for r in rows if r["pnl"] > 0) / n
-    hf = {"imb": 0.15, "mom": 0.12}
-    hf.update({k: v for k, v in load_settings().get("hf", {}).items() if k in hf})
-    if win < 0.4:
-        k, why = 1.1, "胜率偏低，收紧进场门槛"
-    elif win > 0.55 and n < 60:
-        k, why = 0.95, "胜率较高且笔数不多，略放宽门槛"
-    else:
-        return {"changed": False, "reason": f"今日高频 {n} 笔、胜率 {win:.0%}，阈值合适"}
-    new = {"imb": round(min(0.4, max(0.08, hf["imb"] * k)), 3), "mom": round(min(0.4, max(0.06, hf["mom"] * k)), 3)}
-    msg = f"今日高频平仓 {n} 笔、胜率 {win:.0%}：{why}，委比 {hf['imb']}→{new['imb']}，2分钟动量 {hf['mom']}→{new['mom']}%"
-    return {"changed": False, "shadow": True, "note": msg, **new}
+def tune_hf(trading_day: str | None = None) -> dict:
+    """Use reconciled simulation fills from the preceding exchange session for one day."""
+    from .forecast.calendar import official_days
+    clock = now()
+    day = trading_day or clock.date().isoformat()
+    year = int(day[:4])
+    days = official_days(year)
+    if trading_day is None and (day not in days or clock.hour >= 15):
+        following = next((d for d in days if d > day), None)
+        if not following:
+            following = next(iter(official_days(year + 1)), None)
+        if following:
+            day = following
+            days = official_days(int(day[:4]))
+        else:
+            days = []
+    result = {"changed": False, "active": False, "multiplier": 1.0, "trading_day": day, "source_day": None,
+              "source": "ai 模拟成交与持仓核对，含开平双边手续费，成交价已含滑点",
+              "closes": 0, "matched": 0, "net": None, "win_rate": None}
+    if day not in days:
+        return {**result, "reason": "无已确认交易日历"}
+    i = days.index(day)
+    previous = days[i - 1] if i else next(reversed(official_days(int(day[:4]) - 1)), None)
+    if not previous:
+        return {**result, "reason": "缺上一交易日历"}
+    result["source_day"] = previous
+    # Reverse all subsequent signed fills from current inventory in the same
+    # SQLite snapshot. Only a flat -> full position -> flat round trip qualifies.
+    rows = db.q("""
+        WITH inventory AS (
+          SELECT t.*, COALESCE(p.qty,0) - COALESCE(SUM(CASE t.side WHEN 'buy' THEN t.qty ELSE -t.qty END)
+              OVER(PARTITION BY t.code ORDER BY t.id ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING),0) AS after_qty
+          FROM trades t LEFT JOIN positions p ON p.account=t.account AND p.code=t.code
+          WHERE t.account='ai' AND t.time>=?
+        )
+        SELECT code,side,qty,price,fee,pnl,reason,after_qty FROM inventory WHERE time LIKE ? ORDER BY id
+        """, (previous, previous + "%"))
+    entries, nets = {}, []
+    for r in rows:
+        entry = entries.pop(r["code"], None)
+        reason = r["reason"] or ""
+        closing = reason.startswith(("高频·平多", "高频·平空"))
+        result["closes"] += int(closing)
+        if not isinstance(r["qty"], int) or r["qty"] <= 0:
+            continue
+        long_entry = reason.startswith("高频·做多") and r["side"] == "buy" and r["after_qty"] == r["qty"]
+        short_entry = reason.startswith("高频·融券做空") and r["side"] == "sell" and r["after_qty"] == -r["qty"]
+        if (long_entry or short_entry) and r["pnl"] is None:
+            entries[r["code"]] = r
+            continue
+        if not closing or not entry or r["after_qty"] != 0 or r["qty"] != entry["qty"]:
+            continue
+        long = entry["side"] == "buy"
+        if r["side"] == entry["side"] or not reason.startswith("高频·平多" if long else "高频·平空"):
+            continue
+        values = (entry["price"], r["price"], entry["fee"], r["fee"], r["pnl"])
+        if not all(isinstance(v, (float, int)) and math.isfinite(v) for v in values):
+            continue
+        if min(values[:2]) <= 0 or min(values[2:4]) < 0:
+            continue
+        gross = (r["price"] - entry["price"]) * r["qty"] * (1 if long else -1)
+        if abs(gross - r["fee"] - r["pnl"]) <= .011:
+            nets.append(round(gross - r["fee"] - entry["fee"], 2))
+    net = round(sum(nets), 2) if nets else None
+    result.update(matched=len(nets), net=net, win_rate=sum(v > 0 for v in nets) / len(nets) if nets else None)
+    if len(nets) < 15:
+        return {**result, "reason": "可核对的日内往返少于15笔"}
+    if net >= 0:
+        return {**result, "reason": "可核对往返的费用后合计未亏损"}
+    return {**result, "active": True, "multiplier": 1.1, "reason": "上一交易日已核对往返净亏，本交易日收紧高频开仓"}
 
 
 # ----------------------------------------------------------------------------- 逻辑回归模型
@@ -493,14 +573,16 @@ def bootstrap(n_stocks: int = 200, days: int = 80, step: int = 2) -> dict:
 
 
 def daily() -> dict:
+    from . import pick_policy
     a = fill_outcomes()
+    admission = pick_policy.review()
     b = iterate()
     c = train()
     try:
         h = tune_hf()
     except Exception as e:  # noqa: BLE001
         h = {"error": str(e)}
-    return {"outcomes": a, "iterate": b, "model": c, "hf": h}
+    return {"outcomes": a, "iterate": b, "model": c, "hf": h, "pick_policy": admission}
 
 
 def quick() -> dict:
@@ -510,6 +592,7 @@ def quick() -> dict:
 
 
 def summary() -> dict:
+    from . import pick_policy
     from .factors import LABELS, current_weights
     ver, w = current_weights()
     hist = db.q("SELECT version, created, weights, ic, strat, note FROM weights ORDER BY version DESC LIMIT 30")
@@ -529,6 +612,7 @@ def summary() -> dict:
                 "avg": round(sum(v) / len(v), 2) if v else None}
     active_model = _selected_model()
     return {"version": ver, "weights": w, "labels": LABELS, "history": hist, "model": m,
+            "pick_policy": {session: pick_policy.current(session) for session in pick_policy.SESSIONS},
             "model_protocol": MODEL_PROTOCOL, "prob_label": PROB_LABEL,
             "active_model_version": active_model["version"] if active_model else None,
             "samples": n_s["n"] or 0, "evaluated": n_s["e"] or 0,

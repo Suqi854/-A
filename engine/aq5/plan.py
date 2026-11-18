@@ -5,7 +5,7 @@
 AI 的策略选择（每天开盘后、大盘立场变化、每次选股前都会重新判断）：
   - 防守减仓：大盘风险（risk_off / 防守），或一半以上持仓评分 < 50 → 不开新仓，尾盘减掉最弱的持仓，现金提到一半以上
   - 持仓做T：仓位重（现金 < 25%）且有持仓 → 不追新股，按日内做T信号高抛低吸，降低持仓成本
-  - 进攻跟随：现金 ≥ 60% → 跟随竞价/尾盘选股，按 A/B 级分批建仓
+  - 进攻跟随：现金 ≥ 60% → 跟随竞价/尾盘正式发布的强 A 候选分批建仓
   - 波段轮动：其余情况 → 持有强势股，尾盘把转弱（评分 < 50）的持仓换成更强的候选
 某个策略在本计划里已平仓 ≥ 5 笔且胜率 < 35% 时，自动降级到下一个更稳的策略（实战反馈）。
 """
@@ -18,7 +18,7 @@ from .config import load_settings, now, today
 
 ACCT = "plan"
 MODES = {
-    "attack": ("进攻跟随", "现金充足：跟随竞价/尾盘选股，按 A/B 级分批建仓"),
+    "attack": ("进攻跟随", "现金充足：跟随竞价/尾盘正式发布的强 A 候选分批建仓"),
     "rotate": ("波段轮动", "有仓有钱：持有强势股，尾盘把转弱的持仓换成更强的候选"),
     "t_trade": ("持仓做T", "仓位重、现金少：不追新股，用日内高抛低吸降低持仓成本"),
     "defense": ("防守减仓", "大盘有风险或持仓普遍转弱：不开新仓，减掉最弱的，现金提到一半以上"),
@@ -368,13 +368,13 @@ def _risk() -> dict:
     return RISK.get((r or {}).get("cfg", {}).get("risk"), RISK["均衡"])
 
 
-def _sell(code: str, qty: int, why: str, mode: str) -> bool:
+def _sell(code: str, qty: int, why: str, mode: str) -> dict | None:
     try:
         o = sim.place(ACCT, code, "sell", qty, reason=f"{_tag(mode)}：{why}", emotion="计划内")
-        return o["status"] in ("filled", "pending")
+        return o if o["status"] == "filled" else None
     except ValueError as e:
         db.event("plan", f"计划模拟卖出失败 {code}", str(e), "warn")
-        return False
+        return None
 
 
 def _buy(p: dict, budget: float, why: str, mode: str) -> bool:
@@ -394,9 +394,6 @@ def _buy(p: dict, budget: float, why: str, mode: str) -> bool:
         return False
 
 
-C_MIN_SCORE = 65
-
-
 def _size_k() -> float:
     """大盘「谨慎」时仓位减半。"""
     r = _row()
@@ -412,7 +409,6 @@ def on_picks(picks: list[dict], session: str) -> None:
         rk = _risk()
         v = sim.view(ACCT, light=True)
         held = {p["code"] for p in v["positions"]}
-        _note_candidates(picks)
         pend = {o["code"] for o in db.q("SELECT code FROM orders WHERE account=? AND status='pending'", (ACCT,))}
         eq, cash = v["equity"], v["cash"]
         tag = "竞价" if session == "auction" else "尾盘"
@@ -429,15 +425,14 @@ def on_picks(picks: list[dict], session: str) -> None:
             for pos in v["positions"]:
                 s = sc.get(pos["code"])
                 if s is not None and s < 50 and pos["avail"] > 0:
-                    if _sell(pos["code"], pos["avail"], f"持仓评分降到 {s:.0f}（<50），换入更强的候选", mode):
-                        cash += pos["avail"] * (pos["price"] or pos["cost"]) * 0.998
-                        held.discard(pos["code"])
-        tiers = ("A", "B")
+                    order = _sell(pos["code"], pos["avail"], f"持仓评分降到 {s:.0f}（<50），换入更强的候选", mode)
+                    if order:
+                        cash += order["qty"] * order["fill_price"] - order["fee"]
+                        if order["qty"] == pos["qty"]:
+                            held.discard(pos["code"])
         seed_t = not held and _row()["cfg"].get("mode") == "t_trade"
         limit = 1 if seed_t else (3 if mode == "attack" else 2)
-        cands = [p for p in picks if p.get("tier", "" if seed_t else "A") in tiers and p.get("eligible", True)]
-        if mode == "attack" and not cands and not seed_t:  # 普通进攻保留原有小仓试错
-            cands = [p for p in picks if (p.get("score") or 0) >= C_MIN_SCORE][:1]
+        cands = [p for p in picks if sim.tradable_pick(p)]
         bought, sk = 0, _size_k()
         for p in cands:
             if bought >= limit or len(held) >= rk["max_pos"]:
@@ -493,13 +488,19 @@ def tick() -> None:
                 _t_order(code, "buy", sold - back, f"做T低吸接回：{names}（价 {lv['price']}，低吸位 {lv['t_low']}）", p, mode)
 
 
-_scan = {"t": 0.0, "cands": []}
+_scan = {"t": 0.0}
 
 
-def _note_candidates(picks: list[dict]) -> None:
-    """记下最近一次选股的候选（盘中机会扫描用）。"""
-    _scan["cands"] = [{k: p.get(k) for k in ("code", "name", "score", "tier", "id")} for p in picks
-                      if (p.get("score") or 0) >= 60][:12]
+def _current_picks() -> list[dict]:
+    from . import pick_policy, research
+    run = db.q1("SELECT id FROM pick_runs WHERE date=? AND session IN ('auction','close') ORDER BY id DESC LIMIT 1",
+                (today(),))
+    if not run:
+        return []
+    report = research.for_runs([run["id"]]).get(run["id"]) or {}
+    if (report.get("selection") or {}).get("protocol") != pick_policy.VERSION:
+        return []
+    return db.q("SELECT id,code,name,score,tier FROM picks WHERE run_id=? AND tier='A' ORDER BY rank", (run["id"],))
 
 
 def _scan_entries(mode: str) -> None:
@@ -514,14 +515,9 @@ def _scan_entries(mode: str) -> None:
     eq, cash = v["equity"], v["cash"]
     if eq <= 0 or cash / eq < (0.3 if mode == "rotate" else 0.15) or len(v["positions"]) >= rk["max_pos"]:
         return
-    if not _scan["cands"]:
-        r = db.q1("SELECT id FROM pick_runs WHERE date=? ORDER BY id DESC LIMIT 1", (today(),))
-        if r:
-            _scan["cands"] = [dict(x) for x in db.q("SELECT id, code, name, score, tier FROM picks WHERE run_id=? AND score>=60 "
-                                                    "ORDER BY score DESC LIMIT 12", (r["id"],))]
     held = {p["code"] for p in v["positions"]}
     pend = {o["code"] for o in db.q("SELECT code FROM orders WHERE account=? AND status='pending'", (ACCT,))}
-    for c in [x for x in _scan["cands"] if x["code"] not in held and x["code"] not in pend][:8]:
+    for c in [x for x in _current_picks() if x["code"] not in held and x["code"] not in pend][:8]:
         try:
             sig = signals.plan(c["code"], "intra", acct=ACCT, save=False)
         except Exception:  # noqa: BLE001

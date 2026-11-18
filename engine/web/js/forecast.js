@@ -17,7 +17,7 @@
   const normalize=raw=>{const x=String(raw||'').trim().toLowerCase();return /^(sh|sz)\d{6}$/.test(x)?x:/^\d{6}$/.test(x)?(x[0]==='6'?'sh':'sz')+x:'';};
   const short=code=>String(code||'').replace(/^(sh|sz)/,'');
   const names=new Map(),requests=new Map();
-  let timer=null,searchTimer=null,currentCode='',currentTF='day',lastData={},lastOptions={};
+  let timer=null,searchTimer=null,expiryTimer=null,currentCode='',currentTF='day',lastData={},lastOptions={};
   let runtimeData=null;
   let loadSequence=0,searchSequence=0,requestSequence=0,suggestions=[],suggestionIndex=0,searchText='',composing=false;
   const symbolText=code=>(names.get(code)?names.get(code)+' ':'')+short(code);
@@ -37,6 +37,39 @@
     const symbols=Array.isArray(f.symbols)?f.symbols:Object.values(f.symbols||{});
     return [...new Set([...symbols,...(f.predictions||[]),...Object.values(f.structures||{}),...(f.coverage||[])].map(x=>normalize(x.code)).filter(Boolean))];
   }
+  const scenarioLabels={up:'偏上',range:'震荡',down:'偏下'};
+  function activeScenario(item,historical){
+    const p=item?.scenario,bar=item?.price_bars?.at(-1);
+    if(historical||item?.quality?.eligible!==true||p?.version!==1||p.status!=='ready'||p.timeframe!==item.timeframe
+      ||!bar||!finite(p.base_close)||p.base_close!==bar.close||!finite(p.low)||!finite(p.high)||!(p.low>0&&p.high>p.low)
+      ||!Object.hasOwn(scenarioLabels,p.primary)||p.base_high!==bar.high||p.base_low!==bar.low
+      ||!['center','stroke'].includes(p.reference_kind)||!Object.hasOwn(layers,p.reference_level))return null;
+    const source=timestamp(p.source_time),issued=timestamp(p.issued_at),due=timestamp(p.due_at);
+    if(source!==timestamp(bar.date)||!(source<=issued&&issued<=Date.now()&&Date.now()<due))return null;
+    return p;
+  }
+  function scenarioText(item,p,historical){
+    if(!p){
+      const reason=historical?'当前展示历史分析。':item?.quality?.eligible===false?'当前级别行情未通过校验。':
+        item?.scenario?.status==='expired'||timestamp(item?.scenario?.due_at)<=Date.now()?'上次推演已到期，重新分析可查看下一根。':
+        item?.scenario?.status==='no_reference'?'等待形成已确认的中枢或笔。':item?.scenario?.status==='calendar_unavailable'?'交易日历尚未确认下一根收盘时间。':'当前快照缺少可核对的推演，重新分析后查看。';
+      return `<p class="hint">本级别暂无有效走势推演。 ${reason}</p>`;
+    }
+    const lo=num(p.base_low),hi=num(p.base_high),close=num(p.base_close),ref=p.reference_kind==='center'?layers[p.reference_level]+'中枢':'最近一笔';
+    const rules={
+      up:[`预计收高，以收盘高于末收 ${close} 元验证。`,`收盘等于或低于 ${close} 元，偏上失效。低于末根低点 ${lo} 元转看下破。`],
+      range:[`预计收盘落在末根低高 ${lo}～${hi} 元之间，含两端。`,`收盘高于 ${hi} 元切换为上破，低于 ${lo} 元切换为下破。`],
+      down:[`预计收低，以收盘低于末收 ${close} 元验证。`,`收盘等于或高于 ${close} 元，偏下失效。高于末根高点 ${hi} 元转看上破。`]
+    };
+    const checkpoint=finite(p.checkpoint)?` 同方向最近的结构参考为 ${num(p.checkpoint)} 元，方向按末收核对。`:'';
+    const dir={up:'向上',down:'向下'},basis=[p.center_movement?moves[p.center_movement]:null,
+      '最近确认笔'+(dir[p.stroke_direction]||'待确认'),'最近确认线段'+(dir[p.segment_direction]||'待确认')].filter(Boolean);
+    return `<div class="fc-scenario"><b>下一根${levels[item.timeframe]} · ${scenarioLabels[p.primary]}</b>
+      <p><strong>主情景</strong>　${rules[p.primary][0]}${checkpoint}</p><p><strong>备选</strong>　${rules[p.primary][1]}</p>
+      <p class="hint">${esc(basis.join('，'))}。已确认的${ref}为 ${num(p.low)}～${num(p.high)} 元。
+      ${p.primary==='range'?'方向证据不足或相互冲突，先看震荡。':'已确认笔与较大结构方向一致。'}
+      ${esc(displayTime(p.issued_at))} 生成，至 ${esc(displayTime(p.due_at))} 用该根实际收盘核对。</p></div>`;
+  }
   function chart(item,historical=false){
     const s=item?.structures||{};
     const candles=item?.price_bars?.length>0;
@@ -46,8 +79,9 @@
     const H=W<600?300:388,left=6,right=W-51,top=9,axis=H-25;
     const maxVol=candles?Math.max(0,...bars.map(b=>finite(b.vol)?b.vol:0)):0;
     const bottom=axis-(maxVol?Math.round(H*.19):0);
+    const scenario=activeScenario(item,historical),futureWidth=scenario?Math.min(158,Math.round((right-left)*.25)):0,historyEnd=right-futureWidth;
     const low=Math.min(...bars.map(b=>b.low)),high=Math.max(...bars.map(b=>b.high));
-    const pad=(high-low||high*.02||1)*.09,range=high-low+2*pad,step=(right-left)/bars.length;
+    const pad=(high-low||high*.02||1)*.09,range=high-low+2*pad,step=(historyEnd-left)/bars.length;
     const x=i=>left+(i+.5)*step,y=p=>bottom-(p-low+pad)/range*(bottom-top);
     const dates=bars.map(b=>b.date||b.end||b.at||b.time||''),times=dates.map(timestamp);
     const label=i=>String(dates[i]).slice(0,currentTF==='day'?10:16).replace('T',' ');
@@ -66,7 +100,7 @@
       const price=low+k*(high-low)/4, py=y(price);
       svg+=`<text x="${right+5}" y="${py+4}" font-size="11" fill="var(--ch-axis)">${num(price)}</text><path d="M${left} ${py}H${right}" stroke="var(--ch-grid)"/>`;
     }
-    const ticks=Math.min(bars.length,Math.max(2,Math.floor((right-left)/(currentTF==='day'?75:90))));
+    const ticks=Math.min(bars.length,Math.max(2,Math.floor((historyEnd-left)/(currentTF==='day'?75:90))));
     for(let k=0;k<ticks;k++){
       const i=ticks===1?0:Math.round(k*(bars.length-1)/(ticks-1)),px=x(i);
       const anchor=k===0?'start':k===ticks-1?'end':'middle';
@@ -80,7 +114,7 @@
     for(const c of s.centers||[]){
       const low=c.low??c.ZD??c.low_price,high=c.high??c.ZG??c.high_price,start=timestamp(c.start),end=timestamp(c.end);
       if(!finite(low)||!finite(high)||!(start<=last&&end>=first))continue;
-      const x0=start<first?left:at(c.start),x1=end>last?right:at(c.end);
+      const x0=start<first?left:at(c.start),x1=end>last?historyEnd:at(c.end);
       const color=c.level==='segment'?'var(--fc-outer-color)':'var(--cyan)';
       svg+=`<rect x="${x0}" y="${y(high)}" width="${Math.max(2,x1-x0)}" height="${Math.max(1,y(low)-y(high))}" fill="${color}" fill-opacity=".1" stroke="${color}" stroke-dasharray="${dash(c)}"><title>${esc(layers[c.level]||'笔')}中枢 ${num(low)} – ${num(high)}</title></rect>`;
     }
@@ -123,12 +157,31 @@
       const color=p.side==='buy'?'var(--up)':'var(--down)',py=y(p.price);
       svg+=`<circle cx="${px}" cy="${py}" r="${p.level==='segment'?4:2.7}" fill="${color}"><title>${esc(pointLabel(p))} ${esc(layers[p.level]||'笔')} ${esc(displayTime(p.at))} ¥${num(p.price)}</title></circle>`;
     }
-    svg+=`</g><line id="fc-cursor" y1="${top}" y2="${axis}" stroke="var(--amber)" stroke-dasharray="3 3" visibility="hidden" pointer-events="none"/></svg>`;
+    svg+='</g>';
+    if(scenario){
+      const {primary,base_close,checkpoint}=scenario,x0=x(bars.length-1),end=right-4;
+      const color={up:'var(--up)',down:'var(--down)',range:'var(--amber)'}[primary];
+      const guide=primary==='up'?Math.min(checkpoint??scenario.base_high,scenario.base_high):
+        primary==='down'?Math.max(checkpoint??scenario.base_low,scenario.base_low):base_close;
+      const yStart=primary==='up'?top:y(primary==='range'?scenario.base_high:base_close);
+      const yEnd=primary==='down'?bottom:y(primary==='range'?scenario.base_low:base_close);
+      svg+=`<g class="fc-future" data-boundary="${historyEnd}">
+        <rect x="${historyEnd}" y="${yStart}" width="${futureWidth}" height="${Math.max(1,yEnd-yStart)}" fill="${color}" fill-opacity=".14"><title>主情景 · ${scenarioLabels[primary]}</title></rect>
+        <path d="M${historyEnd} ${top}V${axis}" stroke="var(--ch-axis)" stroke-dasharray="3 3"/>
+        <text x="${historyEnd+4}" y="${top+13}" font-size="11" fill="${color}">${{up:'↑ 偏上',down:'↓ 偏下',range:'↔ 震荡'}[primary]}</text>
+        <text x="${(right+historyEnd)/2}" y="${axis+18}" text-anchor="middle" font-size="11" fill="var(--ch-text)">下一根</text>`;
+      for(const level of primary==='up'?[scenario.base_low]:primary==='down'?[scenario.base_high]:[scenario.base_high,scenario.base_low]){
+        svg+=`<path class="fc-alternative" d="M${x0} ${y(base_close)}L${end} ${y(level)}" fill="none" stroke="var(--ch-axis)" stroke-width="1.4" stroke-dasharray="2 4"><title>备选观察价 ${num(level)} 元</title></path>`;
+      }
+      if(primary!=='range')svg+=`<path d="M${historyEnd} ${y(base_close)}H${right}" stroke="var(--ch-axis)" stroke-dasharray="2 3"><title>方向核对基准 · 末收 ${num(base_close)} 元</title></path>`;
+      svg+=`<path class="fc-primary" d="M${x0} ${y(base_close)}L${end} ${y(guide)}" fill="none" stroke="${color}" stroke-width="2.2" stroke-dasharray="7 3"><title>主情景 · ${scenarioLabels[primary]} · 参考价 ${num(guide)}</title></path></g>`;
+    }
+    svg+=`<line id="fc-cursor" y1="${top}" y2="${axis}" stroke="var(--amber)" stroke-dasharray="3 3" visibility="hidden" pointer-events="none"/></svg>`;
     return `<div class="row hint fc-legend"><label><input type="checkbox" id="fc-show-structure" checked> 缠论标记</label>
       <span class="fc-pen">橙线 · 笔（连接相邻转折）</span><span class="fc-segment">蓝线 · 线段，蓝框 · 笔中枢</span>
       <span class="fc-outer">紫色 · 更高层结构</span><span>△ 分型 · 虚线待确认 · ● 已确认买卖点</span></div>
       <div id="fc-ohlc" class="mono">${esc(quoteLine(bars.at(-1),bars.length-1))}</div>${svg}
-      <div class="hint">${candles?'已完成K线':'合并K线区间'} · 矩形框表示价格反复重叠的区间</div>`;
+      <div class="hint">${scenario?'竖线右侧为条件推演 · 色带是主情景收盘区域，长虚线示意方向，点线指向备选观察价位。':candles?'已完成K线':'合并K线区间'}</div>${scenarioText(item,scenario,historical)}`;
   }
   function structureSummary(f,code){
     const selected=f.structures?.[code+':'+currentTF],supplied=(!f.symbol?.code||normalize(f.symbol.code)===code)?f.summary:null;
@@ -186,8 +239,11 @@
     const selected=f.structures?.[currentCode+':'+currentTF],summary=structureSummary(f,currentCode),request=requests.get(currentCode),historical=!!f.analysis_fallback;
     const rows=(f.predictions||[]).filter(r=>r.code===currentCode&&r.variant==='fusion'),latest=new Map();
     for(const row of rows)if(!latest.has(row.horizon)||timestamp(row.asof)>timestamp(latest.get(row.horizon).asof))latest.set(row.horizon,row);
-    const probabilities=[...latest.values()].filter(r=>r.validated&&finite(r.probability)),updated=summary.updated||selected?.asof;
-    const age=Date.now()-timestamp(updated),stale=Number.isFinite(age)&&age>900000;
+    const probabilities=historical||summary.quality?.eligible===false?[]:Object.keys(horizons).map(h=>latest.get(h)).filter(r=>
+      r?.validated&&r.quality?.eligible!==false&&finite(r.probability)&&r.probability>=0&&r.probability<=1&&
+      timestamp(r.asof)<=Date.now()&&Date.now()<timestamp(r.due_at));
+    const updated=summary.updated||selected?.asof;
+    const age=Date.now()-timestamp(updated),stale=Number.isFinite(age)&&age>900000&&!activeScenario(selected,historical);
     const quick=options.requestAnalysis&&options.requestForecast?'<button class="btn" id="fc-quick" type="button">缠论速览</button>':'';
     const search=`<div class="row fc-search-row"><label class="fc-search"><span class="hint">股票名称或代码</span><span class="fc-input-wrap"><input class="in" id="fc-query" type="search" value="${esc(searchText||symbolText(currentCode))}" placeholder="输入名称 / 代码，如 浦发银行 或 600000" autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="fc-suggestions"><span class="suggest" id="fc-suggestions" role="listbox"></span></span></label><div class="row"><button class="btn pri" id="fc-analyze" type="button" ${options.requestAnalysis?'title="查看缠论、量价、资金与策略"':''}>分析</button>${quick}</div></div><div id="fc-search-message" class="hint" role="status" aria-live="polite"></div>`;
     const header=panel('个股分析',search,'<button class="btn sm" id="fc-refresh" title="读取当前分析结果">刷新</button>');
@@ -209,8 +265,7 @@
       ${stale?'<p class="fc-notice">以下为上次结构分析，行情可能已变化。点击“分析”请求更新。</p>':''}${historical?qualityNotes(f):''}`;
     else analysis=`${reportLine}<div class="empty">${request?.status==='queued'||request?.status==='requesting'?'正在等待这只股票的云端分析。':report?'这份报告暂无缠论快照。':'这只股票尚无缓存分析，点击“分析”发起请求。'}</div>`;
     const toolbar=`<div class="seg" id="fc-tf" role="group" aria-label="结构图周期">${Object.entries(levels).map(([key,label])=>`<button type="button" data-level="${key}" class="${key===currentTF?'on':''}" aria-pressed="${key===currentTF}">${label}</button>`).join('')}</div>`;
-    const visible=historical||summary.quality?.eligible===false?[]:Object.keys(horizons).map(h=>latest.get(h)).filter(r=>r&&r.validated&&finite(r.probability));
-    const predictions=visible.length?table(visible,['预测期限','上涨概率','收益区间'],r=>`<tr><td>${esc(horizons[r.horizon])}</td><td>${pct(r.probability)}</td><td>${pct(r.quantiles?.p10)} ～ ${pct(r.quantiles?.p90)}</td></tr>`,'fc-forecast-table'):'<p class="hint">概率尚未验证，暂不显示上涨概率和收益区间。当前可先查看真实行情形成的结构与走势解读。</p>';
+    const predictions=probabilities.length?table(probabilities,['预测期限','上涨概率','收益区间'],r=>`<tr><td>${esc(horizons[r.horizon])}</td><td>${pct(r.probability)}</td><td>${pct(r.quantiles?.p10)} ～ ${pct(r.quantiles?.p90)}</td></tr>`,'fc-forecast-table'):'<p class="hint">当前没有处于有效期内的已验证概率预测。</p>';
     const structure=summary.available||selected?panel(historical?'上次已验证结构':'缠论结构图',
       `<div class="fc-chart">${chart(selected,historical)}</div>${evidence(selected,historical||stale)}`,toolbar):'';
     return `<div class="fc-shell">${header}${notice}${panel(title,analysis,reportLink)}${structure}${summary.available?panel('长短周期预测',predictions)+diagnostics(f,options):''}</div>`;
@@ -222,6 +277,12 @@
     if(editing&&composing)return;
     root.innerHTML=draw(lastData,options);
     bind(root,options);
+    clearTimeout(expiryTimer);
+    const now=Date.now(),frame=lastData.structures?.[currentCode+':'+currentTF];
+    const deadlines=[activeScenario(frame,!!lastData.analysis_fallback)?.due_at,
+      ...(lastData.predictions||[]).filter(r=>r.code===currentCode&&r.variant==='fusion'&&r.validated).map(r=>r.due_at)];
+    const delay=Math.min(...deadlines.map(d=>timestamp(d)-now).filter(d=>d>0));
+    if(delay<=2147483647)expiryTimer=setTimeout(()=>{if(visible(options))paint(options);},delay);
     if(editing){
       const input=root.querySelector('#fc-query');
       input.focus({preventScroll:true});
@@ -315,7 +376,7 @@
       const latest=quote.textContent;
       plot.onpointermove=plot.onpointerdown=e=>{
         const bar=e.target.closest('[data-fc-bar]');
-        if(!bar)return;
+        if(!bar){quote.textContent=latest;cursor.setAttribute('visibility','hidden');return;}
         quote.textContent=bar.dataset.fcBar;
         cursor.setAttribute('x1',bar.dataset.x);cursor.setAttribute('x2',bar.dataset.x);
         cursor.setAttribute('visibility','visible');
